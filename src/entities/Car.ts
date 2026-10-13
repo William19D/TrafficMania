@@ -1,4 +1,4 @@
-import { CAR_LEN, GAP, NODE_R } from '../network/RoadGraph.ts';
+import { CAR_LEN, GAP, NODE_R, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node } from '../network/RoadGraph.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { City } from './City.ts';
@@ -12,6 +12,10 @@ export class Car {
   granted: Node | null = null;
   clearing: Node | null = null;
   queued = false;
+  // Node before lane.from (the approach we came from), for the roundabout ring animation
+  prev: Node | null = null;
+  // Lateral offset of the previous lane, to blend the lane change at the node
+  prevOffset = 0;
 
   constructor(public lane: Lane, public dest: City) {}
 
@@ -35,8 +39,9 @@ export class Car {
     if (!isDest && this.path) {
       const next = this.path[1];
       const e = next ? graph.edgeBetween(node, next) : null;
-      if (e) nextLane = graph.laneFrom(e, node);
-      else this.path = null;
+      nextLane = e ? graph.pickLane(e, node) : null;
+      // missing edge or now one-way against: recompute the route next tick
+      if (!nextLane) this.path = null;
     }
 
     // Free distance to the car ahead
@@ -50,7 +55,7 @@ export class Car {
     const needs = !isDest && graph.needsControl(node);
     if (needs && this.granted !== node) {
       if (remaining < 70 && !this.queued) { node.queue.push(this); this.queued = true; }
-      gap = Math.min(gap, remaining - NODE_R - 3);
+      gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);
     }
@@ -73,6 +78,8 @@ export class Car {
     if (first) ns = Math.min(ns, Math.max(0, first.s - CAR_LEN - GAP));
     lane.cars.splice(idx, 1);
     nextLane.cars.unshift(this);
+    this.prev = lane.from;
+    this.prevOffset = lane.offset;
     this.lane = nextLane;
     this.s = ns;
     this.queued = false;

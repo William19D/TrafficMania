@@ -46,7 +46,9 @@ Requires Node.js 18 or newer.
 
 | Action | Mouse | Keyboard |
 |---|---|---|
-| Select tool | Click a button in the dock | `1` Road · `2` Traffic light · `3` Roundabout · `4` Demolish |
+| Select tool | Click a button in the dock | `1` Road · `2` Traffic light · `3` Roundabout · `4` Edit · `5` Demolish |
+| Road type | Lanes `1` / `2` / `3` per direction and **One-way** in the dock | applies to new roads, or to the selected road in Edit |
+| Edit a road | `4`, then click a road to select it; drag a road to bend it | the picker retypes the selection; **Flip** reverses a one-way road |
 | Place a road | Click the start point, click the end point | `Esc` cancels |
 | Bend a road | Hold the button on the end point and drag | |
 | Change road elevation | `−` / `+` in the dock | `PageDown` / `PageUp` |
@@ -99,6 +101,9 @@ An interactive, eight-step tutorial starts on the first launch and can be replay
 - **Procedural maps.** Rivers, lakes, mountains, sand and grass patches, tree clusters and city names are generated for every game.
 - **Overcrowding pressure.** Cars waiting without a route pile up around their city. A red ring fills while the city is overcrowded; if it completes, the game is over.
 - **Demolish with refunds.** Removing a road returns its asphalt, bridges and tunnels to your inventory.
+- **Road types.** 1, 2 or 3 lanes per direction (cars pick the emptiest lane) and one-way roads at half price. Asphalt scales with the number of lanes.
+- **Edit tool.** Select a road to change its lanes or direction, or drag it to bend it; cars on it keep their place.
+- **Roundabouts** animate cars around the ring, off-screen overcrowded cities get an edge marker (click the warning chip to jump there), and the camera stays inside the map.
 
 ## Architecture
 

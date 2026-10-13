@@ -4,7 +4,20 @@ import type { City } from '../entities/City.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Car } from '../entities/Car.ts';
 
-export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 12, CAR_W = 7, GAP = 5, LIGHT_PERIOD = 5;
+export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5, LIGHT_PERIOD = 5;
+// Roundabout ring (centre line radius) and where an approach lane meets it
+export const RING_R = NODE_R + 5, RING_IN = Math.sqrt(RING_R * RING_R - LANE_OFFSET * LANE_OFFSET);
+// Where a car stops before a junction (distance from the node): outside the ring on roundabouts
+export const stopDist = (n: Node): number => n.control === 'roundabout' ? RING_R + ROAD_W / 2 + 4 : NODE_R + 3;
+
+// Road types: lanes PER DIRECTION; a one-way road only has lanes a->b
+export const LANE_W = 9;
+export interface RoadType { lanes: 1 | 2 | 3; oneWay: boolean }
+export const DEFAULT_TYPE: RoadType = { lanes: 1, oneWay: false };
+export const roadWidth = (t: RoadType): number => t.lanes * (t.oneWay ? 1 : 2) * LANE_W;
+// Asphalt multiplier per tile (today's two-way 1-lane road = 1)
+export const laneFactor = (t: RoadType): number => (t.lanes * (t.oneWay ? 1 : 2)) / 2;
+export const sameType = (a: RoadType, b: RoadType): boolean => a.lanes === b.lanes && a.oneWay === b.oneWay;
 
 export type Control = 'none' | 'light' | 'roundabout';
 
@@ -14,14 +27,15 @@ export interface Node {
 }
 
 // INVARIANT: cars sorted ascending by s; the last one is the furthest ahead.
-export interface Lane { edge: Edge; from: Node; to: Node; cars: Car[] }
+// offset: lateral px to the right of travel
+export interface Lane { edge: Edge; from: Node; to: Node; cars: Car[]; offset: number }
 
 export interface Edge {
-  id: number; a: Node; b: Node; length: number; lanes: [Lane, Lane];
+  id: number; a: Node; b: Node; length: number; lanes: Lane[]; type: RoadType; width: number;
   bridge: boolean; tunnel: boolean; level: number; refund: { bridges: number; tunnels: number };
 }
 
-export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number }
+export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType }
 
 // Traffic light phase group: opposite approaches share a group
 export function lightGroup(n: Node, e: Edge): number {
@@ -33,6 +47,8 @@ export function lightGroup(n: Node, e: Edge): number {
 export class RoadGraph {
   nodes: Node[] = [];
   edges: Edge[] = [];
+  // Edges ignored by snapping / crossings / edgeBetween; only set while planning a bend
+  hidden: Set<Edge> = new Set();
   private nextId = 1;
 
   addNode(x: number, y: number, city: City | null = null): Node {
@@ -48,11 +64,23 @@ export class RoadGraph {
       bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level,
       refund: refund ?? { bridges: flags.bridge ? 1 : 0, tunnels: flags.tunnel ? 1 : 0 },
     } as Edge;
-    e.lanes = [{ edge: e, from: a, to: b, cars: [] }, { edge: e, from: b, to: a, cars: [] }];
+    this.buildLanes(e, flags.type);
     a.edges.push(e);
     b.edges.push(e);
     this.edges.push(e);
     return e;
+  }
+
+  // Two-way: lane k sits (k + 0.5) lanes right of the centre line; one-way: lanes centred on the axis
+  private buildLanes(e: Edge, t: RoadType): void {
+    e.type = { ...t };
+    e.width = roadWidth(t);
+    e.lanes = [];
+    const lane = (from: Node, to: Node, offset: number): Lane => ({ edge: e, from, to, cars: [], offset });
+    for (let k = 0; k < t.lanes; k++) {
+      if (t.oneWay) e.lanes.push(lane(e.a, e.b, (k - (t.lanes - 1) / 2) * LANE_W));
+      else e.lanes.push(lane(e.a, e.b, (k + 0.5) * LANE_W), lane(e.b, e.a, (k + 0.5) * LANE_W));
+    }
   }
 
   // Unlinks the edge without deleting nodes
@@ -70,19 +98,24 @@ export class RoadGraph {
     this.unlink(e);
     this.dropIfOrphan(e.a);
     this.dropIfOrphan(e.b);
-    return [...e.lanes[0].cars, ...e.lanes[1].cars];
+    return e.lanes.flatMap(l => l.cars);
   }
 
   splitEdge(e: Edge, p: Vec): Node {
     const { a, b } = e;
-    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level };
+    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type };
     const n = this.addNode(p.x, p.y);
     this.unlink(e);
     const e1 = this.addEdge(a, n, flags, e.refund);
     const e2 = this.addEdge(n, b, flags, { bridges: 0, tunnels: 0 });
     // Distributes the cars keeping ascending order (iterated from lowest to highest s)
-    const move = (cars: Car[], first: Lane, second: Lane, cut: number) => {
-      for (const c of cars) {
+    const move = (old: Lane) => {
+      const k = this.lanesFrom(e, old.from).indexOf(old);
+      const fwd = old.from === a;
+      const first = this.lanesFrom(fwd ? e1 : e2, old.from)[k];
+      const second = this.lanesFrom(fwd ? e2 : e1, n)[k];
+      const cut = fwd ? e1.length : e2.length;
+      for (const c of old.cars) {
         if (c.s < cut) {
           // Now heading to the new node: release turn/queue of the old destination
           const old = second.to;
@@ -93,31 +126,111 @@ export class RoadGraph {
         else { c.s -= cut; second.cars.push(c); c.lane = second; }
         c.path = null;
       }
+      old.cars = [];
     };
-    move(e.lanes[0].cars, e1.lanes[0], e2.lanes[0], e1.length);  // a->b: a->N then N->b
-    move(e.lanes[1].cars, e2.lanes[1], e1.lanes[1], e2.length);  // b->a: b->N then N->a
-    e.lanes[0].cars = [];
-    e.lanes[1].cars = [];
+    for (const l of e.lanes) move(l);
     return n;
   }
 
+  // Re-types one edge in place; forward=false makes b->a the travel direction (swaps a/b).
+  // Cars keep their direction and s; cars whose direction no longer exists are detached and returned.
+  setEdgeType(e: Edge, type: RoadType, forward: boolean): Car[] {
+    const old = e.lanes;
+    if (!forward) [e.a, e.b] = [e.b, e.a];
+    this.buildLanes(e, type);
+    const lost: Car[] = [];
+    for (const l of old) {
+      const k = old.filter(x => x.from === l.from).indexOf(l);
+      for (const c of l.cars) {
+        const nl = this.lanesFrom(e, l.from)[k] ?? this.pickLane(e, l.from);
+        if (!nl) { lost.push(c); continue; }
+        c.lane = nl;
+        nl.cars.push(c);
+      }
+    }
+    for (const l of e.lanes) l.cars.sort((p, q) => p.s - q.s);
+    for (const c of lost) this.detachCar(c);
+    return lost;
+  }
+
+  // Maximal chain of edges through e between cities / junctions / controlled nodes / dead ends.
+  // edges[i] joins nodes[i] and nodes[i+1].
+  runOf(e: Edge): { edges: Edge[]; nodes: Node[] } {
+    const inner = (n: Node) => !n.city && n.edges.length === 2 && n.control === 'none';
+    const other = (x: Edge, n: Node) => x.a === n ? x.b : x.a;
+    const step = (x: Edge, n: Node) => n.edges[0] === x ? n.edges[1] : n.edges[0];
+    let n = e.a, cur = e;
+    while (inner(n) && step(cur, n) !== e) { cur = step(cur, n); n = other(cur, n); }
+    const edges = [cur], nodes = [n, other(cur, n)];
+    for (let m = nodes[1]; inner(m) && step(cur, m) !== edges[0];) {
+      cur = step(cur, m);
+      m = other(cur, m);
+      edges.push(cur);
+      nodes.push(m);
+    }
+    return { edges, nodes };
+  }
+
   edgeBetween(a: Node, b: Node): Edge | null {
-    return a.edges.find(e => (e.a === a && e.b === b) || (e.a === b && e.b === a)) ?? null;
+    return a.edges.find(e => !this.hidden.has(e) && ((e.a === a && e.b === b) || (e.a === b && e.b === a))) ?? null;
   }
 
-  laneFrom(e: Edge, from: Node): Lane {
-    return e.a === from ? e.lanes[0] : e.lanes[1];
+  // Lanes travelling away from 'from'; [] when the road is one-way against
+  lanesFrom(e: Edge, from: Node): Lane[] {
+    return e.lanes.filter(l => l.from === from);
   }
 
-  lanePos(lane: Lane, s: number): { x: number; y: number; angle: number } {
+  // Lane with the most room at its start
+  pickLane(e: Edge, from: Node): Lane | null {
+    let best: Lane | null = null, room = -1;
+    for (const l of this.lanesFrom(e, from)) {
+      const r = l.cars[0]?.s ?? Infinity;
+      if (r > room) { best = l; room = r; }
+    }
+    return best;
+  }
+
+  lanePos(lane: Lane, s: number, offset = lane.offset): { x: number; y: number; angle: number } {
     const dx = lane.to.x - lane.from.x, dy = lane.to.y - lane.from.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
     return {
-      x: lane.from.x + ux * s - uy * LANE_OFFSET,
-      y: lane.from.y + uy * s + ux * LANE_OFFSET,
+      x: lane.from.x + ux * s - uy * offset,
+      y: lane.from.y + uy * s + ux * offset,
       angle: Math.atan2(uy, ux),
     };
+  }
+
+  // Render position of a car: on the roundabout ring while crossing one, else along its lane.
+  // At plain nodes the lateral offset blends halfway toward the next / from the previous lane.
+  carPos(c: Car): { x: number; y: number; angle: number } {
+    const lane = c.lane, remaining = lane.edge.length - c.s;
+    const next = c.path?.[1];
+    if (lane.to.control === 'roundabout' && remaining < RING_IN && next) return this.ringPos(lane.to, lane.from, next, RING_IN - remaining);
+    if (lane.from.control === 'roundabout' && c.s < RING_IN && c.prev) return this.ringPos(lane.from, c.prev, lane.to, RING_IN + c.s);
+    const B = 2 * NODE_R;
+    let off = lane.offset;
+    if (next && remaining < B && lane.to.control !== 'roundabout') {
+      const e = this.edgeBetween(lane.to, next);
+      const nl = e && this.pickLane(e, lane.to);
+      if (nl) off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
+    }
+    if (c.prev && c.s < B && lane.from.control !== 'roundabout') off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
+    // roundabouts: the ring is a single lane at LANE_OFFSET, so outer lanes slide inward before entering / after leaving it
+    if (lane.to.control === 'roundabout' && remaining < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - RING_IN) / B);
+    if (lane.from.control === 'roundabout' && c.s < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (c.s - RING_IN) / B);
+    return this.lanePos(lane, c.s, off);
+  }
+
+  // Counter-clockwise (on screen) around n from the 'from' approach to the 'to' exit; p = straight-line progress 0..2*RING_IN
+  private ringPos(n: Node, from: Node, to: Node, p: number): { x: number; y: number; angle: number } {
+    const d = Math.asin(LANE_OFFSET / RING_R);
+    const a = Math.atan2(from.y - n.y, from.x - n.x) - d;
+    const b = Math.atan2(to.y - n.y, to.x - n.x) + d;
+    let arc = (a - b) % (Math.PI * 2);
+    if (arc <= 0) arc += Math.PI * 2;
+    const ang = a - arc * (p / (2 * RING_IN));
+    return { x: n.x + Math.cos(ang) * RING_R, y: n.y + Math.sin(ang) * RING_R, angle: ang - Math.PI / 2 };
   }
 
   // A node can take a road of this level: cities and bare nodes always, otherwise it needs an edge of that level.
@@ -129,6 +242,7 @@ export class RoadGraph {
     let best: Node | null = null, bestD = Infinity;
     for (const n of this.nodes) {
       if (level !== undefined && !this.nodeLevelOk(n, level)) continue;
+      if (!n.city && n.edges.length && n.edges.every(e => this.hidden.has(e))) continue;
       const d = dist(p, n);
       if (d <= (n.city ? CITY_R : r) && d < bestD) { best = n; bestD = d; }
     }
@@ -138,9 +252,10 @@ export class RoadGraph {
   nearestEdge(p: Vec, r: number, level?: number): { edge: Edge; point: Vec; t: number } | null {
     let best: { edge: Edge; point: Vec; t: number } | null = null, bestD = Infinity;
     for (const e of this.edges) {
-      if (level !== undefined && e.level !== level) continue;
+      if ((level !== undefined && e.level !== level) || this.hidden.has(e)) continue;
       const h = distToSegment(p, e.a, e.b);
-      if (h.d <= r && h.d < bestD) { best = { edge: e, point: h.point, t: h.t }; bestD = h.d; }
+      // ponytail: wider roads widen the hit radius; default roads keep r exactly
+      if (h.d <= r + Math.max(0, (e.width - ROAD_W) / 2) && h.d < bestD) { best = { edge: e, point: h.point, t: h.t }; bestD = h.d; }
     }
     return best;
   }
@@ -148,7 +263,7 @@ export class RoadGraph {
   crossings(a: Vec, b: Vec, excludeNodes: Set<Node>, excludeEdges: Set<Edge>, level: number): { edge: Edge; point: Vec; t: number; node: Node | null }[] {
     const out: { edge: Edge; point: Vec; t: number; node: Node | null }[] = [];
     for (const e of this.edges) {
-      if (e.level !== level || excludeEdges.has(e) || excludeNodes.has(e.a) || excludeNodes.has(e.b)) continue;
+      if (e.level !== level || excludeEdges.has(e) || this.hidden.has(e) || excludeNodes.has(e.a) || excludeNodes.has(e.b)) continue;
       const x = segmentsCross(a, b, e.a, e.b);
       if (!x) continue;
       const point = { x: a.x + (b.x - a.x) * x.t, y: a.y + (b.y - a.y) * x.t };

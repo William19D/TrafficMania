@@ -1,8 +1,8 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
-import { ROAD_W, NODE_R, CAR_LEN, CAR_W, TILE, lightGroup } from '../network/RoadGraph.ts';
-import type { Edge, Node } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, CAR_LEN, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
+import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 
@@ -47,6 +47,35 @@ export class CanvasRenderer {
     this.canvas.height = Math.round(innerHeight * dpr);
     this.canvas.style.width = innerWidth + 'px';
     this.canvas.style.height = innerHeight + 'px';
+    this.clamp();
+  }
+
+  // Smallest zoom: the whole world fits on screen (a bit of margin)
+  get minZoom(): number {
+    return Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * 0.9;
+  }
+
+  // Keeps the zoom in range and the world on screen (at most MARGIN of empty land past its border)
+  private clamp(): void {
+    const MARGIN = 120;
+    this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom));
+    const hw = innerWidth / 2 / this.cam.zoom, hh = innerHeight / 2 / this.cam.zoom;
+    const axis = (v: number, size: number, half: number): number =>
+      half - MARGIN > size - half + MARGIN ? size / 2 : Math.max(half - MARGIN, Math.min(size - half + MARGIN, v));
+    this.cam.x = axis(this.cam.x, WORLD.w, hw);
+    this.cam.y = axis(this.cam.y, WORLD.h, hh);
+  }
+
+  centerOn(p: Vec): void {
+    this.cam.x = p.x;
+    this.cam.y = p.y;
+    this.cam.zoom = Math.max(this.cam.zoom, 1);
+    this.clamp();
+  }
+
+  worldToScreen(p: Vec): Vec {
+    const z = this.cam.zoom;
+    return { x: (p.x - this.cam.x) * z + innerWidth / 2, y: (p.y - this.cam.y) * z + innerHeight / 2 };
   }
 
   screenToWorld(sx: number, sy: number): Vec {
@@ -57,15 +86,17 @@ export class CanvasRenderer {
   pan(dxScreen: number, dyScreen: number): void {
     this.cam.x -= dxScreen / this.cam.zoom;
     this.cam.y -= dyScreen / this.cam.zoom;
+    this.clamp();
   }
 
   zoomAt(sx: number, sy: number, factor: number): void {
     // Keeps the world point under the cursor fixed
     const before = this.screenToWorld(sx, sy);
-    this.cam.zoom = Math.max(0.3, Math.min(3, this.cam.zoom * factor));
+    this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom * factor));
     const after = this.screenToWorld(sx, sy);
     this.cam.x += before.x - after.x;
     this.cam.y += before.y - after.y;
+    this.clamp();
   }
 
   render(game: Game, preview: PathPlan | null, anchor: Vec | null, handle: Vec | null, hover: Vec | null = null): void {
@@ -173,28 +204,37 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
       // portals only where the tunnel run ends, not at the joints inside a curved tunnel
       const inner = (n: Node): boolean => n.edges.length === 2 && n.edges.every((x) => x.tunnel);
-      if (!inner(e.a)) this.portal(e.a, e.b);
-      if (!inner(e.b)) this.portal(e.b, e.a);
+      if (!inner(e.a)) this.portal(e.a, e.b, e.width);
+      if (!inner(e.b)) this.portal(e.b, e.a, e.width);
     }
 
+    // Selected run (Edit tool): soft accent halo under the road of its level
+    const halo = (L: number): void => {
+      if (!game.selected) return;
+      ctx.globalAlpha = 0.35;
+      this.runPath(game.selected.filter(e => e.level === L), ACCENT);
+      ctx.globalAlpha = 1;
+    };
+    halo(0);
+
     // Bridges: pillars, deck, cross ticks and railings (white fill comes later)
-    for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain);
+    for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain, e.width);
 
     // A single white ribbon: full outline pass, then fill pass
     const joints = nodes.filter((n) => !n.city && n.edges.some((e) => !e.tunnel && e.level === 0));
     const pass = (color: string, extra: number): void => {
       // Bridges keep their blue deck as the outline
-      for (const e of ground) if (!(extra && e.bridge)) this.line(e, color, ROAD_W + extra);
+      for (const e of ground) if (!(extra && e.bridge)) this.line(e, color, e.width + extra);
       for (const n of joints) {
         if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, (ROAD_W + extra) / 2, color);
+        else this.circle(n.x, n.y, (jointW(n, 0) + extra) / 2, color);
       }
     };
     pass(ROAD_OUT, 3);
     pass(ROAD_FILL, 0);
 
-    // Continuous yellow center line
-    for (const e of ground) this.line(e, YELLOW, 1.2);
+    // Lane markings: yellow centre line, lane separators, one-way chevrons
+    for (const e of ground) this.markings(e.a, e.b, e.type);
 
     this.controls(levelNodes(0));
     carsAt(0);
@@ -205,6 +245,7 @@ export class CanvasRenderer {
       const layer = edges.filter((e) => e.level === L);
       if (!layer.length) continue;
       const nodesL = levelNodes(L);
+      halo(L);
       this.viaduct(L, layer, nodesL);
       this.controls(nodesL);
       carsAt(L);
@@ -280,46 +321,52 @@ export class CanvasRenderer {
     // Build preview: polyline of segments
     if (preview && preview.segs.length) {
       const segs = preview.segs;
+      const W = roadWidth(preview.type);
       const draw = (g: PathSeg, color: string, width: number): void => this.seg(g.a, g.b, color, width);
       // Colored dashed outline: wider so it peeks out behind the gray outline
       ctx.setLineDash([8, 6]);
-      for (const g of segs) draw(g, preview.ok ? GREEN : RED, ROAD_W + 7);
+      for (const g of segs) draw(g, preview.ok ? GREEN : RED, W + 7);
       ctx.setLineDash([]);
       ctx.globalAlpha = 0.85;
       for (const g of segs) {
         if (g.tunnel) {
           ctx.setLineDash([6, 6]);
-          draw(g, ROAD_OUT, ROAD_W + 3);
+          draw(g, ROAD_OUT, W + 3);
           ctx.setLineDash([]);
         } else if (g.level >= 1) {
-          draw(g, BRIDGE, ROAD_W + 5);
+          draw(g, BRIDGE, W + 5);
         } else if (g.bridge) {
-          this.bridge(g.a, g.b, terrain);
+          this.bridge(g.a, g.b, terrain, W);
         } else {
-          draw(g, ROAD_OUT, ROAD_W + 3);
+          draw(g, ROAD_OUT, W + 3);
         }
       }
       for (const g of segs) {
         if (g.tunnel) ctx.setLineDash([6, 6]);
-        draw(g, ROAD_FILL, ROAD_W);
+        draw(g, ROAD_FILL, W);
         ctx.setLineDash([]);
       }
-      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b);
+      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W);
+      for (const g of segs) if (!g.tunnel) this.markings(g.a, g.b, preview.type);
       ctx.globalAlpha = 1;
 
       let label = preview.reason;
-      if (preview.ok) {
+      if (preview.ok && preview.net !== undefined) {
+        // Bend: price of the new curve minus the refund of the old run
+        const n = preview.net;
+        label = n > 0 ? `${n} asphalt` : n < 0 ? `+${-n} asphalt back` : 'free';
+      } else if (preview.ok) {
         label = `${preview.cost.asphalt} asphalt`;
         if (preview.cost.bridges) label += ` +${preview.cost.bridges} bridge${preview.cost.bridges > 1 ? 's' : ''}`;
         if (preview.cost.tunnels) label += ` +${preview.cost.tunnels} tunnel${preview.cost.tunnels > 1 ? 's' : ''}`;
       }
-      if (label && game.level > 0) label += ' · L' + game.level;
+      if (label && preview.level > 0) label += ' · L' + preview.level;
       const last = preview.points[preview.points.length - 1] ?? segs[segs.length - 1].b;
       if (handle) {
-        // Bend handle with dashed guides from the anchor and to the end point
+        // Bend handle with dashed guides from the anchor (or the bent run's start) and to the end point
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
-        const from = anchor ?? handle;
+        const from = anchor ?? preview.points[0] ?? handle;
         ctx.moveTo(from.x, from.y);
         ctx.lineTo(handle.x, handle.y);
         ctx.lineTo(last.x, last.y);
@@ -352,6 +399,55 @@ export class CanvasRenderer {
         this.text('Overcrowded!', c.x, c.y - CITY_R - 20, 'bold 12px system-ui', RED);
       }
     }
+
+    this.offscreenMarkers(game, dpr);
+  }
+
+  // Screen-edge markers for overcrowded cities outside the view: arrow in the city colour, red progress ring, name
+  private offscreenMarkers(game: Game, dpr: number): void {
+    const ctx = this.ctx;
+    // ponytail: fixed insets for the HUD bars (top chips, bottom dock); measure the DOM if the layout changes
+    const T = 70, B = 110, X = 24, R = 16;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    for (const c of game.cities) {
+      if (c.overcrowd <= 0) continue;
+      const s = this.worldToScreen(c);
+      if (s.x > X && s.x < innerWidth - X && s.y > T && s.y < innerHeight - B) continue;
+      const x = Math.max(X + R, Math.min(innerWidth - X - R, s.x));
+      const y = Math.max(T + R, Math.min(innerHeight - B - R, s.y));
+      const a = Math.atan2(s.y - y, s.x - x);
+      ctx.save();
+      ctx.translate(x, y);
+      // pulsing red ring = overcrowding progress
+      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(performance.now() / 150);
+      this.circle(0, 0, R + 1, '#FFFFFF');
+      ctx.beginPath();
+      ctx.arc(0, 0, R + 1, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * c.overcrowd);
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.roundRect(-8, -8, 16, 16, 4);
+      ctx.fillStyle = c.color;
+      ctx.fill();
+      ctx.strokeStyle = darken(c.color, 0.25);
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // arrow head pointing at the city
+      ctx.rotate(a);
+      ctx.beginPath();
+      ctx.moveTo(R + 12, 0);
+      ctx.lineTo(R + 3, -6);
+      ctx.lineTo(R + 3, 6);
+      ctx.closePath();
+      ctx.fillStyle = RED;
+      ctx.fill();
+      ctx.restore();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = y > innerHeight / 2 ? 'bottom' : 'top';
+      this.text(c.name, x, y > innerHeight / 2 ? y - R - 4 : y + R + 4, 'bold 11px system-ui', RED);
+    }
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
@@ -374,11 +470,11 @@ export class CanvasRenderer {
       const e = hit.edge;
       ctx.lineCap = 'round';
       ctx.globalAlpha = 0.6;
-      this.line(e, RED, ROAD_W + 6);
+      this.line(e, RED, e.width + 6);
       ctx.globalAlpha = 1;
-      this.line(e, ROAD_FILL, ROAD_W);
+      this.line(e, ROAD_FILL, e.width);
       // floor, matching the refund in Game.demolishAt
-      let s = `Demolish · +${Math.floor(e.length / TILE)} asphalt`;
+      let s = `Demolish · +${Math.floor((e.length / TILE) * laneFactor(e.type))} asphalt`;
       if (e.refund.bridges) s += ` +${e.refund.bridges} bridge`;
       if (e.refund.tunnels) s += ` +${e.refund.tunnels} tunnel`;
       label(s, hit.point.x, hit.point.y, RED);
@@ -397,7 +493,46 @@ export class CanvasRenderer {
       if (!pt) return;
       this.ring(pt.x, pt.y, NODE_R, ROAD_OUT, 2);
       label('Start here', pt.x, pt.y, DARK);
+    } else if (game.tool === 'edit') {
+      const run = game.runAt(p);
+      if (!run) return;
+      ctx.globalAlpha = 0.25;
+      this.runPath(run, ACCENT);
+      ctx.globalAlpha = 1;
+      label('Click to edit · drag to bend', p.x, p.y, ACCENT);
     }
+  }
+
+  // Centre line (two-way), dashed separators between same-direction lanes, chevrons a->b (one-way)
+  private markings(a: Vec, b: Vec, t: RoadType): void {
+    const ctx = this.ctx;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    if (!t.oneWay) this.seg(a, b, YELLOW, 1.2);
+    const offs: number[] = [];
+    for (let k = 1; k < t.lanes; k++) {
+      if (t.oneWay) offs.push((k - t.lanes / 2) * LANE_W);
+      else offs.push(k * LANE_W, -k * LANE_W);
+    }
+    if (offs.length) {
+      ctx.setLineDash([6, 6]);
+      ctx.lineCap = 'butt';
+      for (const o of offs) this.seg({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o }, '#C9C9C5', 1);
+      ctx.setLineDash([]);
+      ctx.lineCap = 'round';
+    }
+    if (!t.oneWay) return;
+    ctx.beginPath();
+    for (let s = Math.min(20, len / 2); s < len; s += 40) {
+      const x = a.x + ux * s, y = a.y + uy * s;
+      ctx.moveTo(x - ux * 3 - uy * 3, y - uy * 3 + ux * 3);
+      ctx.lineTo(x + ux * 2, y + uy * 2);
+      ctx.lineTo(x - ux * 3 + uy * 3, y - uy * 3 - ux * 3);
+    }
+    ctx.strokeStyle = ROAD_OUT;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   }
 
   private polyline(pts: Vec[], close = false): void {
@@ -413,9 +548,9 @@ export class CanvasRenderer {
   }
 
   // Tunnel portal at p, facing q: dark rounded block with a lighter inner arch
-  private portal(p: Vec, q: Vec): void {
+  private portal(p: Vec, q: Vec, w: number): void {
     const ctx = this.ctx;
-    const W = ROAD_W + 6;
+    const W = w + 6;
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(Math.atan2(q.y - p.y, q.x - p.x));
@@ -424,20 +559,20 @@ export class CanvasRenderer {
     ctx.fillStyle = DARK;
     ctx.fill();
     ctx.beginPath();
-    ctx.roundRect(NODE_R, -(ROAD_W - 2) / 2, 3, ROAD_W - 2, 1.5);
+    ctx.roundRect(NODE_R, -(w - 2) / 2, 3, w - 2, 1.5);
     ctx.fillStyle = '#6E6E6A';
     ctx.fill();
     ctx.restore();
   }
 
   // Bridge deck from a to b; the caller draws the white road fill on top
-  private bridge(a: Vec, b: Vec, terrain: Game['terrain']): void {
+  private bridge(a: Vec, b: Vec, terrain: Game['terrain'], w: number): void {
     const ctx = this.ctx;
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
     const at = (s: number, off: number): Vec => ({ x: a.x + ux * s - uy * off, y: a.y + uy * s + ux * off });
-    const half = (ROAD_W + 6) / 2;
+    const half = (w + 6) / 2;
 
     // Pillars: 2-3 evenly spaced over the wet stretch, peeking out on both sides
     let s0 = -1, s1 = -1;
@@ -457,7 +592,7 @@ export class CanvasRenderer {
       }
     }
 
-    this.seg(a, b, BRIDGE, ROAD_W + 6);
+    this.seg(a, b, BRIDGE, w + 6);
     ctx.beginPath();
     for (let s = 6; s < len; s += 12) {
       const p = at(s, half), q = at(s, -half);
@@ -493,7 +628,7 @@ export class CanvasRenderer {
       ctx.beginPath();
       for (const e of n.edges) {
         const [ux, uy] = this.dir(n, e);
-        const x = n.x + ux * d, y = n.y + uy * d, h = ROAD_W / 2;
+        const x = n.x + ux * d, y = n.y + uy * d, h = e.width / 2;
         ctx.moveTo(x - uy * h, y + ux * h);
         ctx.lineTo(x + uy * h, y - ux * h);
       }
@@ -510,18 +645,22 @@ export class CanvasRenderer {
     // One path so overlapping shadows do not darken each other
     ctx.save();
     ctx.translate(level * 1.2, level * 1.8);
-    ctx.beginPath();
-    for (const e of edges) {
-      ctx.moveTo(e.a.x, e.a.y);
-      ctx.lineTo(e.b.x, e.b.y);
+    // ponytail: one path per width; shadows of different widths overlapping darken slightly
+    for (const w of new Set(edges.map((e) => e.width))) {
+      ctx.beginPath();
+      for (const e of edges) {
+        if (e.width !== w) continue;
+        ctx.moveTo(e.a.x, e.a.y);
+        ctx.lineTo(e.b.x, e.b.y);
+      }
+      ctx.strokeStyle = 'rgba(0,0,0,.14)';
+      ctx.lineWidth = w + 6;
+      ctx.stroke();
     }
-    ctx.strokeStyle = 'rgba(0,0,0,.14)';
-    ctx.lineWidth = ROAD_W + 6;
-    ctx.stroke();
     ctx.restore();
 
-    const off = ROAD_W / 2 + 2;
     for (const e of edges) {
+      const off = e.width / 2 + 2;
       const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len, uy = dy / len;
@@ -532,26 +671,26 @@ export class CanvasRenderer {
       }
     }
 
-    const joint = (color: string, width: number): void => {
+    const joint = (color: string, extra: number): void => {
       for (const n of joints) {
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, width);
-        else this.circle(n.x, n.y, width / 2, color);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
+        else this.circle(n.x, n.y, (jointW(n, level) + extra) / 2, color);
       }
     };
-    for (const e of edges) this.line(e, BRIDGE, ROAD_W + 5);
-    joint(BRIDGE, ROAD_W + 5);
-    for (const e of edges) this.line(e, ROAD_FILL, ROAD_W);
-    for (const e of edges) this.rails(e.a, e.b);
+    for (const e of edges) this.line(e, BRIDGE, e.width + 5);
+    joint(BRIDGE, 5);
+    for (const e of edges) this.line(e, ROAD_FILL, e.width);
+    for (const e of edges) this.rails(e.a, e.b, e.width);
     // White joints after the railings keep junctions open
-    joint(ROAD_FILL, ROAD_W);
-    for (const e of edges) this.line(e, YELLOW, 1.2);
+    joint(ROAD_FILL, 0);
+    for (const e of edges) this.markings(e.a, e.b, e.type);
   }
 
   // Viaduct railings on both sides of a to b
-  private rails(a: Vec, b: Vec): void {
+  private rails(a: Vec, b: Vec, w: number): void {
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
-    const o = ROAD_W / 2 + 1;
+    const o = w / 2 + 1;
     const px = (-dy / len) * o, py = (dx / len) * o;
     this.seg({ x: a.x + px, y: a.y + py }, { x: b.x + px, y: b.y + py }, RAIL, 1.2);
     this.seg({ x: a.x - px, y: a.y - py }, { x: b.x - px, y: b.y - py }, RAIL, 1.2);
@@ -559,7 +698,7 @@ export class CanvasRenderer {
 
   private car(game: Game, car: Game['cars'][number]): void {
     const ctx = this.ctx;
-    const p = game.graph.lanePos(car.lane, car.s);
+    const p = game.graph.carPos(car);
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.angle);
@@ -583,6 +722,17 @@ export class CanvasRenderer {
     ctx.lineTo(b.x, b.y);
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  // One translucent stroke over a whole run (a per-edge stroke shows overlapping round caps on curves)
+  private runPath(run: Edge[], color: string): void {
+    if (!run.length) return;
+    const ctx = this.ctx;
+    ctx.beginPath();
+    for (const e of run) { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(...run.map(e => e.width)) + 8;
     ctx.stroke();
   }
 
@@ -634,8 +784,8 @@ export class CanvasRenderer {
   // One traffic light per approach, right of the incoming lane: green if its group has the active phase
   private drawLights(n: Node): void {
     const ctx = this.ctx;
-    const off = ROAD_W / 2 + 3;
     for (const e of n.edges) {
+      const off = e.width / 2 + 3;
       const [ux, uy] = this.dir(n, e);
       // Traffic flows toward the node (-u); its right is (uy, -ux)
       const px = n.x + ux * (NODE_R + 6) + uy * off;
@@ -647,6 +797,11 @@ export class CanvasRenderer {
       this.circle(px, py, 1.2, lightGroup(n, e) === n.phase ? GREEN : RED);
     }
   }
+}
+
+// Joint disc width: the widest non-tunnel road of that level meeting at the node
+function jointW(n: Node, level: number): number {
+  return n.edges.reduce((w, e) => (!e.tunnel && e.level === level ? Math.max(w, e.width) : w), 0) || ROAD_W;
 }
 
 // Mixes a #RRGGBB color toward white by the given factor

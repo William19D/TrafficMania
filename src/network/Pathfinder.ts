@@ -26,8 +26,10 @@ export function findPath(graph: RoadGraph, start: Node, goal: Node): Node[] | nu
     for (const e of cur.edges) {
       const next = e.a === cur ? e.b : e.a;
       if (closed.has(next)) continue;
-      const lane = graph.laneFrom(e, cur);
-      const load = lane.cars.length * (CAR_LEN + GAP) / e.length;
+      const lanes = graph.lanesFrom(e, cur);
+      if (!lanes.length) continue;
+      const cars = lanes.reduce((n, l) => n + l.cars.length, 0);
+      const load = cars * (CAR_LEN + GAP) / (e.length * lanes.length);
       const cost = g.get(cur)! + e.length * (1 + 3 * load);
       if (cost < (g.get(next) ?? Infinity)) {
         g.set(next, cost);

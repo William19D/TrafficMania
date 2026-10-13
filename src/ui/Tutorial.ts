@@ -66,7 +66,7 @@ function steps(g: Game): Step[] {
     },
     {
       title: 'You are ready', task: 'Press Finish and keep the traffic flowing!',
-      text: 'Demolish (4) refunds materials. A red ring around a city means overcrowding: if it fills, game over. Every week you pick a reward.',
+      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds materials. A red ring around a city means overcrowding: if it fills, game over. Every week you pick a reward.',
     },
   ];
 }
@@ -113,6 +113,7 @@ export class Tutorial {
     this.steps = steps(this.game);
     this.shown = true;
     this.game.tutorialActive = true;
+    this.game.setRoadType({ lanes: 1, oneWay: false }); // the tutorial's own tasks assume a default two-way road
     this.card.hidden = false;
     this.show(0);
   }

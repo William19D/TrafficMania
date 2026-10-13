@@ -1,10 +1,11 @@
 import type { Game, Tool, Reward, Inventory } from '../core/Game.ts';
 import { DAY_SECONDS } from '../core/Game.ts';
+import type { RoadType } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
 
 type ResKey = 'asphalt' | 'bridges' | 'tunnels';
 const RES: { k: ResKey; icon: string; tip: string }[] = [
-  { k: 'asphalt', icon: 'asphalt', tip: 'Asphalt: 1 per road tile. Demolish refunds it.' },
+  { k: 'asphalt', icon: 'asphalt', tip: 'Asphalt: 1 per road tile (more lanes cost more). Demolish refunds it.' },
   { k: 'bridges', icon: 'bridge', tip: 'Bridges: 1 per water crossing or viaduct.' },
   { k: 'tunnels', icon: 'tunnel', tip: 'Tunnels: 1 per ground road through a mountain.' },
 ];
@@ -13,8 +14,12 @@ const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
   { tool: 'light', label: 'Light', key: '2', tip: 'Click an intersection (3+ roads). Uses 1 light.' },
   { tool: 'roundabout', label: 'Roundabout', key: '3', tip: 'Click an intersection. Lets 3 cars through at once. Uses 1.' },
-  { tool: 'demolish', label: 'Demolish', key: '4', tip: 'Click a road or a light/roundabout to remove it and get a refund.' },
+  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction. Drag a road to bend it.' },
+  { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it and get a refund.' },
 ];
+
+const ONEWAY_TIP = 'One-way: half the asphalt, cars only drive in the direction you build';
+const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Asphalt ×${n}`;
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -47,9 +52,11 @@ const FRIENDLY: Record<string, string> = {
 const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|No .* left)/;
 
 const CONTROLS: [string, string][] = [
-  ['Road / Light / Roundabout / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd>'],
+  ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
+  ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
+  ['Road type', 'Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
@@ -59,6 +66,18 @@ const CONTROLS: [string, string][] = [
 ];
 
 const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
+
+// Dock picture of a road type: white band, gray outline, lane separators, yellow centre line or a one-way arrow
+function roadPic(t: RoadType): string {
+  const n = t.lanes * (t.oneWay ? 1 : 2), lw = 5, h = n * lw, y0 = 12 - h / 2;
+  let s = `<rect x="2" y="${y0}" width="36" height="${h}" rx="1.5" fill="#fff" stroke="#9E9E9A"/>`;
+  for (let k = 1; k < n; k++) {
+    const y = y0 + k * lw, mid = !t.oneWay && k === t.lanes;
+    s += `<path d="M4 ${y}h32" stroke="${mid ? '#E6C84B' : '#C9C9C5'}"${mid ? '' : ' stroke-dasharray="3 2"'}/>`;
+  }
+  if (t.oneWay) s += '<path d="M14 12h12M22 8l4 4-4 4" stroke="#9E9E9A" fill="none"/>';
+  return s;
+}
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
@@ -100,16 +119,18 @@ export class HUD {
   private helpOpen = false;
   private last: {
     inv: Partial<Inventory>; score?: number; speed?: number; tool?: Tool; level?: number;
-    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number;
+    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string;
     reward: Reward[] | null; over: boolean;
   } = { inv: {}, msg: '', reward: null, over: false };
   onTutorial: (() => void) | null = null;
+  // Called with the most overcrowded city when the warning chip is clicked
+  onDanger: ((city: Game['cities'][number]) => void) | null = null;
 
   constructor(private root: HTMLElement, private game: Game) {
     root.innerHTML = `
       <div class="panel res" role="group" aria-label="Resources">
         ${RES.map(r => `<div class="chip" data-res="${r.k}" data-tip="${r.tip}" tabindex="0">${icon(r.icon)}<b class="num"></b><span class="delta" aria-hidden="true"></span></div>`).join('')}
-        <div class="chip danger" hidden tabindex="0" data-tip="A city has too many waiting cars. Connect it or add capacity before its ring fills.">${icon('warning')}<b><span class="long">Overcrowding </span><span class="pct num"></span></b></div>
+        <div class="chip danger" hidden tabindex="0" role="button" data-tip="A city has too many waiting cars. Click to jump to it.">${icon('warning')}<b><span class="long">Overcrowding </span><span class="pct num"></span></b></div>
       </div>
       <div class="panel status">
         <div class="seg" role="group" aria-label="Game speed">
@@ -133,6 +154,16 @@ export class HUD {
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${TOOLS.slice(0, 3).map(toolBtn).join('')}
         <span class="sep"></span>
+        <div class="lanes" data-tip="New roads">
+          <svg class="pic rpic" viewBox="0 0 40 24" aria-hidden="true"></svg>
+          <span class="plabel"><b>Lanes</b><small class="pctx">per direction</small></span>
+          <div class="seg" role="group" aria-label="Lanes per direction">
+            ${[1, 2, 3].map(n => `<button class="lane" data-lanes="${n}" aria-pressed="false" data-tip="${laneTip(n)}"><b>${n}</b></button>`).join('')}
+          </div>
+          <button class="lane wide" data-action="oneway" aria-pressed="false" data-tip="${ONEWAY_TIP}">${icon('oneway')}<small>One-way</small></button>
+          <button class="lane wide" data-action="flip" hidden data-tip="Reverse direction">${icon('flip')}<small>Flip</small></button>
+        </div>
+        <span class="sep"></span>
         <div class="stepper" data-hint="elev" data-tip="${ROAD_TIP}">
           <button class="iconbtn" data-action="level-down" aria-label="Lower road [PageDown]" data-tip="Lower road" data-key="PageDown"><b>−</b></button>
           <svg class="pic" viewBox="0 0 40 24" aria-hidden="true">
@@ -146,6 +177,7 @@ export class HUD {
         </div>
         <span class="sep"></span>
         ${toolBtn(TOOLS[3])}
+        ${toolBtn(TOOLS[4])}
       </div>
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
@@ -157,12 +189,26 @@ export class HUD {
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
-    for (const b of this.toolBtns) b.onclick = () => { game.tool = b.dataset.tool as Tool; };
+    for (const b of this.toolBtns) b.onclick = () => game.setTool(b.dataset.tool as Tool);
+    // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
+    const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
+    const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
+    root.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
+      b.onclick = () => setType({ ...cur(), lanes: Number(b.dataset.lanes) as RoadType['lanes'] });
+    });
+    this.q('[data-action="oneway"]').onclick = () => setType({ ...cur(), oneWay: !cur().oneWay });
+    this.q('[data-action="flip"]').onclick = () => { if (game.selected) game.flip(game.selected); };
     this.q('[data-action="level-down"]').onclick = () => game.setLevel(game.level - 1);
     this.q('[data-action="level-up"]').onclick = () => game.setLevel(game.level + 1);
     this.q('[data-action="help"]').onclick = () => this.setHelp(!this.helpOpen);
     this.q('[data-action="close-help"]').onclick = () => this.setHelp(false);
     this.q('[data-action="tutorial"]').onclick = () => { this.setHelp(false); this.onTutorial?.(); };
+    const jump = () => {
+      const worst = game.cities.reduce((w, c) => (c.overcrowd > (w?.overcrowd ?? 0) ? c : w), null as Game['cities'][number] | null);
+      if (worst) this.onDanger?.(worst);
+    };
+    this.q('.danger').onclick = jump;
+    this.q('.danger').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } };
     document.addEventListener('pointerdown', e => {
       if (this.helpOpen && !(e.target as Element).closest('.pop, .helpbtn')) this.setHelp(false, false);
     });
@@ -180,7 +226,7 @@ export class HUD {
     const g = this.game;
     if (g.gameOver || g.pendingReward) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (/^[1-4]$/.test(e.key)) {
+      if (/^[1-5]$/.test(e.key)) {
         if (!g.gameOver && (e.key === '1' || e.key === '2')) this.selectCard(Number(e.key) - 1, true);
       } else if (e.key === 'Enter') {
         e.preventDefault();
@@ -347,6 +393,38 @@ export class HUD {
     }
   }
 
+  // Lane picker: reflects the selected run (Edit tool) or the type for new roads
+  private updatePicker(): void {
+    const g = this.game, run = g.selected;
+    const t = run ? g.typeOf(run) : g.roadType;
+    const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.lanes}|${t.oneWay}`;
+    if (key === this.last.pick) return;
+    this.last.pick = key;
+    const off = g.tool !== 'road' && g.tool !== 'edit';
+    const box = this.q('.lanes');
+    box.classList.toggle('off', off);
+    box.dataset.tip = off ? 'Lanes apply to the Road and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
+    this.q('.pctx').textContent = run ? 'editing road' : 'per direction';
+    this.q('.rpic').innerHTML = roadPic(t);
+    // asphalt to pay (or get back) if the selected run switched to type n
+    const delta = (n: RoadType) => {
+      if (!run) return '';
+      const d = g.retypeDelta(run, n);
+      return d > 0 ? ` · costs ${d}` : d < 0 ? ` · refunds ${-d}` : '';
+    };
+    box.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
+      const n = Number(b.dataset.lanes) as RoadType['lanes'];
+      b.disabled = off;
+      b.setAttribute('aria-pressed', String(t.lanes === n));
+      b.dataset.tip = laneTip(n) + delta({ ...t, lanes: n });
+    });
+    const ow = this.q<HTMLButtonElement>('[data-action="oneway"]');
+    ow.disabled = off;
+    ow.setAttribute('aria-pressed', String(t.oneWay));
+    ow.dataset.tip = ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
+    this.q('[data-action="flip"]').hidden = !(run && t.oneWay);
+  }
+
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
     const g = this.game, inv = g.inventory, L = this.last;
@@ -416,6 +494,8 @@ export class HUD {
       });
       if (pulse) flash(this.q('.elev'), 'pulse');
     }
+
+    this.updatePicker();
 
     if (g.score !== L.score) {
       const up = L.score !== undefined && g.score > L.score;

@@ -1,10 +1,11 @@
 import type { Game, Tool, PathPlan } from '../core/Game.ts';
+import type { Edge } from '../network/RoadGraph.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
 import { dist } from '../util/geom.ts';
 import { cubicPoints, autoControls, bendControls } from '../util/curve.ts';
 
-const KEY_TOOLS: Tool[] = ['road', 'light', 'roundabout', 'demolish'];
+const KEY_TOOLS: Tool[] = ['road', 'light', 'roundabout', 'edit', 'demolish'];
 const CLICK_PX = 6;
 
 type Mode = 'idle' | 'placing' | 'pressed' | 'bending';
@@ -22,6 +23,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let end: Vec | null = null;
   let handle: Vec | null = null;
   let plan: PathPlan | null = null;
+  let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
 
   const blocked = () => game.gameOver || !!game.pendingReward;
 
@@ -30,6 +32,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     press = null;
     anchor = end = handle = null;
     plan = null;
+    run = null;
   };
 
   const autoPlan = (a: Vec, c: Vec): PathPlan => {
@@ -55,6 +58,9 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
         end = w;
         plan = autoPlan(anchor, w);
       }
+    } else if (game.tool === 'edit') {
+      press = { x: e.clientX, y: e.clientY };
+      run = game.runAt(w);
     } else if (game.tool === 'demolish') game.demolishAt(w);
     else game.placeControl(w, game.tool);
   });
@@ -67,8 +73,16 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       last = { x: e.clientX, y: e.clientY };
       return;
     }
-    if (game.tool !== 'road' || blocked()) { if (mode !== 'idle') cancel(); return; }
     const w = renderer.screenToWorld(e.clientX, e.clientY);
+    if (game.tool === 'edit' && run && press && !blocked()) {
+      if (mode === 'idle' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';
+      if (mode === 'bending') {
+        handle = w;
+        plan = game.planBend(run, w);
+      }
+      return;
+    }
+    if (game.tool !== 'road' || blocked()) { if (mode !== 'idle') cancel(); return; }
     if (mode === 'placing' && anchor) plan = autoPlan(anchor, w);
     else if ((mode === 'pressed' || mode === 'bending') && anchor && end && press) {
       if (mode === 'pressed' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';
@@ -86,7 +100,18 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       panning = false;
       return;
     }
-    if (e.button !== 0 || game.tool !== 'road') return;
+    if (e.button !== 0) return;
+    if (game.tool === 'edit') {
+      if (mode === 'bending' && run) {
+        // replan at the release point, like the road bend
+        game.commitBend(run, game.planBend(run, renderer.screenToWorld(e.clientX, e.clientY)));
+      } else if (press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) <= CLICK_PX) {
+        game.select(renderer.screenToWorld(e.clientX, e.clientY));
+      }
+      cancel();
+      return;
+    }
+    if (game.tool !== 'road') return;
     if (mode === 'pressed' || mode === 'bending') {
       // Recompute with the release position so the built curve matches where the button was released.
       if (mode === 'bending' && anchor && end) {
@@ -119,22 +144,23 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   window.addEventListener('keydown', e => {
     const n = Number(e.key);
     if (n >= 1 && n <= KEY_TOOLS.length) {
-      game.tool = KEY_TOOLS[n - 1];
+      game.setTool(KEY_TOOLS[n - 1]);
       cancel();
     } else if (e.key === ' ') {
       e.preventDefault();
       if (blocked()) return;
       game.speed = game.speed === 0 ? 1 : 0;
-    } else if (e.key === 'Escape') cancel();
+    } else if (e.key === 'Escape') { cancel(); game.select(null); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
   });
 
-  // Tool switches from the HUD (or a modal opening) cancel the placement.
+  // Tool switches from the HUD (or a modal opening) cancel the placement / bend and drop the Edit selection.
   // also mirrors the tool onto <body data-tool> so CSS can switch the canvas cursor
   const live = () => {
     if (document.body.dataset.tool !== game.tool) document.body.dataset.tool = game.tool;
-    if (mode !== 'idle' && (game.tool !== 'road' || blocked())) cancel();
+    if ((mode !== 'idle' || run) && (game.tool !== (run ? 'edit' : 'road') || blocked())) cancel();
+    if (game.selected && game.tool !== 'edit') game.select(null);
   };
 
   return {

@@ -2,13 +2,14 @@ import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { generateTerrain, CITY_COLORS, inWater, inMountain, segmentCrosses, randomName, findCitySpot } from '../world/MapGenerator.ts';
-import type { Node, Edge, EdgeFlags } from '../network/RoadGraph.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, CAR_LEN, GAP } from '../network/RoadGraph.ts';
+import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, CAR_LEN, GAP, DEFAULT_TYPE, laneFactor, sameType } from '../network/RoadGraph.ts';
+import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { City, OVERCROWD_SECONDS, CITY_R } from '../entities/City.ts';
 import { Car } from '../entities/Car.ts';
 
-export type Tool = 'road' | 'light' | 'roundabout' | 'demolish';
+export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
 export interface Inventory { asphalt: number; bridges: number; tunnels: number; lights: number; roundabouts: number }
 export type Reward = Partial<Inventory>;
 export const DAY_SECONDS = 15; // one week = 7 days
@@ -18,8 +19,9 @@ export interface BuildPlan {
   crossings: { edge: Edge; point: Vec; t: number; node: Node | null }[];
   flags: EdgeFlags;
 }
-export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number }
-export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: Inventory; ok: boolean; reason: string }
+export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number; type: RoadType }
+// net: bend plans only, asphalt cost minus the refund of the replaced run
+export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: Inventory; ok: boolean; reason: string; type: RoadType; level: number; net?: number }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 interface SegPlan extends PathSeg {
   sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean; refund: { bridges: number; tunnels: number };
@@ -50,6 +52,12 @@ export class Game {
   tool: Tool = 'road';
   // Elevation for new roads: 0 = ground, 1..10 = viaducts
   level = 0;
+  // Type for new roads
+  roadType: RoadType = { ...DEFAULT_TYPE };
+  // Run selected with the Edit tool (edges in run order)
+  selected: Edge[] | null = null;
+  // Edges created by the last commitPath, in build order (reused edges not included)
+  lastBuilt: Edge[] = [];
   gameOver = false;
   pendingReward: Reward[] | null = null;
   message = '';
@@ -138,8 +146,8 @@ export class Game {
       if (!path || path.length < 2) continue;
       const e = this.graph.edgeBetween(city.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.laneFrom(e, city.node);
-      if (lane.cars.some(c => c.s < CAR_LEN + GAP * 2)) continue;
+      const lane = this.graph.pickLane(e, city.node);
+      if (!lane || lane.cars.some(c => c.s < CAR_LEN + GAP * 2)) continue;
       city.pending.splice(i, 1);
       const car = new Car(lane, dest);
       car.path = path.slice(1);
@@ -147,6 +155,10 @@ export class Game {
       this.cars.push(car);
       return;
     }
+  }
+
+  setRoadType(t: RoadType): void {
+    this.roadType = { ...t };
   }
 
   setLevel(n: number): void {
@@ -196,8 +208,8 @@ export class Game {
 
   // Per-segment analysis shared by planBuild and planPath.
   // 'blocked' = the segment touches a mountain at a level that cannot clear it.
-  private planSeg(a: Snap, b: Snap, level = this.level): { flags: EdgeFlags; crossings: Crossing[]; exists: boolean; blocked: boolean } {
-    const flags: EdgeFlags = { bridge: false, tunnel: false, level };
+  private planSeg(a: Snap, b: Snap, level = this.level, type = this.roadType): { flags: EdgeFlags; crossings: Crossing[]; exists: boolean; blocked: boolean } {
+    const flags: EdgeFlags = { bridge: false, tunnel: false, level, type };
     const crossings: Crossing[] = [];
     const touches = (e: Edge | null, n: Node | null): boolean => !!e && !!n && (e.a === n || e.b === n);
     const exists = !!(a.node && a.node === b.node) || !!(a.edge && a.edge === b.edge) ||
@@ -252,7 +264,7 @@ export class Game {
       const p = chain[i - 1], n = chain[i];
       // ponytail: skip degenerate segments (same node or already connected) instead of duplicating edges
       if (p === n || g.edgeBetween(p, n)) continue;
-      g.addEdge(p, n, { ...flags }, first ? refund : { bridges: 0, tunnels: 0 });
+      this.lastBuilt.push(g.addEdge(p, n, { ...flags }, first ? refund : { bridges: 0, tunnels: 0 }));
       first = false;
     }
     return chain[chain.length - 1];
@@ -268,7 +280,7 @@ export class Game {
     const a = this.snap(from);
     const b = this.snap(to);
     const cost: Inventory = { asphalt: 0, bridges: 0, tunnels: 0, lights: 0, roundabouts: 0 };
-    const plan: BuildPlan = { a, b, cost, ok: false, reason: '', crossings: [], flags: { bridge: false, tunnel: false, level: this.level } };
+    const plan: BuildPlan = { a, b, cost, ok: false, reason: '', crossings: [], flags: { bridge: false, tunnel: false, level: this.level, type: this.roadType } };
     const len = dist(a.point, b.point);
     if (this.badGround(a) || this.badGround(b)) { plan.reason = 'Invalid terrain'; return plan; }
     if ((a.node && a.node === b.node) || len < TILE / 2) { plan.reason = 'Too short'; return plan; }
@@ -277,7 +289,7 @@ export class Game {
     if (seg.blocked) { plan.reason = 'Too low for the mountain'; return plan; }
     plan.crossings = seg.crossings;
     plan.flags = seg.flags;
-    cost.asphalt = Math.ceil(len / TILE);
+    cost.asphalt = Math.ceil(len / TILE * laneFactor(seg.flags.type));
     cost.bridges = seg.flags.bridge ? 1 : 0;
     cost.tunnels = seg.flags.tunnel ? 1 : 0;
     plan.reason = this.afford(cost);
@@ -287,26 +299,27 @@ export class Game {
 
   commitBuild(plan: BuildPlan): void {
     if (!plan.ok) { this.say(plan.reason); return; }
+    this.lastBuilt = [];
     this.buildSeg(this.resolve(plan.a), plan.b, plan.flags, plan.crossings, { bridges: plan.cost.bridges, tunnels: plan.cost.tunnels });
     this.spend(plan.cost);
   }
 
   // Curved / freehand road through several anchors. First and last points use the full snap;
   // intermediate anchors snap to nodes only, so a path can pass through a city or junction.
-  planPath(points: Vec[]): PathPlan {
+  // One-way roads travel in the order of 'points'.
+  planPath(points: Vec[], level = this.level, type = this.roadType): PathPlan {
     const cost: Inventory = { asphalt: 0, bridges: 0, tunnels: 0, lights: 0, roundabouts: 0 };
-    const plan: PathPlan = { points: [], segs: [], cost, ok: false, reason: 'Too short' };
+    const plan: PathPlan = { points: [], segs: [], cost, ok: false, reason: 'Too short', type: { ...type }, level };
     if (points.length < 2) return plan;
-    const level = this.level;
     const mid = (p: Vec): Snap => {
       const n = this.graph.nearestNode(p, NODE_R + 4, level);
-      if (!n && this.graph.nearestEdge(p, NODE_R, level)) return this.snap(p);
+      if (!n && this.graph.nearestEdge(p, NODE_R, level)) return this.snap(p, level);
       return n ? { node: n, edge: null, point: { x: n.x, y: n.y } } : { node: null, edge: null, point: { x: p.x, y: p.y } };
     };
     const lastIdx = points.length - 1;
     const list: Snap[] = [];
     points.forEach((p, i) => {
-      const s = i === 0 || i === lastIdx ? this.snap(p) : mid(p);
+      const s = i === 0 || i === lastIdx ? this.snap(p, level) : mid(p);
       const prev = list[list.length - 1];
       // collapse consecutive anchors on the same node / spot (the final snap wins)
       if (prev && ((s.node && s.node === prev.node) || dist(s.point, prev.point) < 1)) {
@@ -322,7 +335,7 @@ export class Game {
       const end = list[list.length - 1];
       if (!end.node && !end.edge && dist(end.point, list[list.length - 2].point) < TILE / 2) {
         list.pop();
-        list[list.length - 1] = this.snap(list[list.length - 1].point);
+        list[list.length - 1] = this.snap(list[list.length - 1].point, level);
       }
     }
     plan.points = list.map(s => s.point);
@@ -332,7 +345,7 @@ export class Game {
     let total = 0, built = 0, prevWater = false, prevMountain = false, blocked = false;
     for (let i = 1; i < list.length; i++) {
       const a = list[i - 1], b = list[i];
-      const r = this.planSeg(a, b);
+      const r = this.planSeg(a, b, level, type);
       const seg: SegPlan = { a: a.point, b: b.point, ...r.flags, sa: a, sb: b, crossings: r.crossings, exists: r.exists, refund: { bridges: 0, tunnels: 0 } };
       plan.segs.push(seg);
       if (r.exists) { prevWater = prevMountain = false; continue; }
@@ -355,7 +368,7 @@ export class Game {
     if (!built) { plan.reason = 'Already exists'; return plan; }
     if (total < TILE / 2) return plan; // 'Too short'
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
-    cost.asphalt = Math.ceil(total / TILE);
+    cost.asphalt = Math.ceil(total / TILE * laneFactor(type));
     plan.reason = this.afford(cost);
     plan.ok = !plan.reason;
     return plan;
@@ -364,6 +377,7 @@ export class Game {
   commitPath(plan: PathPlan): void {
     if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return; }
     const before = this.graph.edges.length;
+    this.lastBuilt = [];
     let node: Node | null = null;
     for (const seg of plan.segs as SegPlan[]) {
       // the end snap's edge may have been split by an earlier segment; re-snap if so
@@ -372,9 +386,11 @@ export class Game {
       if (seg.exists) { node = this.resolve(end); continue; }
       const start: Node = node ?? this.resolve(seg.sa);
       // crossings are recomputed on the live graph, since earlier segments may have split edges
-      const live = this.planSeg({ node: start, edge: null, point: { x: start.x, y: start.y } }, end, seg.level).crossings;
-      node = this.buildSeg(start, end, { bridge: seg.bridge, tunnel: seg.tunnel, level: seg.level }, live, seg.refund);
+      const live = this.planSeg({ node: start, edge: null, point: { x: start.x, y: start.y } }, end, seg.level, seg.type).crossings;
+      node = this.buildSeg(start, end, { bridge: seg.bridge, tunnel: seg.tunnel, level: seg.level, type: seg.type }, live, seg.refund);
     }
+    // a later segment may have split an edge built by an earlier one
+    this.lastBuilt = this.lastBuilt.filter(e => this.graph.edges.includes(e));
     this.spend(plan.cost);
     // ponytail: net edge delta (a split of an existing road adds one too), fine for the tutorial check
     this.lastBuild = { segs: this.graph.edges.length - before, level: plan.segs[0]?.level ?? this.level };
@@ -392,15 +408,149 @@ export class Game {
     const hit = this.graph.nearestEdge(p, ROAD_W, this.level) ?? this.graph.nearestEdge(p, ROAD_W);
     if (!hit) return;
     const e = hit.edge;
-    // floor, not round: a curve's short edges must not refund more than ceil(total / TILE) paid
-    this.inventory.asphalt += Math.floor(e.length / TILE);
+    this.refundEdge(e);
+    this.dropCars(this.graph.removeEdge(e));
+  }
+
+  // floor, not round: a curve's short edges must not refund more than ceil(total / TILE) paid
+  private asphaltOf(e: Edge): number {
+    return Math.floor(e.length / TILE * laneFactor(e.type));
+  }
+
+  private refundEdge(e: Edge): void {
+    this.inventory.asphalt += this.asphaltOf(e);
     this.inventory.bridges += e.refund.bridges;
     this.inventory.tunnels += e.refund.tunnels;
-    for (const car of this.graph.removeEdge(e)) {
+  }
+
+  private dropCars(cars: Car[]): void {
+    for (const car of cars) {
       this.graph.detachCar(car);
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
     }
+  }
+
+  // ---- Edit tool ----
+
+  runAt(p: Vec): Edge[] | null {
+    const hit = this.graph.nearestEdge(p, ROAD_W, this.level) ?? this.graph.nearestEdge(p, ROAD_W);
+    return hit ? this.graph.runOf(hit.edge).edges : null;
+  }
+
+  select(p: Vec | null): void {
+    this.selected = p ? this.runAt(p) : null;
+  }
+
+  // Switching away from Edit drops the selection at once, so a click right after the switch cannot retype it
+  setTool(t: Tool): void {
+    this.tool = t;
+    if (t !== 'edit') this.selected = null;
+  }
+
+  typeOf(run: Edge[]): RoadType {
+    return run[0].type;
+  }
+
+  // True when the run's first edge points away from its first node (one-way runs then travel first -> last)
+  runForward(run: Edge[]): boolean {
+    const r = this.graph.runOf(run[0]);
+    return r.edges[0].a === r.nodes[0];
+  }
+
+  private runRefund(run: Edge[]): number {
+    return run.reduce((n, e) => n + this.asphaltOf(e), 0);
+  }
+
+  // Asphalt to pay (negative = refund). Same type on every edge (a flip) is free.
+  retypeDelta(run: Edge[], type: RoadType): number {
+    if (run.every(e => sameType(e.type, type))) return 0;
+    const len = run.reduce((n, e) => n + e.length, 0);
+    return Math.ceil(len / TILE * laneFactor(type)) - this.runRefund(run);
+  }
+
+  // Keeps the run's current travel direction (for one-way results) unless reverse.
+  retype(run: Edge[], type: RoadType, reverse = false): boolean {
+    if (!reverse && run.every(e => sameType(e.type, type))) return true;
+    const d = this.retypeDelta(run, type);
+    if (d > this.inventory.asphalt) { this.say('Not enough asphalt'); return false; }
+    this.inventory.asphalt -= d;
+    const dir = this.runForward(run) !== reverse;
+    const { edges, nodes } = this.graph.runOf(run[0]);
+    edges.forEach((e, i) => this.dropCars(this.graph.setEdgeType(e, type, (e.a === nodes[i]) === dir)));
+    this.say('Road updated');
+    return true;
+  }
+
+  flip(run: Edge[]): void {
+    this.retype(run, this.typeOf(run), true);
+  }
+
+  // Rebuilds the run as a curve from its first to its last node through 'handle'.
+  // Affordability counts the run's refund; plan.net = cost - refund.
+  planBend(run: Edge[], handle: Vec): PathPlan {
+    const g = this.graph, r = g.runOf(run[0]);
+    const A = r.nodes[0], B = r.nodes[r.nodes.length - 1];
+    const type = this.typeOf(run);
+    // closed loop: nothing to bend between (and the shared node would be dropped as an orphan)
+    if (A === B) return this.planPath([A], run[0].level, type);
+    const pts = cubicPoints(A, ...bendControls(A, B, handle), B);
+    // a one-way run travelling last -> first is rebuilt in that order
+    if (type.oneWay && !this.runForward(run)) pts.reverse();
+    const refund = this.runRefund(r.edges);
+    const bridges = r.edges.reduce((n, e) => n + e.refund.bridges, 0);
+    const tunnels = r.edges.reduce((n, e) => n + e.refund.tunnels, 0);
+    const inv = this.inventory;
+    g.hidden = new Set(r.edges);
+    inv.asphalt += refund; inv.bridges += bridges; inv.tunnels += tunnels;
+    try {
+      const plan = this.planPath(pts, run[0].level, type);
+      plan.net = plan.cost.asphalt - refund;
+      return plan;
+    } finally {
+      g.hidden = new Set();
+      inv.asphalt -= refund; inv.bridges -= bridges; inv.tunnels -= tunnels;
+    }
+  }
+
+  commitBend(run: Edge[], plan: PathPlan): boolean {
+    if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return false; }
+    const g = this.graph, r = g.runOf(run[0]);
+    const rev = this.typeOf(run).oneWay && !this.runForward(run);
+    const total = r.edges.reduce((n, e) => n + e.length, 0);
+    const moved: { car: Car; forward: boolean; frac: number }[] = [];
+    let acc = 0;
+    r.edges.forEach((e, i) => {
+      for (const l of e.lanes) for (const car of l.cars) {
+        const forward = l.from === r.nodes[i];
+        moved.push({ car, forward, frac: (acc + (forward ? car.s : e.length - car.s)) / total });
+      }
+      acc += e.length;
+    });
+    for (const e of r.edges) {
+      this.refundEdge(e);
+      for (const car of g.removeEdge(e)) g.detachCar(car);
+    }
+    this.commitPath(plan);
+    // lastBuilt runs in plan order: A -> B, or B -> A for a reversed one-way run
+    const built = this.lastBuilt;
+    const len = built.reduce((n, e) => n + e.length, 0);
+    for (const m of moved) {
+      const fwd = m.forward !== rev;
+      let d = (rev ? 1 - m.frac : m.frac) * len, i = 0;
+      while (i < built.length - 1 && d > built[i].length) d -= built[i++].length;
+      const e = built[i];
+      const lane = e ? g.pickLane(e, fwd ? e.a : e.b) : null;
+      if (!lane) { this.dropCars([m.car]); continue; }
+      const c = m.car;
+      c.s = Math.max(0, Math.min(e.length, fwd ? d : e.length - d));
+      c.lane = lane;
+      c.path = null; c.queued = false; c.granted = null; c.clearing = null; c.prev = null;
+      const at = lane.cars.findIndex(o => o.s > c.s);
+      lane.cars.splice(at < 0 ? lane.cars.length : at, 0, c);
+    }
+    this.selected = built.length ? [...built] : null;
+    return true;
   }
 
   placeControl(p: Vec, kind: 'light' | 'roundabout'): void {

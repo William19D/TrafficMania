@@ -191,3 +191,9 @@ HUD update discipline: `update()` keeps the previous values (`last.score`, `last
 - [ ] Text is 13px or larger (except the elevation hint), and the contrast of all text tokens is at least 4.5:1 (checked with devtools).
 - [ ] With `prefers-reduced-motion`, nothing pulses or slides, and transitions are 200ms or less otherwise.
 - [ ] Performance panel: no DOM mutations on frames where the game state did not change.
+
+## 7. Road types and the Edit tool
+- Dock: Road, Light, Roundabout | lane picker (1/2/3 lanes per direction, One-way, Flip) | elevation | Edit, Demolish.
+- The picker sets the type of new roads; with the Edit tool (5) and a selected run it shows and changes that run's type (tooltips show the asphalt cost/refund). Flip only shows for a selected one-way run. It is dimmed outside Road and Edit.
+- Edit: hover highlights the run (accent), click selects it (accent halo), drag bends it from its first to its last node; the label shows the net asphalt. Esc or switching tool clears the selection.
+- Canvas: road width = lanes x 9 px (x2 when two-way). Two-way keeps the yellow centre line; same-direction lanes get dashed gray separators; one-way roads get gray chevrons instead of the yellow line.

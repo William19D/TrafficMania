@@ -35,6 +35,7 @@ body[data-tool="road"] canvas { cursor: crosshair; }
 body[data-tool="light"] canvas,
 body[data-tool="roundabout"] canvas { cursor: pointer; }
 body[data-tool="demolish"] canvas { cursor: cell; }
+body[data-tool="edit"] canvas { cursor: pointer; }
 
 #hud {
   --dock-h: 4.75em;
@@ -381,6 +382,28 @@ kbd {
 .elev.pulse .lv { animation: pulse .15s var(--ease); }
 @keyframes pulse { 50% { color: var(--accent); transform: scale(1.08); } }
 
+/* lane picker: same look as the speed buttons; dimmed like the stepper when the tool ignores it */
+.lanes { display: flex; align-items: center; gap: .375em; transition: opacity .15s var(--ease); }
+.rpic { stroke-width: 1.5; stroke-linecap: butt; }
+/* fixed width: the caption switches between 'per direction' and 'editing road' */
+.plabel { display: flex; flex-direction: column; width: 86px; line-height: 1.15; }
+.plabel b { font-size: 1em; }
+.plabel small { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap; }
+.lanes.off { opacity: .45; }
+#hud .lanes.off button:disabled { opacity: 1; }
+#hud .lane {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 2.5em; height: 2.75em;
+  min-width: 40px; min-height: 40px;
+}
+#hud .lane.wide { width: auto; padding: 0 .5em; }
+.lane .ico { width: 1.1em; height: 1.1em; }
+.lane small { font-size: var(--label); font-weight: 700; line-height: 1.1; white-space: nowrap; }
+#hud .lane[aria-pressed="true"] { background: var(--accent); color: #fff; }
+
 /* ---------- E: toasts ---------- */
 .toasts {
   position: absolute;
@@ -567,3 +590,5 @@ kbd {
   #hud .toast { animation: fade .15s linear !important; }
   @keyframes fade { from { opacity: 0; } }
 }
+
+.chip.danger { cursor: pointer; }
