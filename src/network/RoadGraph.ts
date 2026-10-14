@@ -1,7 +1,7 @@
 import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment, segmentsCross } from '../util/geom.ts';
-import type { City } from '../entities/City.ts';
-import { CITY_R } from '../entities/City.ts';
+import type { Building } from '../entities/Building.ts';
+import { DOOR_R } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import { TIERS } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
@@ -35,7 +35,7 @@ export const fitType = (t: RoadType): RoadType => {
 export type Control = 'none' | 'light' | 'roundabout';
 
 export interface Node {
-  id: number; x: number; y: number; edges: Edge[]; city: City | null; control: Control;
+  id: number; x: number; y: number; edges: Edge[]; building: Building | null; control: Control;
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
   controlDay: number; // day the control was built (refund rule)
 }
@@ -48,9 +48,10 @@ export interface Edge {
   id: number; a: Node; b: Node; length: number; lanes: Lane[]; type: RoadType; width: number;
   bridge: boolean; tunnel: boolean; level: number;
   day: number; // build day (refund rule); a split keeps it
+  drive: boolean; // auto driveway to a building: free, no upkeep, no refund
 }
 
-export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType }
+export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean }
 
 // Traffic light phase group: opposite approaches share a group
 export function lightGroup(n: Node, e: Edge): number {
@@ -66,9 +67,9 @@ export class RoadGraph {
   hidden: Set<Edge> = new Set();
   private nextId = 1;
 
-  addNode(x: number, y: number, city: City | null = null): Node {
-    const n: Node = { id: this.nextId++, x, y, edges: [], city, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0 };
-    if (city) city.node = n;
+  addNode(x: number, y: number, building: Building | null = null): Node {
+    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0 };
+    if (building) building.node = n;
     this.nodes.push(n);
     return n;
   }
@@ -76,7 +77,7 @@ export class RoadGraph {
   addEdge(a: Node, b: Node, flags: EdgeFlags, day = 0): Edge {
     const e = {
       id: this.nextId++, a, b, length: dist(a, b),
-      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day,
+      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive,
     } as Edge;
     this.buildLanes(e, flags.type);
     a.edges.push(e);
@@ -106,7 +107,7 @@ export class RoadGraph {
   }
 
   private dropIfOrphan(n: Node): void {
-    if (n.edges.length === 0 && !n.city) this.nodes = this.nodes.filter(x => x !== n);
+    if (n.edges.length === 0 && !n.building) this.nodes = this.nodes.filter(x => x !== n);
   }
 
   removeEdge(e: Edge): Car[] {
@@ -118,7 +119,7 @@ export class RoadGraph {
 
   splitEdge(e: Edge, p: Vec): Node {
     const { a, b } = e;
-    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type };
+    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type, drive: e.drive };
     const n = this.addNode(p.x, p.y);
     this.unlink(e);
     const e1 = this.addEdge(a, n, flags, e.day);
@@ -168,10 +169,10 @@ export class RoadGraph {
     return lost;
   }
 
-  // Maximal chain of edges through e between cities / junctions / controlled nodes / dead ends.
+  // Maximal chain of edges through e between doors / junctions / controlled nodes / dead ends.
   // edges[i] joins nodes[i] and nodes[i+1].
   runOf(e: Edge): { edges: Edge[]; nodes: Node[] } {
-    const inner = (n: Node) => !n.city && n.edges.length === 2 && n.control === 'none';
+    const inner = (n: Node) => !n.building && n.edges.length === 2 && n.control === 'none';
     const other = (x: Edge, n: Node) => x.a === n ? x.b : x.a;
     const step = (x: Edge, n: Node) => n.edges[0] === x ? n.edges[1] : n.edges[0];
     let n = e.a, cur = e;
@@ -200,7 +201,7 @@ export class RoadGraph {
   turn(path: Node[], j: number, from?: Node): number {
     for (; j < path.length - 1; j++) {
       const n = path[j]!, p = path[j - 1] ?? from!, q = path[j + 1]!;
-      if (!n.city && n.edges.length === 2 && n.control === 'none') continue;
+      if (!n.building && n.edges.length === 2 && n.control === 'none') continue;
       const ax = n.x - p.x, ay = n.y - p.y, bx = q.x - n.x, by = q.y - n.y;
       // y points down, so a positive cross product is a right turn on screen
       const a = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
@@ -301,18 +302,18 @@ export class RoadGraph {
     return { x: n.x + Math.cos(ang) * RING_R, y: n.y + Math.sin(ang) * RING_R, angle: ang - Math.PI / 2 };
   }
 
-  // A node can take a road of this level: cities and bare nodes always, otherwise it needs an edge of that level.
+  // A node can take a road of this level: doors and bare nodes always, otherwise it needs an edge of that level.
   nodeLevelOk(n: Node, level: number): boolean {
-    return !!n.city || n.edges.length === 0 || n.edges.some(e => e.level === level);
+    return !!n.building || n.edges.length === 0 || n.edges.some(e => e.level === level);
   }
 
   nearestNode(p: Vec, r: number, level?: number): Node | null {
     let best: Node | null = null, bestD = Infinity;
     for (const n of this.nodes) {
       if (level !== undefined && !this.nodeLevelOk(n, level)) continue;
-      if (!n.city && n.edges.length && n.edges.every(e => this.hidden.has(e))) continue;
+      if (!n.building && n.edges.length && n.edges.every(e => this.hidden.has(e))) continue;
       const d = dist(p, n);
-      if (d <= (n.city ? CITY_R : r) && d < bestD) { best = n; bestD = d; }
+      if (d <= (n.building ? DOOR_R : r) && d < bestD) { best = n; bestD = d; }
     }
     return best;
   }

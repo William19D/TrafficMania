@@ -48,7 +48,7 @@ body[data-tool="edit"] canvas { cursor: pointer; }
   line-height: 1.3;
 }
 #hud > * { pointer-events: auto; }
-#hud > .toasts, #hud > .tip { pointer-events: none; }
+#hud > .toasts, #hud > .tip, #hud > .legend { pointer-events: none; }
 #hud [hidden] { display: none !important; }
 #hud * { box-sizing: border-box; }
 
@@ -477,13 +477,27 @@ kbd {
 .stats b { font-size: 1.5em; }
 .modal .actions { display: flex; justify-content: flex-end; margin-top: 1.25em; }
 
+/* car colour legend, bottom-left above the dock line */
+.legend {
+  position: absolute;
+  left: var(--edge-l);
+  bottom: calc(var(--edge-b) + var(--dock-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: .25em;
+  padding: .5em .75em;
+  font-size: var(--label);
+}
+.legend span { display: flex; align-items: center; gap: .5em; }
+.legend i { width: .9em; height: .6em; border-radius: 2px; border: 1px solid var(--ink); }
+
 /* ---------- responsive ---------- */
 /* the tier picker widened the dock: the elevation hint goes first (the stepper's tooltip still says it) */
 @media (max-width: 1339px) {
   .eh { display: none; }
   .elev { width: auto; min-width: 3.5em; }
 }
-/* below ~1280px the centred status bar would hit the resources row once the Overcrowding chip shows */
+/* below ~1280px the centred status bar would hit the resources row once the no-road chip shows */
 @media (max-width: 1279px) {
   .status { top: calc(var(--edge-t) + 56px); }
 }
@@ -491,6 +505,7 @@ kbd {
   #hud { --dock-h: 74px; }
   .chip { min-height: 40px; padding: 0 .5em; }
   .chip.danger .long { display: none; }
+  .legend { display: none; }
 
   .status {
     flex-wrap: wrap; /* narrow phones: the week wraps instead of overflowing */

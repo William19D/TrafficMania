@@ -1,6 +1,8 @@
 import type { Game } from '../core/Game.ts';
 import type { Vec } from '../util/geom.ts';
 import { DEFAULT_TYPE } from '../network/RoadGraph.ts';
+import { findPath } from '../network/Pathfinder.ts';
+import type { Building } from '../entities/Building.ts';
 import { icon } from './icons.ts';
 
 // The tutorial must never strand the player without money for its own tasks.
@@ -17,18 +19,27 @@ interface Step {
 }
 
 const at = (p: Vec): Vec => ({ x: p.x, y: p.y });
-const junctions = (g: Game) => g.graph.nodes.filter(n => !n.city && n.edges.length >= 3);
+// Junctions of real roads (driveways make T-junctions of their own)
+const junctions = (g: Game) => g.graph.nodes.filter(n => !n.building && n.edges.filter(e => !e.drive).length >= 3);
 
-// Built per start(): city names come from the live map
+// Built per start(): targets come from the live town (any zone the map could not place falls back to the first building)
 function steps(g: Game): Step[] {
-  const [A, B, C] = g.cities;
+  const homes = g.buildings.filter(b => b.kind === 'home');
+  const office = g.buildings.find(b => b.kind === 'office') ?? g.buildings[0];
+  const shop = g.buildings.find(b => b.kind === 'shop') ?? g.buildings[0];
+  const door = (b?: Building): Vec[] => b ? [at(b.node)] : [];
+  const mid = homes.length ? [{ x: homes.reduce((n, b) => n + b.node.x, 0) / homes.length, y: homes.reduce((n, b) => n + b.node.y, 0) / homes.length }] : [];
   return [
-    { title: 'Welcome!', task: 'Press Next to start.', text: 'Colored squares are cities. Cars drive to the city of their color. Keep them moving.' },
     {
-      title: 'Build your first road', task: `Click ${A.name}, then click ${B.name}.`,
-      text: 'Click = start point, click again = end point. The label shows the price. Esc cancels.',
-      enter: g => { g.tool = 'road'; topUp(g); }, targets: () => [at(A), at(B)],
-      done: g => g.graph.edges.length >= 1, hint: '[data-tool="road"]',
+      title: 'Welcome!', task: 'Press Next to start.',
+      text: 'Homes (white) send commuters to work and shoppers to the shops (blue). Factories (ochre) send trucks with goods. Car colours show the trip. Build the roads that get them there.',
+    },
+    {
+      title: 'Build your first road', task: 'Draw a road between the homes, then on to the office door.',
+      text: 'Click = start point, click again = end point. A building next to a road gets a free driveway. The label shows the price. Esc cancels.',
+      enter: g => { g.tool = 'road'; topUp(g); }, targets: () => [...mid, ...door(office)],
+      done: g => office && homes.length ? homes.some(h => !!findPath(g.graph, h.node, office.node)) : g.graph.edges.length >= 1,
+      hint: '[data-tool="road"]',
     },
     {
       title: 'Watch the cars', task: 'Wait for the first trip to complete.',
@@ -36,12 +47,12 @@ function steps(g: Game): Step[] {
       done: g => g.score >= 1, hint: '[data-speed="4"]',
     },
     {
-      title: 'Make an intersection', task: `Build a road from ${C.name} to the middle of your first road.`,
+      title: 'Make an intersection', task: 'Build a road from the shop door to the middle of one of your roads.',
       text: 'Three or more roads meeting = intersection. Cars take turns there.',
       enter: g => { g.tool = 'road'; topUp(g); },
       targets: g => {
-        const e = g.graph.edges[0];
-        return e ? [at(C), { x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }] : [at(C)];
+        const e = g.graph.edges.find(x => !x.drive);
+        return e ? [...door(shop), { x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }] : door(shop);
       },
       done: g => junctions(g).length > 0,
     },
@@ -67,7 +78,7 @@ function steps(g: Game): Step[] {
     },
     {
       title: 'You are ready', task: 'Press Finish and keep the traffic flowing!',
-      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds all of a road built today, half of an older one. Roads and controls cost upkeep every day. A red ring around a city means overcrowding: if it fills, game over.',
+      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds all of a road built today, half of an older one. Roads and controls cost upkeep every day. A red dashed outline marks a building without a road: its people stay home until you connect it.',
     },
   ];
 }

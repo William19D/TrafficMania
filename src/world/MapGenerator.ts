@@ -1,9 +1,10 @@
-// Terrain generation: rivers, mountains, names and city placement
+// Terrain generation: rivers, mountains, names and the starter town
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Vec } from '../util/geom.ts';
 import { mulberry32, hashSeed, random } from '../util/rng.ts';
 import { BIOMES, DIFFICULTY, SIZES } from '../core/config.ts';
-import type { Biome, GameConfig } from '../core/config.ts';
+import type { Biome, GameConfig, Zone } from '../core/config.ts';
+import { Building, buildingAt } from '../entities/Building.ts';
 
 // Sized from SIZES by generateTerrain
 export const WORLD = { w: 2000, h: 1200 };
@@ -19,11 +20,6 @@ export interface Terrain {
   trees: Vec[];
   biome: Biome;
 }
-
-export const CITY_COLORS: string[] = [
-  '#E74C3C', '#3498DB', '#F1C40F', '#2ECC71', '#E67E22',
-  '#9B59B6', '#1ABC9C', '#E84393', '#8D6E63', '#00ACC1',
-];
 
 // Terrain rolls use their own seeded stream while generateTerrain runs, so the map depends on the seed alone
 let rng = random;
@@ -177,14 +173,38 @@ export function randomName(): string {
   return s[0].toUpperCase() + s.slice(1);
 }
 
-export function findCitySpot(t: Terrain, taken: Vec[], roads: { a: Vec; b: Vec }[]): Vec | null {
-  const m = 90;
+// Starter town: 4 homes facing a street line (2 per side, doors 30px off it), then a shop and an office 400-700px away and a
+// factory 500-800px away, each facing the town. road = the street line's ends (built on easy). Rolls on the sim stream.
+// ponytail: a satellite with no dry spot in its band is left out; the town works with any subset
+export function findStarterTown(t: Terrain): { buildings: Building[]; road: [Vec, Vec] } | null {
+  const fits = (b: Building, taken: Building[]): boolean => {
+    const c = Math.cos(b.angle), s = Math.sin(b.angle), pts = [b, b.door()];
+    for (const [f, g] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const x = f * b.h / 2, y = g * b.w / 2;
+      pts.push({ x: b.x + x * c - y * s, y: b.y + x * s + y * c });
+    }
+    return pts.every(p => !outside(p, -40) && !inWater(t, p, 12) && !inMountain(t, p, 12)) && taken.every(o => dist(o, b) > 120);
+  };
   for (let i = 0; i < 300; i++) {
-    const p = { x: rand(m, WORLD.w - m), y: rand(m, WORLD.h - m) };
-    if (inWater(t, p, 40) || inMountain(t, p, 40)) continue;
-    if (taken.some(q => dist(p, q) < 230)) continue;
-    if (roads.some(r => distToSegment(p, r.a, r.b).d < 50)) continue;
-    return p;
+    const c = { x: rand(300, WORLD.w - 300), y: rand(300, WORLD.h - 300) }, ax = rng() < 0.5 ? 0 : Math.PI / 2;
+    const u = { x: Math.cos(ax), y: Math.sin(ax) }, v = { x: -u.y, y: u.x };
+    const road: [Vec, Vec] = [{ x: c.x - u.x * 110, y: c.y - u.y * 110 }, { x: c.x + u.x * 110, y: c.y + u.y * 110 }];
+    const terr = segmentCrosses(t, ...road);
+    if (terr.water || terr.mountain) continue;
+    const homes: Building[] = [];
+    for (const side of [1, -1]) for (const k of [-1, 1]) {
+      homes.push(buildingAt('home', { x: c.x + u.x * 26 * k + v.x * 30 * side, y: c.y + u.y * 26 * k + v.y * 30 * side }, ax + Math.PI / 2 * (side > 0 ? -1 : 1)));
+    }
+    if (!homes.every(h => fits(h, []))) continue;
+    const buildings = [...homes];
+    for (const [kind, lo, hi] of [['shop', 400, 700], ['office', 400, 700], ['industry', 500, 800]] as [Zone, number, number][]) {
+      for (let j = 0; j < 200; j++) {
+        const a = rand(0, Math.PI * 2), d = rand(lo, hi), p = { x: c.x + Math.cos(a) * d, y: c.y + Math.sin(a) * d };
+        const b = new Building(kind, p.x, p.y, Math.round(Math.atan2(c.y - p.y, c.x - p.x) / (Math.PI / 2)) * (Math.PI / 2));
+        if (fits(b, buildings)) { buildings.push(b); break; }
+      }
+    }
+    return { buildings, road };
   }
   return null;
 }

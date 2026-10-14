@@ -1,15 +1,16 @@
 import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
-import { generateTerrain, CITY_COLORS, inWater, inMountain, segmentCrosses, randomName, findCitySpot } from '../world/MapGenerator.ts';
+import { generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
 import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType, fitType } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
-import { City, OVERCROWD_SECONDS, CITY_R } from '../entities/City.ts';
+import { DOOR_D, DOOR_R } from '../entities/Building.ts';
+import type { Building } from '../entities/Building.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
 import { DEFAULT_CONFIG, DIFFICULTY, TIERS, TUNING as T } from './config.ts';
-import type { GameConfig, Tier } from './config.ts';
+import type { GameConfig, Purpose, Tier } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
@@ -32,15 +33,13 @@ type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
 const CONTROL_COST = { light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
 const CONTROL_UPKEEP = { light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
-const CITY_SPAWN_SECONDS = 45;
 const MAX_LEVEL = 10;
 const MOUNTAIN_LEVEL = 6; // viaducts at this level or higher clear mountains
-const MAX_CITIES = 14;
 
 export class Game {
   terrain: Terrain;
   graph = new RoadGraph();
-  cities: City[] = [];
+  buildings: Building[] = [];
   cars: Car[] = [];
   // Infinity in creative mode
   money: number;
@@ -61,14 +60,15 @@ export class Game {
   lastBuilt: Edge[] = [];
   gameOver = false;
   message = '';
-  // While true: no game over, no city spawning, slower demand.
+  // While true: slower demand (later steps: no fail checks)
   tutorialActive = false;
+  // No placeholder demand and no return trips (simcheck drives its own trips)
+  demandOff = false;
   // World points the renderer highlights while tutorialActive
   tutorialTargets: Vec[] = [];
   // Last successful commitPath: edges created and plan level (read by the tutorial)
   lastBuild: { segs: number; level: number } | null = null;
   private lastDay = 0;
-  private cityTimer = 0;
   private msgTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(public cfg: GameConfig = DEFAULT_CONFIG) {
@@ -76,7 +76,28 @@ export class Game {
     setSeed(hashSeed('sim:' + cfg.seed));
     this.terrain = generateTerrain(cfg);
     this.money = cfg.mode === 'creative' ? Infinity : DIFFICULTY[cfg.difficulty].money;
-    for (let i = 0; i < 3; i++) this.spawnCity();
+    const town = findStarterTown(this.terrain);
+    for (const b of town?.buildings ?? []) this.addBuilding(b);
+    if (town && DIFFICULTY[cfg.difficulty].starterRoad) {
+      const [a, b] = town.road, g = this.graph;
+      // ponytail: free, but built 'yesterday' so it refunds REFUND_LATER like any old road (~$165 on easy's $60k)
+      g.addEdge(g.addNode(a.x, a.y), g.addNode(b.x, b.y), { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE }, -1);
+      this.connect();
+      this.upkeepDay = this.upkeepPerDay();
+    }
+  }
+
+  // Adds the building with its door node; demand timers are staggered so the town does not pulse
+  addBuilding(b: Building): Building {
+    const d = b.door();
+    this.graph.addNode(d.x, d.y, b);
+    b.demandTimer = random() * T.HOME_TRIP_S[1];
+    this.buildings.push(b);
+    return b;
+  }
+
+  queueTrip(from: Building, to: Building, purpose: Purpose, back = false): void {
+    from.pending.push({ purpose, from, to, back });
   }
 
   get day(): number { return (Math.floor(this.time / DAY_SECONDS) % 7) + 1; }
@@ -84,25 +105,6 @@ export class Game {
   // Days since the start: the refund rule's "today"
   get today(): number { return Math.floor(this.time / DAY_SECONDS); }
   get running(): boolean { return !this.gameOver && this.speed > 0; }
-
-  private get demandInterval(): number {
-    return Math.max(2.5, 7 - this.week * 0.5) * (this.tutorialActive ? 1.5 : 1) / DIFFICULTY[this.cfg.difficulty].trips;
-  }
-
-  private spawnCity(): void {
-    const spot = findCitySpot(this.terrain, this.cities, this.graph.edges);
-    if (!spot) return;
-    const used = new Set(this.cities.map(c => c.color));
-    const free = CITY_COLORS.filter(c => !used.has(c));
-    const pool = free.length ? free : CITY_COLORS;
-    const color = pool[Math.floor(random() * pool.length)];
-    const names = new Set(this.cities.map(c => c.name));
-    let name = randomName();
-    for (let i = 0; i < 10 && names.has(name); i++) name = randomName();
-    const city = new City(name, color, spot.x, spot.y, this.demandInterval);
-    this.graph.addNode(spot.x, spot.y, city);
-    this.cities.push(city);
-  }
 
   update(dt: number): void {
     if (!this.running) return;
@@ -117,18 +119,9 @@ export class Game {
       this.ledger = { today: ledger0(), yesterday: this.ledger.today };
     }
 
-    if (!this.tutorialActive) this.cityTimer += dt;
-    if (this.cityTimer >= CITY_SPAWN_SECONDS / DIFFICULTY[this.cfg.difficulty].growth) {
-      this.cityTimer = 0;
-      if (this.cities.length < MAX_CITIES) this.spawnCity();
-    }
-
-    const interval = this.demandInterval;
-    for (const city of this.cities) {
-      const collapsed = city.tick(dt, this.cities, interval);
-      if (this.tutorialActive) city.overTimer = Math.min(city.overTimer, OVERCROWD_SECONDS * 0.9);
-      else if (collapsed && this.cfg.mode === 'career') { this.gameOver = true; return; }
-      this.trySpawnCar(city, dt);
+    for (const b of this.buildings) {
+      this.demand(b, dt);
+      this.trySpawnCar(b, dt);
     }
 
     this.graph.update(dt);
@@ -144,28 +137,42 @@ export class Game {
         const pay = T.ARRIVAL_PAY * DIFFICULTY[this.cfg.difficulty].tax;
         this.money += pay;
         this.ledger.today.business += pay;
+        const t = car.trip;
+        if (!t.back && !this.demandOff) this.queueTrip(t.to, t.from, t.purpose, true);
       }
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
     }
   }
 
-  private trySpawnCar(city: City, dt: number): void {
-    city.retryTimer -= dt;
-    if (city.retryTimer > 0 || !city.pending.length) return;
-    city.retryTimer = 0.4;
-    const kind = randomKind(), len = KINDS[kind].len;
-    for (let i = 0; i < city.pending.length; i++) {
-      const dest = city.pending[i];
-      const path = findPath(this.graph, city.node, dest.node);
-      if (!path || path.length < 2) continue;
-      const e = this.graph.edgeBetween(city.node, path[1]);
+  // Placeholder demand until S5: a home queues a commute (70%) or a shopping trip, a factory a freight run, to a random
+  // connected destination; the car comes back on arrival (Game.update)
+  private demand(b: Building, dt: number): void {
+    if (this.demandOff || !b.connected || (b.kind !== 'home' && b.kind !== 'industry') || (b.demandTimer -= dt) > 0) return;
+    const [lo, hi] = b.kind === 'home' ? T.HOME_TRIP_S : T.FACTORY_TRIP_S;
+    b.demandTimer = (lo + random() * (hi - lo)) * (this.tutorialActive ? 1.5 : 1) / DIFFICULTY[this.cfg.difficulty].trips;
+    const purpose: Purpose = b.kind === 'industry' ? 'freight' : random() < 0.7 ? 'commute' : 'shop';
+    const to = this.buildings.filter(o => o !== b && o.connected && (purpose === 'commute' ? o.kind !== 'home' : o.kind === 'shop'));
+    if (to.length && b.pending.length < T.MAX_PENDING) this.queueTrip(b, to[Math.floor(random() * to.length)], purpose);
+  }
+
+  // First pending trip whose first lane has room goes out; a trip with no route is dropped (S5 reports it)
+  private trySpawnCar(b: Building, dt: number): void {
+    b.retryTimer -= dt;
+    if (b.retryTimer > 0 || !b.pending.length || !b.connected) return;
+    b.retryTimer = 0.4;
+    const rk = randomKind();
+    for (let i = 0; i < b.pending.length; i++) {
+      const trip = b.pending[i], kind = trip.purpose === 'freight' ? 'truck' : rk, len = KINDS[kind].len;
+      const path = findPath(this.graph, b.node, trip.to.node);
+      if (!path || path.length < 2) { b.pending.splice(i--, 1); continue; }
+      const e = this.graph.edgeBetween(b.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.pickLane(e, city.node, this.graph.turn(path, 1));
+      const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1));
       const f = lane?.cars[0];
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
-      city.pending.splice(i, 1);
-      const car = new Car(lane, dest, city, kind);
+      b.pending.splice(i, 1);
+      const car = new Car(lane, trip, kind);
       car.path = path.slice(1);
       lane.cars.unshift(car);
       this.cars.push(car);
@@ -204,7 +211,7 @@ export class Game {
     if (s.node) {
       const n = s.node;
       for (const e of n.edges) {
-        if (!n.city && e.level !== this.level) continue;
+        if (!n.building && e.level !== this.level) continue;
         const o = e.a === n ? e.b : e.a;
         push(n.x - o.x, n.y - o.y);
       }
@@ -291,8 +298,42 @@ export class Game {
     return base * (1 + (f.bridge ? (T.BRIDGE_X - 1) * s.water : 0) + (f.tunnel ? (T.TUNNEL_X - 1) * s.mountain : 0));
   }
 
-  private edgePrice(e: Edge, type = e.type): number {
-    return this.price(e.a, e.b, { ...e, type });
+  // A driveway is free as it stands, but priced in full when 'type' (a retype) is asked for
+  private edgePrice(e: Edge, type?: RoadType): number {
+    return !type && e.drive ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
+  }
+
+  // A road from a to b runs through a footprint (grown by up to DOOR_D - 2, so a road along the front still reaches a door)
+  // ponytail: samples every 4px, like segmentCrosses
+  private hitsBuilding(a: Vec, b: Vec, type: RoadType): boolean {
+    const pad = Math.min(roadWidth(type) / 2, DOOR_D - 2), n = Math.max(1, Math.ceil(dist(a, b) / 4));
+    for (const bd of this.buildings) {
+      if (distToSegment(bd, a, b).d > (bd.w + bd.h) / 2 + pad) continue;
+      for (let i = 0; i <= n; i++) if (bd.contains({ x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n }, pad)) return true;
+    }
+    return false;
+  }
+
+  // Free driveway from each building without a road to the nearest ground road with access within ACCESS_R of its door:
+  // a straight stub that crosses no road, water, mountain or footprint.
+  // ponytail: runs only after a road is built or bent, so a demolished driveway stays gone until the next road goes down
+  private connect(): void {
+    const g = this.graph;
+    for (const b of this.buildings) {
+      if (b.connected) continue;
+      const door = b.node;
+      const hits = g.edges.filter(e => e.level === 0 && !e.tunnel && !e.bridge && !e.drive && TIERS[e.type.tier].access)
+        .map(e => ({ e, ...distToSegment(door, e.a, e.b) })).filter(h => h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
+      for (const h of hits) {
+        const end = dist(h.point, h.e.a) <= NODE_R ? h.e.a : dist(h.point, h.e.b) <= NODE_R ? h.e.b : null;
+        if (end?.building) continue;
+        const p = end ?? h.point, terr = segmentCrosses(this.terrain, door, p);
+        if (terr.water || terr.mountain || this.hitsBuilding(door, p, DEFAULT_TYPE)) continue;
+        if (g.crossings(door, p, new Set(end ? [end] : []), new Set([h.e]), 0).length) continue;
+        g.addEdge(door, end ?? g.splitEdge(h.e, h.point), { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE, drive: true }, this.today);
+        break;
+      }
+    }
   }
 
   private refundX(day: number): number {
@@ -338,7 +379,7 @@ export class Game {
   }
 
   // Curved / freehand road through several anchors. First and last points use the full snap;
-  // intermediate anchors snap to nodes only, so a path can pass through a city or junction.
+  // intermediate anchors snap to nodes only, so a path can pass through a junction, or the door of a building without a road.
   // One-way roads travel in the order of 'points'.
   planPath(points: Vec[], level = this.level, type = this.roadType): PathPlan {
     const plan: PathPlan = { points: [], segs: [], cost: 0, ok: false, reason: 'Too short', type: { ...type }, level };
@@ -358,8 +399,8 @@ export class Game {
         if (i === lastIdx && list.length > 1) list[list.length - 1] = s;
         return;
       }
-      const city = prev && this.cities.find(c => c.node !== prev.node && c.node !== s.node && distToSegment(c, prev.point, s.point).d < CITY_R);
-      if (city) list.push({ node: city.node, edge: null, point: { x: city.x, y: city.y } });
+      const door = prev && this.buildings.find(b => !b.connected && b.node !== prev.node && b.node !== s.node && distToSegment(b.node, prev.point, s.point).d < DOOR_R)?.node;
+      if (door) list.push({ node: door, edge: null, point: { x: door.x, y: door.y } });
       list.push(s);
     });
     // drop a trailing stub shorter than TILE/2 unless it ends on a snapped node/edge
@@ -374,8 +415,8 @@ export class Game {
     if (list.length < 2) return plan;
     if (this.badGround(list[0]) || this.badGround(list[list.length - 1])) { plan.reason = 'Invalid terrain'; return plan; }
 
-    let total = 0, built = 0, blocked = false;
-    const noAccess = !TIERS[type.tier].access && list.some(s => s.node?.city);
+    let total = 0, built = 0, blocked = false, hit = false;
+    const noAccess = !TIERS[type.tier].access && list.some(s => s.node?.building);
     for (let i = 1; i < list.length; i++) {
       const a = list[i - 1], b = list[i];
       const r = this.planSeg(a, b, level, type);
@@ -385,18 +426,21 @@ export class Game {
       total += dist(a.point, b.point);
       plan.cost += this.price(a.point, b.point, r.flags);
       blocked ||= r.blocked;
+      hit ||= this.hitsBuilding(a.point, b.point, type);
       built++;
     }
     if (!built) { plan.reason = 'Already exists'; return plan; }
     if (total < TILE / 2) return plan; // 'Too short'
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
     if (noAccess) { plan.reason = 'Highways give no building access'; return plan; }
+    if (hit) { plan.reason = 'Blocked by a building'; return plan; }
     plan.reason = this.lockedMsg(type.tier) || this.afford(plan.cost);
     plan.ok = !plan.reason;
     return plan;
   }
 
-  commitPath(plan: PathPlan): void {
+  // link: give buildings near the new road their driveways (commitBend does it itself once its cars are moved)
+  commitPath(plan: PathPlan, link = true): void {
     if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return; }
     const before = this.graph.edges.length;
     this.lastBuilt = [];
@@ -411,7 +455,8 @@ export class Game {
       const live = this.planSeg({ node: start, edge: null, point: { x: start.x, y: start.y } }, end, seg.level, seg.type).crossings;
       node = this.buildSeg(start, end, { bridge: seg.bridge, tunnel: seg.tunnel, level: seg.level, type: seg.type }, live);
     }
-    // a later segment may have split an edge built by an earlier one
+    if (link) this.connect();
+    // a later segment (or a driveway) may have split an edge built by an earlier one
     this.lastBuilt = this.lastBuilt.filter(e => this.graph.edges.includes(e));
     this.spend(plan.cost);
     // ponytail: net edge delta (a split of an existing road adds one too), fine for the tutorial check
@@ -441,7 +486,7 @@ export class Game {
       this.graph.detachCar(car);
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
-      car.origin.pending.push(car.dest);
+      car.origin.pending.push(car.trip);
     }
   }
 
@@ -492,12 +537,16 @@ export class Game {
     if (!reverse && run.every(e => sameType(e.type, type))) return true;
     const { edges, nodes } = this.graph.runOf(run[0]);
     const why = this.lockedMsg(type.tier)
-      || (!TIERS[type.tier].access && (nodes[0].city || nodes[nodes.length - 1].city) ? 'Highways give no building access' : '');
+      || (!TIERS[type.tier].access && (nodes[0].building || nodes[nodes.length - 1].building) ? 'Highways give no building access' : '');
     if (why) { this.say(why); return false; }
     const d = this.retypeDelta(run, type);
     if (d > this.money) { this.say('Not enough money'); return false; }
     const dir = this.runForward(run) !== reverse;
-    edges.forEach((e, i) => this.dropCars(this.graph.setEdgeType(e, type, (e.a === nodes[i]) === dir)));
+    edges.forEach((e, i) => {
+      // a retyped driveway becomes a road you paid for
+      if (!sameType(e.type, type)) e.drive = false;
+      this.dropCars(this.graph.setEdgeType(e, type, (e.a === nodes[i]) === dir));
+    });
     this.spend(d);
     this.say('Road updated');
     return true;
@@ -548,7 +597,7 @@ export class Game {
     const credit = this.runPrice(r.edges), day = Math.min(...r.edges.map(e => e.day));
     for (const e of r.edges) for (const car of g.removeEdge(e)) g.detachCar(car);
     this.spend(-credit);
-    this.commitPath(plan);
+    this.commitPath(plan, false);
     // lastBuilt runs in plan order: A -> B, or B -> A for a reversed one-way run
     const built = this.lastBuilt;
     // the bent road keeps its oldest build day, so a bend never buys a same-day refund
@@ -568,13 +617,15 @@ export class Game {
       const at = lane.cars.findIndex(o => o.s > c.s);
       lane.cars.splice(at < 0 ? lane.cars.length : at, 0, c);
     }
-    this.selected = built.length ? [...built] : null;
+    this.connect();
+    const live = built.filter(e => g.edges.includes(e));
+    this.selected = live.length ? live : null;
     return true;
   }
 
   placeControl(p: Vec, kind: 'light' | 'roundabout'): void {
     const n = this.graph.nearestNode(p, NODE_R + 6);
-    if (!n || n.city || n.edges.length < 3) { this.say('Place on an intersection'); return; }
+    if (!n || n.building || n.edges.length < 3) { this.say('Place on an intersection'); return; }
     if (n.control === kind) return;
     // switching sells the old control under the refund rule
     const cost = CONTROL_COST[kind] - this.controlRefund(n);

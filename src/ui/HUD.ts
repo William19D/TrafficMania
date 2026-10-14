@@ -1,7 +1,8 @@
 import type { Game, Tool } from '../core/Game.ts';
 import { DAY_SECONDS, fmtMoney, income } from '../core/Game.ts';
-import { TIERS, TUNING as T } from '../core/config.ts';
+import { PURPOSES, TIERS, TUNING as T } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
+import type { Building } from '../entities/Building.ts';
 import type { RoadType } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
 
@@ -45,9 +46,10 @@ const FRIENDLY: Record<string, string> = {
   'Already exists': 'That road already exists: start or end somewhere new',
   'Invalid terrain': 'Roads cannot start or end in water or on a mountain',
   'Place on an intersection': 'Click a junction where 3 or more roads meet',
-  'Highways give no building access': 'Highways give no building access: join towns with a street or avenue to a junction on the highway',
+  'Highways give no building access': 'Highways give no building access: join buildings with a street or avenue to a junction on the highway',
+  'Blocked by a building': 'Roads cannot run through a building: go around it, or end at its door',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at)/;
+const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at|Blocked)/;
 
 const CONTROLS: [string, string][] = [
   ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
@@ -94,14 +96,15 @@ export class HUD {
     week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string; over: boolean;
   } = { msg: '', over: false };
   onTutorial: (() => void) | null = null;
-  // Called with the most overcrowded city when the warning chip is clicked
-  onDanger: ((city: Game['cities'][number]) => void) | null = null;
+  // Called with the next building without a road each time the warning chip is clicked
+  onDanger: ((b: Building) => void) | null = null;
+  private dangerIdx = 0;
 
   constructor(private root: HTMLElement, private game: Game) {
     root.innerHTML = `
       <div class="panel res" role="group" aria-label="Resources">
         <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
-        <div class="chip danger" hidden tabindex="0" role="button" data-tip="A city has too many waiting cars. Click to jump to it.">${icon('warning')}<b><span class="long">Overcrowding </span><span class="pct num"></span></b></div>
+        <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
       </div>
       <div class="panel status">
         <div class="seg" role="group" aria-label="Game speed">
@@ -151,6 +154,9 @@ export class HUD {
         ${toolBtn(TOOLS[3])}
         ${toolBtn(TOOLS[4])}
       </div>
+      <div class="panel legend" role="group" aria-label="Car colours by trip">
+        ${Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join('')}
+      </div>
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
       <div class="tip" role="tooltip" hidden></div>`;
@@ -179,8 +185,8 @@ export class HUD {
     this.q('[data-action="close-help"]').onclick = () => this.setHelp(false);
     this.q('[data-action="tutorial"]').onclick = () => { this.setHelp(false); this.onTutorial?.(); };
     const jump = () => {
-      const worst = game.cities.reduce((w, c) => (c.overcrowd > (w?.overcrowd ?? 0) ? c : w), null as Game['cities'][number] | null);
-      if (worst) this.onDanger?.(worst);
+      const off = game.buildings.filter(b => !b.connected);
+      if (off.length) this.onDanger?.(off[this.dangerIdx++ % off.length]);
     };
     this.q('.danger').onclick = jump;
     this.q('.danger').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } };
@@ -316,12 +322,11 @@ export class HUD {
     // keep Tab inside the modal
     for (const el of Array.from(this.root.children)) if (el !== modal) el.toggleAttribute('inert', open);
     modal.hidden = !open;
+    // ponytail: nothing ends a game until S7's bankruptcy and happiness checks; the modal stays for them
     if (g.gameOver) {
-      const city = g.cities.find(c => c.overcrowd >= 1);
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title" class="bad">${icon('warning')} Overcrowded!</h2>
-          ${city ? `<p class="sub">${esc(city.name)} has too many waiting cars.</p>` : ''}
+          <h2 id="m-title" class="bad">${icon('warning')} Game over</h2>
           <div class="stats">
             <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.score}</b></div>
             <div>${icon('week', 'big')}<span>Weeks</span><b class="num">${g.week}</b></div>
@@ -466,14 +471,12 @@ export class HUD {
       this.dots[g.day - 1]?.style.setProperty('--p', String(frac));
     }
 
-    let danger = 0;
-    for (const c of g.cities) danger = Math.max(danger, c.overcrowd);
-    const pct = Math.ceil(danger * 20) * 5; // ceil: any overcrowd > 0 shows the chip
-    if (pct !== L.danger) {
-      L.danger = pct;
+    const off = g.buildings.reduce((n, b) => n + +!b.connected, 0);
+    if (off !== L.danger) {
+      L.danger = off;
       const chip = this.q('.danger');
-      chip.hidden = pct === 0;
-      (chip.querySelector('.pct') as HTMLElement).textContent = `${pct}%`;
+      chip.hidden = off === 0;
+      (chip.querySelector('.cnt') as HTMLElement).textContent = `${off} building${off > 1 ? 's' : ''}`;
     }
 
     // ponytail: change detection on the text, so an identical message repeated before it clears is not re-toasted

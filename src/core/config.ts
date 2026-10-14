@@ -11,14 +11,15 @@ export const SIZES: Record<MapSize, { w: number; h: number }> = {
 };
 
 type Range = [number, number];
-// money: starting budget; tax/upkeep/trips/growth: multipliers; failHappy, debtDays: career fail thresholds
+// money: starting budget; tax/upkeep/trips/growth: multipliers; failHappy, debtDays: career fail thresholds;
+// starterRoad: the seed town starts with a street between its homes
 export const DIFFICULTY: Record<Difficulty, {
   money: number; tax: number; upkeep: number; trips: number; growth: number;
-  failHappy: number; debtDays: number; rivers: Range; mountains: Range;
+  failHappy: number; debtDays: number; rivers: Range; mountains: Range; starterRoad: boolean;
 }> = {
-  easy: { money: 60000, tax: 1.25, upkeep: 0.75, trips: 0.8, growth: 1.25, failHappy: 15, debtDays: 5, rivers: [1, 1], mountains: [2, 3] },
-  normal: { money: 40000, tax: 1, upkeep: 1, trips: 1, growth: 1, failHappy: 25, debtDays: 3, rivers: [1, 2], mountains: [3, 5] },
-  hard: { money: 25000, tax: 0.8, upkeep: 1.25, trips: 1.2, growth: 0.8, failHappy: 35, debtDays: 2, rivers: [2, 2], mountains: [5, 7] },
+  easy: { money: 60000, tax: 1.25, upkeep: 0.75, trips: 0.8, growth: 1.25, failHappy: 15, debtDays: 5, rivers: [1, 1], mountains: [2, 3], starterRoad: true },
+  normal: { money: 40000, tax: 1, upkeep: 1, trips: 1, growth: 1, failHappy: 25, debtDays: 3, rivers: [1, 2], mountains: [3, 5], starterRoad: false },
+  hard: { money: 25000, tax: 0.8, upkeep: 1.25, trips: 1.2, growth: 0.8, failHappy: 35, debtDays: 2, rivers: [2, 2], mountains: [5, 7], starterRoad: false },
 };
 
 // Terrain mix and palette per biome. rivers: null = the difficulty's count. Water is the same everywhere.
@@ -62,6 +63,22 @@ export const TIERS: Record<Tier, {
   highway: { label: 'Highway', limit: 150, kmh: 90, lanes: [2, 3], oneWay: true, cost: 220, noise: 0.9, access: false, level: 6, fill: '#F7F7F5', out: '#8A99AD', shoulder: 3, median: 0, line: 'double' },
 };
 
+// Building zones: footprint w (along the front) x h (depth) px; look: fill, outline, roof inset. Capacities come in S6.
+export type Zone = 'home' | 'shop' | 'office' | 'industry';
+export const ZONES: Record<Zone, { label: string; w: number; h: number; fill: string; out: string; roof: string }> = {
+  home: { label: 'Home', w: 28, h: 24, fill: '#FFFFFF', out: '#8DB17A', roof: '#BCDCA8' },
+  shop: { label: 'Shop', w: 44, h: 30, fill: '#8EC3EE', out: '#4F8CC6', roof: '#BBDAF5' },
+  office: { label: 'Office', w: 38, h: 38, fill: '#ABA3CF', out: '#7468A8', roof: '#CBC5E4' },
+  industry: { label: 'Factory', w: 56, h: 40, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
+};
+// Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
+export type Purpose = 'commute' | 'shop' | 'freight';
+export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
+  commute: { label: 'Commute', color: '#5A6FD8' },
+  shop: { label: 'Shopping', color: '#E8608E' },
+  freight: { label: 'Freight', color: '#E39B2D' },
+};
+
 // Gameplay tuning ($); later steps add theirs
 export const TUNING = {
   BRIDGE_X: 4, VIADUCT_X: 2.5, VIADUCT_LEVEL_X: 0.1, TUNNEL_X: 5, // price multipliers: water share, viaduct (+ per level), mountain share
@@ -69,4 +86,7 @@ export const TUNING = {
   UPKEEP_RATE: 0.02,         // of a road's build price, per day
   REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
   ARRIVAL_PAY: 15,           // placeholder income per arrived trip until S7's taxes
+  ACCESS_R: 60,              // px from a door to the road its free driveway joins
+  // placeholder demand until S5: seconds between trips a home (commute or shopping) / a factory (freight) queues, and the cap
+  HOME_TRIP_S: [6, 10], FACTORY_TRIP_S: [12, 18], MAX_PENDING: 6,
 } as const;

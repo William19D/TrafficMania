@@ -1,25 +1,28 @@
 import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
-import { TIERS } from '../core/config.ts';
+import { PURPOSES, TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
-import type { City } from './City.ts';
+import type { Building } from './Building.ts';
+import type { Trip } from './Trip.ts';
 import { random } from '../util/rng.ts';
 
 export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
-// Vehicle kinds: length, top speed and acceleration factors, spawn weight. Ambulances jump node queues (RoadGraph.update).
+// Vehicle kinds: length, top speed and acceleration factors, spawn weight (trucks only carry freight, so 0).
+// Ambulances jump node queues (RoadGraph.update).
 export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
 export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
   car: { len: CAR_LEN, v: 1, a: 1, w: 0.72 },
-  truck: { len: 24, v: 0.75, a: 0.55, w: 0.1 },
+  truck: { len: 24, v: 0.75, a: 0.55, w: 0 },
   bus: { len: 26, v: 0.7, a: 0.5, w: 0.06 },
   moto: { len: 10, v: 1.1, a: 1.4, w: 0.09 },
   ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
 };
+const W = Object.values(KINDS).reduce((n, k) => n + k.w, 0);
 export const randomKind = (): Kind => {
-  let r = random();
+  let r = random() * W;
   for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
   return 'car';
 };
@@ -56,7 +59,7 @@ export class Car {
   acc: number;
   react: number;
 
-  constructor(public lane: Lane, public dest: City, public origin: City, public kind: Kind = 'car') {
+  constructor(public lane: Lane, public trip: Trip, public kind: Kind = 'car') {
     const k = KINDS[kind];
     this.len = k.len;
     this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * random());
@@ -69,9 +72,9 @@ export class Car {
     return this.vmax * TIERS[e.type.tier].limit / MAX_SPEED;
   }
 
-  get color(): string {
-    return this.dest.color;
-  }
+  get dest(): Building { return this.trip.to; }
+  get origin(): Building { return this.trip.from; }
+  get color(): string { return PURPOSES[this.trip.purpose].color; }
 
   update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
     let lane = this.lane;
