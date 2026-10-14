@@ -22,6 +22,9 @@ export class Building {
   shopAcc = 0;           // fractional shopping / freight trips accrued hourly
   truckAcc = 0;
   retryTimer = 0;
+  happy = 60;            // 0..100, homes only, hourly
+  recent: { at: number; score: number }[] = []; // home: SCORE of each trip from or to it, last 24h
+
 
   constructor(public kind: Zone, public x: number, public y: number, public angle: number) {}
 
@@ -33,6 +36,14 @@ export class Building {
   door(): Vec {
     const d = this.h / 2 + DOOR_D;
     return { x: this.x + Math.cos(this.angle) * d, y: this.y + Math.sin(this.angle) * d };
+  }
+
+  // Corners and side midpoints of the footprint, then the door
+  outline(): Vec[] {
+    const c = Math.cos(this.angle), s = Math.sin(this.angle), h = this.h / 2, w = this.w / 2, pts: Vec[] = [];
+    for (const [x, y] of [[h, w], [h, 0], [h, -w], [0, -w], [-h, -w], [-h, 0], [-h, w], [0, w]]) pts.push({ x: this.x + x * c - y * s, y: this.y + x * s + y * c });
+    pts.push(this.door());
+    return pts;
   }
 
   // p inside the footprint grown by pad

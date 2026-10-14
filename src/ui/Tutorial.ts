@@ -29,6 +29,7 @@ function steps(g: Game): Step[] {
   const office = g.buildings.find(b => b.kind === 'office') ?? g.buildings[0];
   const shop = g.buildings.find(b => b.kind === 'shop') ?? g.buildings[0];
   const door = (b?: Building): Vec[] => b ? [at(b.node)] : [];
+  let placed = 0; // homes on the map when the placing step starts
   const mid = homes.length ? [{ x: homes.reduce((n, b) => n + b.node.x, 0) / homes.length, y: homes.reduce((n, b) => n + b.node.y, 0) / homes.length }] : [];
   return [
     {
@@ -62,7 +63,7 @@ function steps(g: Game): Step[] {
     },
     {
       title: 'Add a traffic light', task: 'Press 2, then click the intersection.',
-      text: 'Lights alternate green between the two axes. Roundabouts (3) let 3 cars through at once.',
+      text: 'Lights alternate green between the two axes. Roundabouts (3, from level 2) let 3 cars through at once.',
       enter: g => topUp(g),
       targets: g => junctions(g).map(at),
       done: g => g.graph.nodes.some(n => n.control !== 'none'), hint: '[data-tool="light"]',
@@ -75,14 +76,15 @@ function steps(g: Game): Step[] {
       done: g => g.lastBuild !== null && g.lastBuild.segs >= 3, hint: '[data-tool="road"]',
     },
     {
-      title: 'Go up: viaducts', task: 'Press + (or PageUp) to set L1, then build a road over water or over another road.',
-      text: 'Viaducts cost more per tile and never create intersections with lower roads. L6+ clears mountains. Ground roads through mountains dig tunnels, the priciest option.',
-      enter: g => { g.lastBuild = null; topUp(g); },
-      done: g => g.lastBuild !== null && g.lastBuild.level >= 1, hint: '[data-action="level-up"]',
+      title: 'Grow the city', task: 'Press B (or Buildings), then click beside a road to place a home.',
+      text: 'New buildings wait in the tray. Near a road the building turns to face it and gets a free driveway. Keep homes away from factories and busy roads. R turns a building that stands free.',
+      // the tray always holds a home for this step
+      enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; g.tray.home = Math.max(1, g.tray.home); },
+      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '[data-tool="place"]',
     },
     {
       title: 'You are ready', task: 'Press Finish and keep the traffic flowing!',
-      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds all of a road built today, half of an older one. Roads and controls cost upkeep every day. A red dashed outline marks a building without a road: its people stay home until you connect it.',
+      text: 'Homes fill up while their trips go smoothly. Each new level brings buildings to place and unlocks road tiers, roundabouts, viaducts and tunnels. Edit (4) changes lanes or bends a road; Demolish (5) refunds all of a road built today, half of an older one. Roads cost upkeep every day.',
     },
   ];
 }

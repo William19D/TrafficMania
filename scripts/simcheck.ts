@@ -1,7 +1,7 @@
 // Headless simulation check: builds a fixed network, runs ~300 game seconds and asserts the car invariants.
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
-import { Game, HOUR } from '../src/core/Game.ts';
+import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
@@ -10,7 +10,7 @@ import type { Trip } from '../src/entities/Trip.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, TIERS, TUNING } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 
@@ -21,7 +21,7 @@ Math.random = () => { throw new Error('Math.random used: route it through random
 
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
-// Blank world: no terrain, no starter town
+// Blank world: no terrain, no starter town, every level unlocked
 const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
@@ -31,6 +31,7 @@ const blank = (): Game => {
   w.buildings = [];
   w.tutorialActive = true;
   w.money = 1e6;
+  w.cityLevel = LEVELS.length;
   return w;
 };
 // A building with its door at (x, y); its footprint lies below the door, or above it (up) when a road leaves the door downward
@@ -382,6 +383,36 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.queueTrip(H.building!, O.building!, 'commute');
   for (let t = 0; t < 20 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`buildings: commute over the driveways did not arrive (score ${w.score})`);
+}
+// Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
+// get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the
+// tray and pays the grant once
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.cityLevel = 1;
+  w.tray = { ...LEVELS[0].batch };
+  w.demandOff = true;
+  if (w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, { tier: 'avenue', lanes: 1, oneWay: false }).ok) fail('levels: avenue built at level 1');
+  w.setTool('roundabout');
+  if (w.tool === 'roundabout') fail('levels: roundabout tool at level 1');
+  w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, street));
+  w.startPlacing('home');
+  if (!w.placeBuilding({ x: 300, y: 440 })) fail('levels: home not placed');
+  w.startPlacing('office');
+  if (!w.placeBuilding({ x: 600, y: 570 })) fail('levels: office not placed');
+  const [H, O] = w.buildings;
+  if (!H.connected || !O.connected || Math.abs(H.angle - Math.PI / 2) > 1e-9 || Math.abs(O.angle + Math.PI / 2) > 1e-9) fail(`levels: placed ${H.angle} ${O.angle} connected ${H.connected} ${O.connected}`);
+  if (w.tray.home !== LEVELS[0].batch.home - 1 || w.tray.office !== LEVELS[0].batch.office - 1) fail(`levels: tray ${JSON.stringify(w.tray)}`);
+  if (w.placeBuilding({ x: 300, y: 440 })) fail('levels: placed a building on top of another');
+  w.queueTrip(H, O, 'commute');
+  for (let t = 0; t < 20 * 60; t++) w.update(DT);
+  if (w.score !== 1) fail(`levels: commute from a placed home did not arrive (score ${w.score})`);
+  const m0 = w.money;
+  H.residents = levelPop(2);
+  w.update(DT);
+  w.update(DT);
+  if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
+  if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

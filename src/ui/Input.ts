@@ -25,7 +25,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let plan: PathPlan | null = null;
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
 
-  const blocked = () => game.gameOver;
+  const blocked = () => game.gameOver || game.pendingLevel > 0;
 
   const cancel = () => {
     mode = 'idle';
@@ -62,6 +62,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       press = { x: e.clientX, y: e.clientY };
       run = game.runAt(w);
     } else if (game.tool === 'demolish') game.demolishAt(w);
+    else if (game.tool === 'place') game.placeBuilding(w);
     else game.placeControl(w, game.tool);
   });
 
@@ -150,7 +151,12 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       e.preventDefault();
       if (blocked()) return;
       game.speed = game.speed === 0 ? 1 : 0;
-    } else if (e.key === 'Escape') { cancel(); game.select(null); }
+    } else if (e.ctrlKey || e.metaKey || e.altKey) return;
+    else if (e.key === 'b' || e.key === 'B') {
+      if (game.tool === 'place') game.setTool('road');
+      else { cancel(); game.startPlacing(); }
+    } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
+    else if (e.key === 'Escape') { cancel(); game.select(null); if (game.tool === 'place') game.setTool('road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
   });

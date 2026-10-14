@@ -1,6 +1,6 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
-import { BIOMES, PURPOSES, TIERS, ZONES } from '../core/config.ts';
+import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
 import { ROAD_W, NODE_R, CAR_W, LANE_W, lightGroup, roadWidth } from '../network/RoadGraph.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
@@ -438,7 +438,8 @@ export class CanvasRenderer {
     }
     rect(h - 2, -3.5, 4, 7, 1, '#FFFFFF', z.out);
     b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => rect(-h + 4, -w + 4 + i * 6, 4, 4, 1, PURPOSES[t.purpose].color, CAR_OUT, 0.75));
-    if (!b.connected) {
+    // a ghost (place tool) has no door node yet
+    if (b.node && !b.connected) {
       ctx.setLineDash([4, 3]);
       rect(-h - 3, -w - 3, 2 * h + 6, 2 * w + 6, 6, null, RED, 1.5);
       ctx.setLineDash([]);
@@ -486,6 +487,8 @@ export class CanvasRenderer {
       if (!pt) return;
       this.ring(pt.x, pt.y, NODE_R, ROAD_OUT, 2);
       label('Start here', pt.x, pt.y, DARK);
+    } else if (game.tool === 'place') {
+      this.ghost(game, p);
     } else if (game.tool === 'edit') {
       const run = game.runAt(p);
       if (!run) return;
@@ -494,6 +497,48 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
       label('Click to edit · drag to bend', p.x, p.y, ACCENT);
     }
+  }
+
+  // Place tool: the held building, faded, with a green / red footprint outline, its door, the driveway it would get, a dashed
+  // pollution ring for a factory, and a label: the reason it cannot go there, else what its residents will dislike, else its name
+  private ghost(game: Game, p: Vec): void {
+    const plan = game.planPlace(p);
+    if (!plan) return;
+    const ctx = this.ctx, b = plan.b, col = plan.ok ? GREEN : RED, door = b.door();
+    if (b.kind === 'industry') {
+      ctx.setLineDash([6, 6]);
+      ctx.globalAlpha = 0.6;
+      this.ring(b.x, b.y, TUNING.POLLUTION_R, ZONES.industry.out, 1.5);
+      ctx.setLineDash([]);
+    }
+    if (plan.road) {
+      ctx.setLineDash([3, 3]);
+      ctx.globalAlpha = 0.8;
+      this.seg(door, plan.road, ROAD_OUT, 2);
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 0.6;
+    this.building(b, game.time);
+    ctx.globalAlpha = 1;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.beginPath();
+    ctx.roundRect(-b.h / 2 - 2, -b.w / 2 - 2, b.h + 4, b.w + 4, 5);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+    this.circle(door.x, door.y, 3.5, '#FFFFFF');
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const y = b.y - Math.max(b.w, b.h) / 2 - 10;
+    if (!plan.ok) this.text(plan.reason, b.x, y, 'bold 12px system-ui', RED);
+    else if (plan.warn) this.text(plan.warn, b.x, y, 'bold 12px system-ui', '#A86A00');
+    else this.text(ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
   }
 
   // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between

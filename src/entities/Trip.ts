@@ -4,6 +4,8 @@ import type { Building, Commuter } from './Building.ts';
 export type Outcome = 'smooth' | 'wait' | 'detour' | 'gaveup' | 'noroute';
 export const OUTCOMES: Outcome[] = ['smooth', 'wait', 'detour', 'gaveup', 'noroute'];
 export const FAILED: Outcome[] = ['gaveup', 'noroute'];
+// Trip quality per outcome (happiness, taxes)
+export const SCORE: Record<Outcome, number> = { smooth: 1, detour: 0.6, wait: 0.4, gaveup: 0, noroute: 0 };
 
 // One car journey; back = the return leg (it queues no further trip). Times are game seconds:
 // queued / departed (left the door), leave = when the return leg goes once parked at 'to' (0 = at once);

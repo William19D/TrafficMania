@@ -1,7 +1,7 @@
 import type { Game, Tool } from '../core/Game.ts';
-import { fmtMoney, income } from '../core/Game.ts';
-import { PURPOSES, TIERS, TUNING as T } from '../core/config.ts';
-import type { Tier } from '../core/config.ts';
+import { fmtMoney, income, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
+import type { Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { RoadType } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
@@ -12,7 +12,11 @@ const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'roundabout', label: 'Roundabout', key: '3', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction. Drag a road to bend it.' },
   { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
+  { tool: 'place', label: 'Buildings', key: 'B', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
 ];
+// Zone swatch for the tray: the footprint in its colours
+const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
+const count = (n: number): string => n === Infinity ? '∞' : String(n);
 
 const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
 const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Price ×${n}`;
@@ -48,11 +52,13 @@ const FRIENDLY: Record<string, string> = {
   'Place on an intersection': 'Click a junction where 3 or more roads meet',
   'Highways give no building access': 'Highways give no building access: join buildings with a street or avenue to a junction on the highway',
   'Blocked by a building': 'Roads cannot run through a building: go around it, or end at its door',
+  'Overlaps a road': 'Buildings cannot stand on a road: move it beside the road',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at|Blocked)/;
+const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings)/;
 
 const CONTROLS: [string, string][] = [
   ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
+  ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
@@ -80,7 +86,8 @@ function flash(el: Element, cls: string, others: string[] = []): void {
 
 function toolBtn(t: (typeof TOOLS)[number]): string {
   return `<button class="tool${t.tool === 'demolish' ? ' destroy' : ''}" data-tool="${t.tool}" aria-pressed="false" data-tip="${t.tip}" data-key="${t.key}">`
-    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span></button>`;
+    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span>`
+    + `${icon('lock', 'lock')}${t.tool === 'place' ? '<b class="badge num" hidden></b>' : ''}</button>`;
 }
 
 interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<typeof setTimeout> }
@@ -96,17 +103,23 @@ export class HUD {
   private helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; danger?: number; pick?: string; over: boolean;
-  } = { msg: '', over: false };
+    clock?: number; msg: string; danger?: number; pick?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+  } = { msg: '' };
+  // Last level the player has seen in the level-up modal, and the speed to resume when it closes
+  private seenLevel: number;
+  private resume: 0 | 1 | 2 | 4 = 1;
   onTutorial: (() => void) | null = null;
   // Called with the next building without a road each time the warning chip is clicked
   onDanger: ((b: Building) => void) | null = null;
   private dangerIdx = 0;
 
   constructor(private root: HTMLElement, private game: Game) {
+    this.seenLevel = game.cityLevel;
     root.innerHTML = `
       <div class="panel res" role="group" aria-label="Resources">
         <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
+        <div class="chip people" tabindex="0" data-tip="">${icon('people')}<span class="pp"><span><b class="pv num"></b><small class="pn num"></small></span><span class="pbar"><i></i></span></span></div>
+        <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
       </div>
       <div class="panel status">
@@ -154,11 +167,19 @@ export class HUD {
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
         <span class="sep"></span>
+        ${toolBtn(TOOLS[5])}
+        <span class="sep"></span>
         ${toolBtn(TOOLS[3])}
         ${toolBtn(TOOLS[4])}
       </div>
-      <div class="panel legend" role="group" aria-label="Car colours by trip">
-        ${Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join('')}
+      <div class="leftcol">
+        <div class="panel tray" role="group" aria-label="Buildings to place">
+          <small class="tray-h">To place</small>
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: click, then click the map near a road">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+        </div>
+        <div class="panel legend" role="group" aria-label="Car colours by trip">
+          ${Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join('')}
+        </div>
       </div>
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
@@ -170,6 +191,7 @@ export class HUD {
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
     for (const b of this.toolBtns) b.onclick = () => game.setTool(b.dataset.tool as Tool);
+    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => game.startPlacing(b.dataset.zone as Zone); });
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
     const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
@@ -208,9 +230,9 @@ export class HUD {
   // ---------- keyboard ----------
   private onKey(e: KeyboardEvent): void {
     const g = this.game;
-    if (g.gameOver) {
+    if (g.gameOver || g.pendingLevel) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (e.key === 'Enter') { e.preventDefault(); location.reload(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) location.reload(); else this.closeLevel(); }
       return;
     }
     if (e.key === 'Escape') {
@@ -317,9 +339,16 @@ export class HUD {
   }
 
   // ---------- modals ----------
+  // Level-up modal closed: the game runs again at the speed it had
+  private closeLevel(): void {
+    this.seenLevel = this.game.pendingLevel;
+    this.game.pendingLevel = 0;
+    this.game.speed = this.resume || 1;
+  }
+
   private renderModal(): void {
     const g = this.game, modal = this.q('.modal');
-    const open = g.gameOver;
+    const open = g.gameOver || !!g.pendingLevel;
     this.hideTip();
     this.setHelp(false, false);
     // keep Tab inside the modal
@@ -338,6 +367,29 @@ export class HUD {
         </div>`;
       const b = this.q<HTMLButtonElement>('[data-action="restart"]');
       b.onclick = () => location.reload();
+      b.focus();
+    } else if (g.pendingLevel) {
+      // every level reached since the last modal (several at once merge): unlocks, the batch and the grants
+      if (g.speed) this.resume = g.speed;
+      g.speed = 0;
+      const lv: number[] = [];
+      for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
+      const unlocks = lv.flatMap(levelUnlocks), batch = Object.fromEntries(ZONE_KEYS.map(z => [z, 0])) as Record<Zone, number>;
+      for (const n of lv) { const b = levelBatch(n); for (const z of ZONE_KEYS) batch[z] += b[z]; }
+      const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0);
+      modal.innerHTML = `
+        <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
+          <h2 id="m-title">${icon('star')} Level ${g.pendingLevel}!</h2>
+          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents. New buildings wait in the tray: place them beside your roads so the city keeps growing.</p>
+          <div class="lvl-grid">
+            <div><h3>New buildings</h3>${ZONE_KEYS.filter(z => batch[z]).map(z => `<p>${zonePic(z)}${ZONES[z].label} <b class="num">×${batch[z]}</b></p>`).join('')}</div>
+            <div><h3>Unlocked</h3>${unlocks.length ? unlocks.map(u => `<p>${icon('check')}${esc(u)}</p>`).join('') : '<p class="muted">Nothing new this time</p>'}
+              <p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
+          </div>
+          <div class="actions"><button class="btn primary" data-action="continue">Continue <kbd>Enter</kbd></button></div>
+        </div>`;
+      const b = this.q<HTMLButtonElement>('[data-action="continue"]');
+      b.onclick = () => this.closeLevel();
       b.focus();
     } else {
       modal.innerHTML = '';
@@ -368,7 +420,7 @@ export class HUD {
       const k = b.dataset.tier as Tier, locked = !g.tierUnlocked(k);
       b.disabled = off;
       b.setAttribute('aria-pressed', String(t.tier === k));
-      // ponytail: locked tiers stay clickable so Game toasts 'Unlocks at level N'; S6 adds the lock icon
+      // locked tiers stay clickable so Game toasts 'Unlocks at level N'
       b.setAttribute('aria-disabled', String(locked));
       b.dataset.tip = tierTip(k) + (locked ? ` · unlocks at level ${TIERS[k].level}` : delta({ ...t, tier: k }));
     });
@@ -379,9 +431,11 @@ export class HUD {
       b.dataset.tip = laneTip(n) + delta({ ...t, lanes: n });
     });
     const ow = this.q<HTMLButtonElement>('[data-action="oneway"]');
+    const owLock = g.lockOf('oneway');
     ow.disabled = off || !tier.oneWay;
     ow.setAttribute('aria-pressed', String(t.oneWay));
-    ow.dataset.tip = ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
+    ow.setAttribute('aria-disabled', String(!!owLock));
+    ow.dataset.tip = owLock || ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
     this.q('[data-action="flip"]').hidden = !(run && t.oneWay);
   }
 
@@ -392,7 +446,7 @@ export class HUD {
     // Money in whole dollars with a 200ms flash per change. Net per day = income (yesterday's, or today's so far
     // on the first day) minus the network's upkeep.
     const money = Math.round(g.money);
-    const net = Math.round(income(g.today ? g.ledger.yesterday : g.ledger.today) - g.upkeepDay);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(income(l) - l.grants - g.upkeepDay); // grants are one-off
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -426,6 +480,54 @@ export class HUD {
       document.body.dataset.tool = g.tool;
     }
 
+    // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
+    const pop = Math.round(g.population), next = levelPop(g.cityLevel + 1), prev = levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
+    if (pk !== L.pop) {
+      L.pop = pk;
+      this.q('.pv').textContent = pop.toLocaleString('en-US');
+      this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
+      this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
+      this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Homes fill up while their trips go smoothly and empty out when they do not.`;
+    }
+    if (g.cityLevel !== L.city) {
+      const up = L.city !== undefined;
+      L.city = g.cityLevel;
+      this.q('.lvn').textContent = String(g.cityLevel);
+      const soon = [g.cityLevel + 1, g.cityLevel + 2].map(n => [n, levelUnlocks(n)] as const).filter(([, u]) => u.length);
+      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : ''}.`
+        + (g.creative ? '' : soon.map(([n, u]) => ` Level ${n}: ${u.join(', ')}.`).join(''));
+      for (const b of this.toolBtns) {
+        const lock = b.dataset.tool === 'roundabout' ? g.lockOf('roundabout') : '';
+        b.setAttribute('aria-disabled', String(!!lock));
+        const tip = TOOLS.find(t => t.tool === b.dataset.tool)!.tip;
+        b.dataset.tip = lock ? `${lock}. ${tip}` : tip;
+      }
+      L.pick = undefined;
+      L.level = undefined;
+      if (up) flash(this.q('.lvl'), 'bump');
+    }
+
+    // Tray: one card per zone with buildings left; the dock badge counts them all
+    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}`;
+    if (yk !== L.tray) {
+      const before = L.trayN;
+      L.tray = yk;
+      let total = 0;
+      this.root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => {
+        const z = b.dataset.zone as Zone, n = g.tray[z];
+        total += n;
+        b.hidden = n < 1;
+        b.setAttribute('aria-pressed', String(g.placing === z));
+        (b.querySelector('.zn') as HTMLElement).textContent = `×${count(n)}`;
+      });
+      this.q('.tray').hidden = total < 1;
+      const badge = this.q('.badge');
+      badge.hidden = total < 1;
+      badge.textContent = count(total);
+      L.trayN = total;
+      if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
+    }
+
     if (toolChanged || g.level !== L.level) {
       const pulse = L.level !== undefined && g.level !== L.level;
       const lv = g.level;
@@ -436,6 +538,8 @@ export class HUD {
       st.classList.toggle('off', off);
       st.dataset.tip = off ? 'Elevation applies to the Road tool' : ROAD_TIP;
       this.q<HTMLButtonElement>('[data-action="level-down"]').disabled = off || lv <= 0;
+      // ponytail: a locked next level stays clickable so Game toasts 'Unlocks at level N'
+      this.q('[data-action="level-up"]').setAttribute('aria-disabled', String(!!g.lockOf(lv + 1 >= 6 ? 'high' : 'viaduct')));
       this.q<HTMLButtonElement>('[data-action="level-up"]').disabled = off || lv >= 10;
       this.q('.lv').textContent = lv === 0 ? 'Ground' : `L${lv}`;
       this.q('.eh').textContent = lv === 0 ? 'Ground · tunnels through mountains' : lv < 6 ? `Viaduct · price ×${(T.VIADUCT_X + T.VIADUCT_LEVEL_X * lv).toFixed(1)}` : 'Viaduct · clears mountains';
@@ -492,8 +596,9 @@ export class HUD {
       if (g.message) this.toast(g.message);
     }
 
-    if (g.gameOver !== L.over) {
-      L.over = g.gameOver;
+    const mk = `${g.gameOver}|${g.pendingLevel}`;
+    if (mk !== L.modal) {
+      L.modal = mk;
       this.renderModal();
     }
   }

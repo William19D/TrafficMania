@@ -1,21 +1,21 @@
 import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
-import { generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
+import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
 import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
 import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
-import { DOOR_D, DOOR_R } from '../entities/Building.ts';
-import type { Building, Commuter } from '../entities/Building.ts';
-import { makeTrip, OUTCOMES } from '../entities/Trip.ts';
+import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
+import type { Commuter } from '../entities/Building.ts';
+import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
-import { DEFAULT_CONFIG, DIFFICULTY, TIERS, ZONES, TUNING as T } from './config.ts';
-import type { GameConfig, Purpose, Tier } from './config.ts';
+import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_BATCH, ENDLESS_POP, LEVELS, TIERS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
+import type { Feature, GameConfig, Purpose, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 
-export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
+export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
@@ -31,6 +31,18 @@ export const fmtMoney = (n: number): string => {
   return (n < 0 && s !== '0' ? '−$' : '$') + s;
 };
 export interface Snap { node: Node | null; edge: Edge | null; point: Vec }
+// Place tool ghost: road = where its driveway would join (null: no access road in reach); warn = what its residents will dislike
+export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null }
+export const ZONE_KEYS = Object.keys(ZONES) as Zone[];
+// Population to reach city level n (level 1 = the start)
+export const levelPop = (n: number): number =>
+  n <= LEVELS.length ? LEVELS[Math.max(0, n - 1)].pop : LEVELS[LEVELS.length - 1].pop + (n - LEVELS.length) * ENDLESS_POP;
+export const levelBatch = (n: number): Record<Zone, number> => ({ ...(n <= LEVELS.length ? LEVELS[n - 1].batch : ENDLESS_BATCH) });
+// What city level n unlocks: tiers, then features
+export const levelUnlocks = (n: number): string[] => [
+  ...(Object.keys(TIERS) as Tier[]).filter(t => TIERS[t].level === n).map(t => TIERS[t].label),
+  ...Object.values(UNLOCKS).filter(u => u.level === n).map(u => u.label),
+];
 export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number; type: RoadType }
 // cost in $; net: bend plans only, cost minus the full price of the replaced run
 export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number }
@@ -61,6 +73,13 @@ export class Game {
   tool: Tool = 'road';
   // Elevation for new roads: 0 = ground, 1..10 = viaducts
   level = 0;
+  // City level (population milestones); pendingLevel = the last level-up the HUD has not shown yet, 0 = none
+  cityLevel = 1;
+  pendingLevel = 0;
+  // Buildings waiting to be placed (Infinity in creative); placing = the zone the place tool holds; placeAngle turns a free ghost (R)
+  tray: Record<Zone, number>;
+  placing: Zone | null = null;
+  placeAngle = Math.PI / 2;
   // Type for new roads
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Run selected with the Edit tool (edges in run order)
@@ -88,6 +107,7 @@ export class Game {
     setSeed(hashSeed('sim:' + cfg.seed));
     this.terrain = generateTerrain(cfg);
     this.money = cfg.mode === 'creative' ? Infinity : DIFFICULTY[cfg.difficulty].money;
+    this.tray = cfg.mode === 'creative' ? { home: Infinity, shop: Infinity, office: Infinity, industry: Infinity } : levelBatch(1);
     const town = findStarterTown(this.terrain);
     for (const b of town?.buildings ?? []) this.addBuilding(b);
     if (town && DIFFICULTY[cfg.difficulty].starterRoad) {
@@ -122,6 +142,25 @@ export class Game {
   get today(): number { return Math.floor(this.clock / 24); }
   get day(): number { return this.today + 1; }
   get running(): boolean { return !this.gameOver && this.speed > 0; }
+  get creative(): boolean { return this.cfg.mode === 'creative'; }
+  get population(): number { return this.buildings.reduce((n, b) => n + b.residents, 0); }
+
+  // Each milestone passed: the next level, its batch into the tray and the grant (career; creative only counts the level)
+  private checkLevel(): void {
+    while (this.population >= levelPop(this.cityLevel + 1)) {
+      const n = ++this.cityLevel;
+      if (this.creative) continue;
+      const add = levelBatch(n), grant = this.levelGrant(n);
+      for (const z of ZONE_KEYS) this.tray[z] += add[z];
+      this.money += grant;
+      this.ledger.today.grants += grant;
+      this.pendingLevel = n;
+    }
+  }
+
+  levelGrant(n: number): number {
+    return T.LEVEL_GRANT * n * DIFFICULTY[this.cfg.difficulty].tax;
+  }
 
   // Buildings or roads changed: commuters are re-assigned an in-game hour later (so a road being drawn is not chased)
   private changed(): void {
@@ -146,6 +185,7 @@ export class Game {
       this.lastHour = hr;
       this.hourly(hr % 24);
     }
+    this.checkLevel();
     if (this.time >= this.assignAt) this.assign();
     if (!this.demandOff) this.departures();
 
@@ -181,6 +221,7 @@ export class Game {
     if (h === 3) this.assign();
     if (this.demandOff) return;
     const comp = this.components(), mult = DIFFICULTY[this.cfg.difficulty].trips, [t0, t1] = T.TRUCK_HOURS;
+    this.grow();
     for (const b of this.buildings) {
       if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.who).length * T.PEOPLE_PER_CAR / b.jobs);
       if (b.kind === 'home') {
@@ -197,6 +238,22 @@ export class Game {
           if (to) this.queueTrip(b, to, 'freight');
         }
       }
+    }
+  }
+
+  // Homes: happiness from the last 24h of trips from or to them (0.6 with none; a home without a road sits at 33, S7's value),
+  // then residents move in or out by its band, each hour 1/24 of the daily share of capacity. A home over capacity (simcheck) only shrinks.
+  // ponytail: happiness = 100 x trip score until S7 adds jobs, shops, pollution and noise
+  private grow(): void {
+    const cut = this.time - T.DAY_SECONDS, cap = ZONES.home.residents, gm = DIFFICULTY[this.cfg.difficulty].growth;
+    for (const b of this.buildings) {
+      if (b.kind !== 'home') continue;
+      while (b.recent.length && b.recent[0].at <= cut) b.recent.shift();
+      const q = b.recent.length ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : 0.6;
+      b.happy = b.connected ? 100 * q : 33;
+      const rate = b.happy >= T.GROW_HI ? T.GROW_FAST * gm : b.happy >= T.GROW_LO ? (b.connected ? T.GROW_SLOW * gm : 0) : -T.SHRINK;
+      const d = rate * cap / 24;
+      b.residents = d > 0 ? Math.max(b.residents, Math.min(cap, b.residents + d)) : Math.max(0, b.residents + d);
     }
   }
 
@@ -311,6 +368,7 @@ export class Game {
 
   private report(t: Trip, outcome: Outcome, seconds: number): void {
     this.stats.today[outcome]++;
+    for (const b of new Set([t.from, t.to])) if (b.kind === 'home') b.recent.push({ at: this.time, score: SCORE[outcome] });
     this.reports.push({ purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour });
     if (this.reports.length > 200) this.reports.shift();
   }
@@ -359,24 +417,38 @@ export class Game {
     }
   }
 
-  // Unlock hook for tools and tiers; ponytail: everything is unlocked until S6 compares TIERS[t].level with the city level
-  tierUnlocked(_t: Tier): boolean {
-    return true;
+  // Unlocks by city level (creative has everything)
+  unlocked(level: number): boolean {
+    return this.creative || this.cityLevel >= level;
   }
 
-  private lockedMsg(t: Tier): string {
-    return this.tierUnlocked(t) ? '' : `Unlocks at level ${TIERS[t].level}`;
+  tierUnlocked(t: Tier): boolean {
+    return this.unlocked(TIERS[t].level);
+  }
+
+  // '' when unlocked, else the toast: 'Unlocks at level 2: Roundabouts'
+  lockOf(f: Feature): string {
+    const u = UNLOCKS[f];
+    return this.unlocked(u.level) ? '' : `Unlocks at level ${u.level}: ${u.label}`;
+  }
+
+  private lockedMsg(t: RoadType): string {
+    if (!this.tierUnlocked(t.tier)) return `Unlocks at level ${TIERS[t.tier].level}: ${TIERS[t.tier].label}`;
+    return t.oneWay ? this.lockOf('oneway') : '';
   }
 
   // Lanes and one-way are clamped to the tier (fitType)
   setRoadType(t: RoadType): void {
-    const locked = this.lockedMsg(t.tier);
+    const locked = this.lockedMsg(fitType(t));
     if (locked) { this.say(locked); return; }
     this.roadType = fitType(t);
   }
 
   setLevel(n: number): void {
-    this.level = Math.max(0, Math.min(MAX_LEVEL, Math.round(n)));
+    const l = Math.max(0, Math.min(MAX_LEVEL, Math.round(n)));
+    const locked = l >= MOUNTAIN_LEVEL ? this.lockOf('high') : l > 0 ? this.lockOf('viaduct') : '';
+    if (locked) { this.say(locked); return; }
+    this.level = l;
   }
 
   // Direction a road leaving p toward 'toward' should start with, to continue smoothly from the
@@ -483,11 +555,11 @@ export class Game {
     return !type && e.drive ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
   }
 
-  // A road from a to b runs through a footprint (grown by up to DOOR_D - 2, so a road along the front still reaches a door)
+  // A road from a to b runs through a footprint grown by pad (by default up to DOOR_D - 2, so a road along the front still reaches a door)
   // ponytail: samples every 4px, like segmentCrosses
-  private hitsBuilding(a: Vec, b: Vec, type: RoadType): boolean {
-    const pad = Math.min(roadWidth(type) / 2, DOOR_D - 2), n = Math.max(1, Math.ceil(dist(a, b) / 4));
-    for (const bd of this.buildings) {
+  private hitsBuilding(a: Vec, b: Vec, type: RoadType, pad = Math.min(roadWidth(type) / 2, DOOR_D - 2), list = this.buildings): boolean {
+    const n = Math.max(1, Math.ceil(dist(a, b) / 4));
+    for (const bd of list) {
       if (distToSegment(bd, a, b).d > (bd.w + bd.h) / 2 + pad) continue;
       for (let i = 0; i <= n; i++) if (bd.contains({ x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n }, pad)) return true;
     }
@@ -502,8 +574,7 @@ export class Game {
     for (const b of this.buildings) {
       if (b.connected) continue;
       const door = b.node;
-      const hits = g.edges.filter(e => e.level === 0 && !e.tunnel && !e.bridge && !e.drive && TIERS[e.type.tier].access)
-        .map(e => ({ e, ...distToSegment(door, e.a, e.b) })).filter(h => h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
+      const hits = this.accessEdges().map(e => ({ e, ...distToSegment(door, e.a, e.b) })).filter(h => h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
       for (const h of hits) {
         const end = dist(h.point, h.e.a) <= NODE_R ? h.e.a : dist(h.point, h.e.b) <= NODE_R ? h.e.b : null;
         if (end?.building) continue;
@@ -514,6 +585,11 @@ export class Game {
         break;
       }
     }
+  }
+
+  // Roads a driveway may join: ground, not a bridge or tunnel, not a driveway, an access tier
+  private accessEdges(): Edge[] {
+    return this.graph.edges.filter(e => e.level === 0 && !e.tunnel && !e.bridge && !e.drive && TIERS[e.type.tier].access);
   }
 
   private refundX(day: number): number {
@@ -612,9 +688,11 @@ export class Game {
     if (!built) { plan.reason = 'Already exists'; return plan; }
     if (total < TILE / 2) return plan; // 'Too short'
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
+    const tunnel = (plan.segs as SegPlan[]).some(g => g.tunnel && !g.exists) ? this.lockOf('tunnel') : '';
+    if (tunnel) { plan.reason = tunnel; return plan; }
     if (noAccess) { plan.reason = 'Highways give no building access'; return plan; }
     if (hit) { plan.reason = 'Blocked by a building'; return plan; }
-    plan.reason = this.lockedMsg(type.tier) || this.afford(plan.cost);
+    plan.reason = this.lockedMsg(type) || this.afford(plan.cost);
     plan.ok = !plan.reason;
     return plan;
   }
@@ -686,8 +764,67 @@ export class Game {
 
   // Switching away from Edit drops the selection at once, so a click right after the switch cannot retype it
   setTool(t: Tool): void {
+    const locked = t === 'roundabout' ? this.lockOf('roundabout') : '';
+    if (locked) { this.say(locked); return; }
+    if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
     if (t !== 'edit') this.selected = null;
+    if (t !== 'place') this.placing = null;
+  }
+
+  // ---- Place tool ----
+
+  // Picks up a building of the zone (or of the first zone with one left) from the tray
+  startPlacing(kind = ZONE_KEYS.find(z => this.tray[z] >= 1)): void {
+    if (!kind || this.tray[kind] < 1) { this.say('No buildings to place: the next level brings more'); return; }
+    this.placing = kind;
+    this.setTool('place');
+  }
+
+  // Ghost of the held building at p. Near an access road (SNAP_R) it faces the road with its door DRIVE_GAP past the road's edge;
+  // elsewhere it stands free, turned by placeAngle. It must lie inside the map on dry land, clear of roads (by a 4px margin) and
+  // of other buildings, with one left in the tray. Free: buildings cost nothing.
+  planPlace(p: Vec, kind = this.placing): PlacePlan | null {
+    if (!kind) return null;
+    const hit = this.accessEdges().map(e => ({ e, ...distToSegment(p, e.a, e.b) })).filter(h => h.d <= T.SNAP_R).sort((x, y) => x.d - y.d)[0];
+    let b: Building, road: Vec | null = null;
+    if (hit) {
+      const { e, point: q } = hit;
+      let nx = -(e.b.y - e.a.y) / e.length, ny = (e.b.x - e.a.x) / e.length;
+      if (nx * (p.x - q.x) + ny * (p.y - q.y) < 0) { nx = -nx; ny = -ny; }
+      const d = e.width / 2 + T.DRIVE_GAP;
+      b = buildingAt(kind, { x: q.x + nx * d, y: q.y + ny * d }, Math.atan2(-ny, -nx));
+      road = q;
+    } else b = new Building(kind, p.x, p.y, this.placeAngle);
+    const pts = b.outline(), m = 4;
+    // ponytail: overlap by sampled outline points both ways; fine for near-square footprints, SAT if long thin ones arrive
+    const reason = this.tray[kind] < 1 ? 'None left in the tray'
+      : pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
+      : pts.some(q => inWater(this.terrain, q, m) || inMountain(this.terrain, q, m)) ? 'Blocked by water or a mountain'
+      : this.graph.edges.some(e => this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
+      : this.buildings.some(o => pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m))) ? 'Overlaps a building'
+      : '';
+    const near = (z: Zone): number => this.buildings.filter(o => o.kind === z && dist(o, b) < T.POLLUTION_R).length;
+    const noisy = () => this.graph.edges.some(e => !e.tunnel && TIERS[e.type.tier].noise >= T.NOISY && distToSegment(b, e.a, e.b).d < T.NOISE_R);
+    const warn = !road ? 'No road yet: connect its door'
+      : kind === 'home' && near('industry') ? 'Factory nearby: residents will be less happy'
+      : kind === 'home' && noisy() ? 'Noisy road: residents will be less happy'
+      : kind === 'industry' && near('home') ? `Pollutes ${near('home')} home${near('home') > 1 ? 's' : ''} nearby`
+      : '';
+    return { b, ok: !reason, reason, warn, road };
+  }
+
+  // Places the held building at p with its free driveway; the tool lets go once that zone runs out
+  placeBuilding(p: Vec): boolean {
+    const plan = this.planPlace(p);
+    if (!plan) return false;
+    if (!plan.ok) { this.say(plan.reason); return false; }
+    const b = plan.b;
+    if (b.kind === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
+    this.addBuilding(b);
+    this.connect();
+    if (--this.tray[b.kind] < 1) this.setTool('road');
+    return true;
   }
 
   typeOf(run: Edge[]): RoadType {
@@ -719,7 +856,7 @@ export class Game {
     type = fitType(type);
     if (!reverse && run.every(e => sameType(e.type, type))) return true;
     const { edges, nodes } = this.graph.runOf(run[0]);
-    const why = this.lockedMsg(type.tier)
+    const why = this.lockedMsg(type)
       || (!TIERS[type.tier].access && (nodes[0].building || nodes[nodes.length - 1].building) ? 'Highways give no building access' : '');
     if (why) { this.say(why); return false; }
     const d = this.retypeDelta(run, type);

@@ -79,6 +79,32 @@ export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   freight: { label: 'Freight', color: '#E39B2D' },
 };
 
+// City levels (career): population to reach each one and the batch of buildings it puts in the tray. LEVELS[0] is the start
+// (the tray next to the starter town). Past the last level every ENDLESS_POP more residents grant ENDLESS_BATCH.
+// Tiers unlock at TIERS[t].level, other features at UNLOCKS[f].level; creative has everything.
+const batch = (home: number, shop: number, office: number, industry: number): Record<Zone, number> => ({ home, shop, office, industry });
+export const LEVELS: { pop: number; batch: Record<Zone, number> }[] = [
+  { pop: 0, batch: batch(6, 1, 3, 0) },
+  { pop: 220, batch: batch(6, 1, 2, 0) },
+  { pop: 400, batch: batch(7, 1, 1, 2) },
+  { pop: 580, batch: batch(8, 2, 2, 1) },
+  { pop: 800, batch: batch(9, 1, 3, 1) },
+  { pop: 1000, batch: batch(10, 2, 3, 1) },
+  { pop: 1250, batch: batch(10, 1, 3, 1) },
+  { pop: 1500, batch: batch(12, 2, 4, 1) },
+  { pop: 1800, batch: batch(12, 2, 4, 1) },
+  { pop: 2100, batch: batch(6, 1, 2, 1) },
+];
+export const ENDLESS_POP = 300, ENDLESS_BATCH = batch(6, 1, 2, 1);
+export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high';
+export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
+  roundabout: { level: 2, label: 'Roundabouts' },
+  oneway: { level: 2, label: 'One-way roads' },
+  viaduct: { level: 3, label: 'Viaducts L1-L5' },
+  tunnel: { level: 5, label: 'Tunnels' },
+  high: { level: 5, label: 'Viaducts L6-L10' },
+};
+
 // Gameplay tuning ($); later steps add theirs
 export const TUNING = {
   BRIDGE_X: 4, VIADUCT_X: 2.5, VIADUCT_LEVEL_X: 0.1, TUNNEL_X: 5, // price multipliers: water share, viaduct (+ per level), mountain share
@@ -100,4 +126,10 @@ export const TUNING = {
   SPAWN_FAIL: 3,             // in-game hours waiting at the door -> gave up
   MAX_RETRIES: 1, MAX_CARS: 450,
   SMOOTH_X: 1.5, WAIT_SHARE: 0.4, DETOUR_X: 1.3, // outcome: time vs free-flow ideal, share of the trip stopped, length vs ideal
+  // Growth per day as a share of a home's capacity, by happiness band (S6: happiness = 100 x the trip score; S7 the full formula)
+  GROW_HI: 60, GROW_LO: 30, GROW_FAST: 0.25, GROW_SLOW: 0.1, SHRINK: 0.1,
+  LEVEL_GRANT: 2000,         // $ x level x taxMult on each level-up
+  PLACED_OCC: 0.4,           // a home placed from the tray moves in 40% full
+  SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
+  POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // placement warnings (S7 scores them): factory reach, road noise reach, noisy tier
 } as const;
