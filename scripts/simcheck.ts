@@ -125,5 +125,27 @@ if (game.score <= 0) fail('no car arrived');
   w.demolishAt({ x: (X.x + Y.x) / 2, y: X.y });
   if (w.graph.edges.length || w.cars.includes(c) || !X.city!.pending.includes(Y.city!)) fail('demolished car not sent home');
 }
+// U-turn: the road ahead turns one-way against the car, so it turns back at M along a smooth half circle and arrives via K
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), M = wg.addNode(500, 500), K = wg.addNode(500, 200);
+  for (const [a, b] of [[X, M], [M, Y], [X, K], [K, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const my = wg.edgeBetween(M, Y)!;
+  wg.setEdgeType(my, { lanes: 1, oneWay: true }, my.a === Y);
+  const c = new Car(wg.lanesFrom(wg.edgeBetween(X, M)!, X)[0]!, Y.city!, X.city!);
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  let back = false, jump = 0, p = wg.carPos(c);
+  for (let t = 0; t < 30 * 60 && w.cars.includes(c); t++) {
+    w.update(DT);
+    if (c.lane.from === M) back = true;
+    const q = wg.carPos(c);
+    if (Math.hypot(q.x - M.x, q.y - M.y) < 30) jump = Math.max(jump, Math.hypot(q.x - p.x, q.y - p.y));
+    p = q;
+  }
+  if (w.score !== 1 || !back) fail('u-turn: car did not turn back and arrive');
+  if (jump > 3) fail(`u-turn: car jumped ${jump.toFixed(1)}px at the turn`);
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

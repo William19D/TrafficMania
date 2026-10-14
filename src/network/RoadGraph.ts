@@ -208,6 +208,9 @@ export class RoadGraph {
     const next = c.path?.[1];
     if (lane.to.control === 'roundabout' && remaining < RING_IN && next) return this.ringPos(lane.to, lane.from, next, RING_IN - remaining);
     if (lane.from.control === 'roundabout' && c.s < RING_IN && c.prev) return this.ringPos(lane.from, c.prev, lane.to, RING_IN + c.s);
+    // U-turn back down the same edge (dead end / one-way ahead): half circle in the last and first NODE_R
+    if (next === lane.from && c.exit?.edge === lane.edge && remaining < NODE_R && lane.to.control !== 'roundabout') return this.uturnPos(lane, c.exit.offset, NODE_R - remaining);
+    if (c.prev === lane.to && c.s < NODE_R && lane.from.control !== 'roundabout') return this.uturnPos({ ...lane, from: lane.to, to: lane.from, offset: c.prevOffset }, lane.offset, NODE_R + c.s);
     const B = 2 * NODE_R;
     let off = lane.offset;
     if (next && remaining < B && lane.to.control !== 'roundabout') {
@@ -220,6 +223,13 @@ export class RoadGraph {
     if (lane.to.control === 'roundabout' && remaining < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - RING_IN) / B);
     if (lane.from.control === 'roundabout' && c.s < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (c.s - RING_IN) / B);
     return this.lanePos(lane, c.s, off);
+  }
+
+  // Left turn from lane l (offset l.offset) onto the opposite lane (offset oo), NODE_R before l.to; p = 0..2*NODE_R
+  private uturnPos(l: Lane, oo: number, p: number): { x: number; y: number; angle: number } {
+    const t = Math.PI * Math.min(1, p / (2 * NODE_R)), r = (l.offset + oo) / 2;
+    const q = this.lanePos(l, l.edge.length - NODE_R + r * Math.sin(t), (l.offset - oo) / 2 + r * Math.cos(t));
+    return { ...q, angle: q.angle - t };
   }
 
   // Counter-clockwise (on screen) around n from the 'from' approach to the 'to' exit; p = straight-line progress 0..2*RING_IN

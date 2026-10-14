@@ -41,9 +41,9 @@ export class Car {
     this.wait = this.speed < 1 ? w + dt : 0;
     if (this.wait > GIVE_UP_S) return 'stuck';
 
-    // Recompute route from the node we are heading to
+    // Recompute route from the node we are heading to; U-turn back down our own edge only when nothing else leads there
     if (!isDest && (!this.path || this.path[0] !== node)) {
-      this.path = findPath(graph, node, this.dest.node);
+      this.path = findPath(graph, node, this.dest.node, lane.edge) ?? findPath(graph, node, this.dest.node);
       if (!this.path) return 'lost';
     } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
       // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up
