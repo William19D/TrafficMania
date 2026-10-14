@@ -209,7 +209,7 @@ export class RoadGraph {
     return best;
   }
 
-  lanePos(lane: Lane, s: number, offset = lane.offset): { x: number; y: number; angle: number } {
+  lanePos(lane: Pick<Lane, 'from' | 'to' | 'offset'>, s: number, offset = lane.offset): { x: number; y: number; angle: number } {
     const dx = lane.to.x - lane.from.x, dy = lane.to.y - lane.from.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
@@ -230,12 +230,19 @@ export class RoadGraph {
     // U-turn back down the same edge (dead end / one-way ahead): half circle in the last and first NODE_R
     if (next === lane.from && c.exit?.edge === lane.edge && remaining < NODE_R && lane.to.control !== 'roundabout') return this.uturnPos(lane, c.exit.offset, NODE_R - remaining);
     if (c.prev === lane.to && c.s < NODE_R && lane.from.control !== 'roundabout') return this.uturnPos({ ...lane, from: lane.to, to: lane.from, offset: c.prevOffset }, lane.offset, NODE_R + c.s);
+    // Plain junction: a Bezier arc over the last / first NODE_R or so of the two lanes (exit is stale for a tick after a hand-off)
+    const nl = c.exit;
+    if (nl && next === nl.to && next !== lane.from && lane.to.control !== 'roundabout') {
+      const q = this.arcPos(lane.from, lane.to, nl.to, lane.offset, nl.offset, -remaining);
+      if (q) return q;
+    }
+    if (c.prev && c.prev !== lane.to && lane.from.control !== 'roundabout') {
+      const q = this.arcPos(c.prev, lane.from, lane.to, c.prevOffset, lane.offset, c.s);
+      if (q) return q;
+    }
     const B = 2 * NODE_R;
     let off = lane.offset;
-    if (next && remaining < B && lane.to.control !== 'roundabout') {
-      const nl = c.exit;
-      if (nl) off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
-    }
+    if (nl && next === nl.to && remaining < B && lane.to.control !== 'roundabout') off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
     if (c.prev && c.s < B && lane.from.control !== 'roundabout') off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
     // roundabouts: the ring is a single lane at LANE_OFFSET, so outer lanes slide inward before entering / after leaving it
     if (lane.to.control === 'roundabout' && remaining < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - RING_IN) / B);
@@ -244,6 +251,24 @@ export class RoadGraph {
     // mid-edge lane change: smoothstep slide from the old lane, nose turned along the sideways speed
     const u = c.lc / LC_S, q = this.lanePos(lane, c.s, off + c.lcOff * u * u * (3 - 2 * u));
     return { ...q, angle: q.angle + Math.atan2(-c.lcOff * 6 * u * (1 - u) / LC_S, Math.max(c.speed, 40)) };
+  }
+
+  // Cubic Bezier across node n from lane a->n (offset oi) onto n->b (offset oo); x = signed distance past n, the arc spans |x| <= r
+  // (NODE_R on single-lane roads).
+  // Its ends sit where the straight lane's halfway offset blend is, tangent to the lanes, so the hand-off is seamless.
+  // ponytail: ignores the roundabout / next-node blends that only reach the ends on edges under ~3 NODE_R; a glitch there is cosmetic
+  private arcPos(a: Node, n: Node, b: Node, oi: number, oo: number, x: number): { x: number; y: number; angle: number } | null {
+    // outer lanes of wide roads start the arc earlier, or a turn from one onto an inner lane is a hook
+    const la = dist(a, n), r = Math.min(NODE_R + Math.max(Math.abs(oi), Math.abs(oo)) - LANE_OFFSET, 2 * NODE_R, la / 2, dist(n, b) / 2);
+    if (x < -r || x > r) return null;
+    const f = 0.5 - r / (4 * NODE_R);
+    const P = this.lanePos({ from: a, to: n, offset: 0 }, la - r, oi + (oo - oi) * f);
+    const Q = this.lanePos({ from: n, to: b, offset: 0 }, r, oo + (oi - oo) * f);
+    const t = (x + r) / (2 * r), m = 1 - t, d = Math.hypot(Q.x - P.x, Q.y - P.y) * 0.4;
+    const x1 = P.x + Math.cos(P.angle) * d, y1 = P.y + Math.sin(P.angle) * d, x2 = Q.x - Math.cos(Q.angle) * d, y2 = Q.y - Math.sin(Q.angle) * d;
+    const bz = (p0: number, p1: number, p2: number, p3: number) => m * m * m * p0 + 3 * m * t * (m * p1 + t * p2) + t * t * t * p3;
+    const dz = (p0: number, p1: number, p2: number, p3: number) => m * m * (p1 - p0) + 2 * m * t * (p2 - p1) + t * t * (p3 - p2);
+    return { x: bz(P.x, x1, x2, Q.x), y: bz(P.y, y1, y2, Q.y), angle: Math.atan2(dz(P.y, y1, y2, Q.y), dz(P.x, x1, x2, Q.x)) };
   }
 
   // Left turn from lane l (offset l.offset) onto the opposite lane (offset oo), NODE_R before l.to; p = 0..2*NODE_R

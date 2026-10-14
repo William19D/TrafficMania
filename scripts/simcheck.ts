@@ -192,7 +192,8 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
   if (at > ls[0]!.edge.length - 100) fail(`lane change: changed too late, s=${at.toFixed(0)}`);
   if (jump > 3) fail(`lane change: car jumped ${jump.toFixed(1)}px`);
 }
-// Curve speed: through a plain inner node M a car takes a right-angle corner at TURN_SPEED and a gentle 10 degree joint near full speed
+// Curve speed: through a plain inner node M a car takes a right-angle corner at TURN_SPEED and a gentle 10 degree joint near full speed,
+// drawn along an arc across M (no jump in position or heading)
 for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SPEED * 0.95, MAX_SPEED]]) {
   const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), M = wg.addNode(500, 500), Y = town(w, 'Y', yx!, yy!);
@@ -202,13 +203,17 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   c.vmax = MAX_SPEED;
   c.lane.cars.push(c);
   w.cars.push(c);
-  let v = -1;
+  let v = -1, jump = 0, p = wg.carPos(c);
   for (let t = 0; t < 20 * 60 && w.cars.includes(c); t++) {
     const l = c.lane;
     w.update(DT);
     if (l !== c.lane && l.to === M) v = c.speed;
+    const q = wg.carPos(c), da = q.angle - p.angle;
+    if (w.cars.includes(c)) jump = Math.max(jump, Math.hypot(q.x - p.x, q.y - p.y), Math.abs(Math.atan2(Math.sin(da), Math.cos(da))) * 20);
+    p = q;
   }
   if (w.score !== 1 || v < lo! || v > hi!) fail(`curve speed: crossed a ${yx === 500 ? 'sharp' : 'gentle'} corner at ${v.toFixed(0)} (score ${w.score})`);
+  if (jump > 3) fail(`turn arc: car jumped ${jump.toFixed(1)} (px or 20x rad) crossing M`);
 }
 // Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
 for (const kind of ['ambulance', 'car'] as const) {
