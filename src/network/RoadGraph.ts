@@ -27,6 +27,7 @@ export type Control = 'none' | 'light' | 'roundabout';
 export interface Node {
   id: number; x: number; y: number; edges: Edge[]; city: City | null; control: Control;
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
+  controlDay: number; // day the control was built (refund rule)
 }
 
 // INVARIANT: cars sorted ascending by s; the last one is the furthest ahead.
@@ -35,7 +36,8 @@ export interface Lane { edge: Edge; from: Node; to: Node; cars: Car[]; offset: n
 
 export interface Edge {
   id: number; a: Node; b: Node; length: number; lanes: Lane[]; type: RoadType; width: number;
-  bridge: boolean; tunnel: boolean; level: number; refund: { bridges: number; tunnels: number };
+  bridge: boolean; tunnel: boolean; level: number;
+  day: number; // build day (refund rule); a split keeps it
 }
 
 export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType }
@@ -55,17 +57,16 @@ export class RoadGraph {
   private nextId = 1;
 
   addNode(x: number, y: number, city: City | null = null): Node {
-    const n: Node = { id: this.nextId++, x, y, edges: [], city, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0 };
+    const n: Node = { id: this.nextId++, x, y, edges: [], city, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0 };
     if (city) city.node = n;
     this.nodes.push(n);
     return n;
   }
 
-  addEdge(a: Node, b: Node, flags: EdgeFlags, refund?: { bridges: number; tunnels: number }): Edge {
+  addEdge(a: Node, b: Node, flags: EdgeFlags, day = 0): Edge {
     const e = {
       id: this.nextId++, a, b, length: dist(a, b),
-      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level,
-      refund: refund ?? { bridges: flags.bridge ? 1 : 0, tunnels: flags.tunnel ? 1 : 0 },
+      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day,
     } as Edge;
     this.buildLanes(e, flags.type);
     a.edges.push(e);
@@ -109,8 +110,8 @@ export class RoadGraph {
     const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type };
     const n = this.addNode(p.x, p.y);
     this.unlink(e);
-    const e1 = this.addEdge(a, n, flags, e.refund);
-    const e2 = this.addEdge(n, b, flags, { bridges: 0, tunnels: 0 });
+    const e1 = this.addEdge(a, n, flags, e.day);
+    const e2 = this.addEdge(n, b, flags, e.day);
     // Distributes the cars keeping ascending order (iterated from lowest to highest s)
     const move = (old: Lane) => {
       const k = this.lanesFrom(e, old.from).indexOf(old);

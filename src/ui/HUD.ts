@@ -1,25 +1,19 @@
-import type { Game, Tool, Reward, Inventory } from '../core/Game.ts';
-import { DAY_SECONDS } from '../core/Game.ts';
+import type { Game, Tool } from '../core/Game.ts';
+import { DAY_SECONDS, fmtMoney, income } from '../core/Game.ts';
+import { TUNING as T } from '../core/config.ts';
 import type { RoadType } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
 
-type ResKey = 'asphalt' | 'bridges' | 'tunnels';
-const RES: { k: ResKey; icon: string; tip: string }[] = [
-  { k: 'asphalt', icon: 'asphalt', tip: 'Asphalt: 1 per road tile (more lanes cost more). Demolish refunds it.' },
-  { k: 'bridges', icon: 'bridge', tip: 'Bridges: 1 per water crossing or viaduct.' },
-  { k: 'tunnels', icon: 'tunnel', tip: 'Tunnels: 1 per ground road through a mountain.' },
-];
-
 const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
-  { tool: 'light', label: 'Light', key: '2', tip: 'Click an intersection (3+ roads). Uses 1 light.' },
-  { tool: 'roundabout', label: 'Roundabout', key: '3', tip: 'Click an intersection. Lets 3 cars through at once. Uses 1.' },
+  { tool: 'light', label: 'Light', key: '2', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day.` },
+  { tool: 'roundabout', label: 'Roundabout', key: '3', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction. Drag a road to bend it.' },
-  { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it and get a refund.' },
+  { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
 ];
 
-const ONEWAY_TIP = 'One-way: half the asphalt, cars only drive in the direction you build';
-const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Asphalt ×${n}`;
+const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
+const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Price ×${n}`;
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -28,28 +22,15 @@ const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: 
   { s: 4, icon: 'faster', lbl: '4x', tip: 'Fastest' },
 ];
 
-// [singular, plural, icon]
-const NOUN: Record<keyof Inventory, [string, string, string]> = {
-  asphalt: ['asphalt', 'asphalt', 'asphalt'],
-  bridges: ['bridge', 'bridges', 'bridge'],
-  tunnels: ['tunnel', 'tunnels', 'tunnel'],
-  lights: ['traffic light', 'traffic lights', 'light'],
-  roundabouts: ['roundabout', 'roundabouts', 'roundabout'],
-};
-
 // Game messages rewritten to say what to do
 const FRIENDLY: Record<string, string> = {
-  'Not enough asphalt': 'Not enough asphalt: demolish a road or wait for the weekly reward',
-  'Not enough bridges': 'Not enough bridges: lower the road to Ground (L0) or demolish a bridge',
-  'Not enough tunnels': 'Not enough tunnels: raise the road to L6+ to pass over the mountain',
+  'Not enough money': 'Not enough money: wait for income or demolish a road built today for a full refund',
   'Too low for the mountain': 'Too low: raise to L6+ or use Ground (L0) to dig a tunnel',
   'Already exists': 'That road already exists: start or end somewhere new',
   'Invalid terrain': 'Roads cannot start or end in water or on a mountain',
   'Place on an intersection': 'Click a junction where 3 or more roads meet',
-  'No traffic lights left': 'No traffic lights left: earn more in the weekly reward',
-  'No roundabouts left': 'No roundabouts left: earn more in the weekly reward',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|No .* left)/;
+const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on)/;
 
 const CONTROLS: [string, string][] = [
   ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
@@ -61,7 +42,6 @@ const CONTROLS: [string, string][] = [
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
-  ['Reward choice', '<kbd>1</kbd> / <kbd>2</kbd>, then <kbd>Enter</kbd>'],
   ['Help', '<kbd>?</kbd>'],
 ];
 
@@ -88,26 +68,14 @@ function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.add(cls);
 }
 
-function rewardRows(r: Reward): string {
-  return (Object.keys(r) as (keyof Inventory)[])
-    .filter(k => (r[k] ?? 0) > 0)
-    .map(k => {
-      const n = r[k]!;
-      return `<span class="row">${icon(NOUN[k][2], 'big')}<b class="num">+${n}</b><span>${NOUN[k][n === 1 ? 0 : 1]}</span></span>`;
-    })
-    .join('');
-}
-
 function toolBtn(t: (typeof TOOLS)[number]): string {
-  const stock = t.tool === 'light' || t.tool === 'roundabout' ? '<span class="stock num"></span>' : '';
   return `<button class="tool${t.tool === 'demolish' ? ' destroy' : ''}" data-tool="${t.tool}" aria-pressed="false" data-tip="${t.tip}" data-key="${t.key}">`
-    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span>${stock}</button>`;
+    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span></button>`;
 }
 
 interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<typeof setTimeout> }
 
 export class HUD {
-  private chips = {} as Record<ResKey, HTMLElement>;
   private toolBtns: HTMLButtonElement[];
   private speedBtns: HTMLButtonElement[];
   private dots: HTMLElement[];
@@ -115,13 +83,11 @@ export class HUD {
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
   private toasts: Toast[] = [];
-  private sel = 0;
   private helpOpen = false;
   private last: {
-    inv: Partial<Inventory>; score?: number; speed?: number; tool?: Tool; level?: number;
-    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string;
-    reward: Reward[] | null; over: boolean;
-  } = { inv: {}, msg: '', reward: null, over: false };
+    money?: number; net?: number; score?: number; speed?: number; tool?: Tool; level?: number;
+    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string; over: boolean;
+  } = { msg: '', over: false };
   onTutorial: (() => void) | null = null;
   // Called with the most overcrowded city when the warning chip is clicked
   onDanger: ((city: Game['cities'][number]) => void) | null = null;
@@ -129,7 +95,7 @@ export class HUD {
   constructor(private root: HTMLElement, private game: Game) {
     root.innerHTML = `
       <div class="panel res" role="group" aria-label="Resources">
-        ${RES.map(r => `<div class="chip" data-res="${r.k}" data-tip="${r.tip}" tabindex="0">${icon(r.icon)}<b class="num"></b><span class="delta" aria-hidden="true"></span></div>`).join('')}
+        <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="A city has too many waiting cars. Click to jump to it.">${icon('warning')}<b><span class="long">Overcrowding </span><span class="pct num"></span></b></div>
       </div>
       <div class="panel status">
@@ -142,7 +108,6 @@ export class HUD {
         <div class="week" tabindex="0" data-tip="">
           <span class="wk"></span>
           <span class="dots">${'<i></i>'.repeat(7)}</span>
-          ${icon('gift')}
         </div>
       </div>
       <button class="panel helpbtn" data-action="help" aria-label="Controls" aria-expanded="false" data-tip="Controls" data-key="?">${icon('help')}</button>
@@ -182,7 +147,6 @@ export class HUD {
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
       <div class="tip" role="tooltip" hidden></div>`;
-    for (const r of RES) this.chips[r.k] = this.q(`[data-res="${r.k}"]`);
     this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
     this.dots = Array.from(root.querySelectorAll<HTMLElement>('.dots i'));
@@ -224,15 +188,9 @@ export class HUD {
   // ---------- keyboard ----------
   private onKey(e: KeyboardEvent): void {
     const g = this.game;
-    if (g.gameOver || g.pendingReward) {
+    if (g.gameOver) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (/^[1-5]$/.test(e.key)) {
-        if (!g.gameOver && (e.key === '1' || e.key === '2')) this.selectCard(Number(e.key) - 1, true);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (g.gameOver) location.reload();
-        else g.applyReward(this.sel);
-      }
+      if (e.key === 'Enter') { e.preventDefault(); location.reload(); }
       return;
     }
     if (e.key === 'Escape') {
@@ -339,17 +297,9 @@ export class HUD {
   }
 
   // ---------- modals ----------
-  private selectCard(k: number, focus = false): void {
-    this.sel = k;
-    this.root.querySelectorAll<HTMLButtonElement>('.rcard').forEach((b, i) => {
-      b.setAttribute('aria-pressed', String(i === k));
-      if (i === k && focus) b.focus();
-    });
-  }
-
   private renderModal(): void {
     const g = this.game, modal = this.q('.modal');
-    const open = g.gameOver || !!g.pendingReward;
+    const open = g.gameOver;
     this.hideTip();
     this.setHelp(false, false);
     // keep Tab inside the modal
@@ -370,24 +320,6 @@ export class HUD {
       const b = this.q<HTMLButtonElement>('[data-action="restart"]');
       b.onclick = () => location.reload();
       b.focus();
-    } else if (g.pendingReward) {
-      modal.innerHTML = `
-        <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title">${icon('gift')} Week ${g.week - 1} complete</h2>
-          <p class="sub">Choose one upgrade</p>
-          <div class="cards">${g.pendingReward.map((r, k) => `
-            <button class="rcard" data-i="${k}" aria-pressed="false"><span class="kb" aria-hidden="true">${k + 1}</span>${icon('check', 'selmark')}${rewardRows(r)}</button>`).join('')}
-          </div>
-          <div class="actions"><button class="btn primary" data-action="confirm">Confirm <kbd>Enter</kbd></button></div>
-        </div>`;
-      modal.querySelectorAll<HTMLButtonElement>('.rcard').forEach(b => {
-        const k = Number(b.dataset.i);
-        b.onfocus = () => this.selectCard(k);
-        b.onclick = () => this.selectCard(k);
-        b.ondblclick = () => g.applyReward(k);
-      });
-      this.q('[data-action="confirm"]').onclick = () => g.applyReward(this.sel);
-      this.selectCard(0, true);
     } else {
       modal.innerHTML = '';
     }
@@ -406,11 +338,11 @@ export class HUD {
     box.dataset.tip = off ? 'Lanes apply to the Road and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
     this.q('.pctx').textContent = run ? 'editing road' : 'per direction';
     this.q('.rpic').innerHTML = roadPic(t);
-    // asphalt to pay (or get back) if the selected run switched to type n
+    // $ to pay (or get back) if the selected run switched to type n
     const delta = (n: RoadType) => {
       if (!run) return '';
-      const d = g.retypeDelta(run, n);
-      return d > 0 ? ` · costs ${d}` : d < 0 ? ` · refunds ${-d}` : '';
+      const d = Math.round(g.retypeDelta(run, n));
+      return d > 0 ? ` · costs ${fmtMoney(d)}` : d < 0 ? ` · refunds ${fmtMoney(-d)}` : '';
     };
     box.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       const n = Number(b.dataset.lanes) as RoadType['lanes'];
@@ -427,31 +359,29 @@ export class HUD {
 
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
-    const g = this.game, inv = g.inventory, L = this.last;
+    const g = this.game, L = this.last;
 
-    for (const { k } of RES) {
-      const v = inv[k], prev = L.inv[k];
-      if (v === prev) continue;
-      L.inv[k] = v;
-      const c = this.chips[k];
-      (c.querySelector('.num') as HTMLElement).textContent = String(v);
-      c.classList.toggle('zero', v <= 0);
-      c.classList.toggle('low', v > 0 && (k === 'asphalt' ? v < 10 : v === 1));
-      if (prev !== undefined) {
-        const d = v - prev;
-        (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${d}` : `−${-d}`;
+    // Money in whole dollars with a 200ms flash per change. Net per day = income (yesterday's, or today's so far
+    // on the first day) minus the network's upkeep.
+    const money = Math.round(g.money);
+    const net = Math.round(income(g.today ? g.ledger.yesterday : g.ledger.today) - g.upkeepDay);
+    if (money !== L.money || net !== L.net) {
+      const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
+      L.money = money;
+      L.net = net;
+      (c.querySelector('.num') as HTMLElement).textContent = fmtMoney(money);
+      const n = c.querySelector('.net') as HTMLElement;
+      n.textContent = `${net >= 0 ? '+' : ''}${fmtMoney(net)}/day`;
+      n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
+      c.classList.toggle('debt', money < 0);
+      const y = g.ledger.yesterday, t = g.ledger.today;
+      c.dataset.tip = `Money. Trips earn ${fmtMoney(T.ARRIVAL_PAY)} each; roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
+        + ` Yesterday: income ${fmtMoney(income(y))}, upkeep ${fmtMoney(y.upkeep)}, building ${fmtMoney(y.build)}.`
+        + ` Today: income ${fmtMoney(income(t))}, building ${fmtMoney(t.build)}.`;
+      if (prev !== undefined && Number.isFinite(d) && d !== 0) {
+        (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${fmtMoney(d)}` : `−${fmtMoney(-d)}`;
         flash(c, d > 0 ? 'gain' : 'spend', ['gain', 'spend']);
       }
-    }
-
-    for (const k of ['lights', 'roundabouts'] as const) {
-      const v = inv[k];
-      if (v === L.inv[k]) continue;
-      L.inv[k] = v;
-      const b = this.toolBtns.find(x => x.dataset.tool === (k === 'lights' ? 'light' : 'roundabout'))!;
-      (b.querySelector('.stock') as HTMLElement).textContent = String(v);
-      b.classList.toggle('zero', v <= 0);
-      b.setAttribute('aria-label', `${k === 'lights' ? 'Traffic light' : 'Roundabout'}, ${v} left`);
     }
 
     if (g.speed !== L.speed) {
@@ -466,9 +396,6 @@ export class HUD {
       L.tool = g.tool;
       for (const b of this.toolBtns) b.setAttribute('aria-pressed', String(b.dataset.tool === g.tool));
       document.body.dataset.tool = g.tool;
-      // same feedback for click and keys 2/3
-      if (g.tool === 'light' && inv.lights <= 0) this.toast('No traffic lights left');
-      if (g.tool === 'roundabout' && inv.roundabouts <= 0) this.toast('No roundabouts left');
     }
 
     if (toolChanged || g.level !== L.level) {
@@ -483,7 +410,7 @@ export class HUD {
       this.q<HTMLButtonElement>('[data-action="level-down"]').disabled = off || lv <= 0;
       this.q<HTMLButtonElement>('[data-action="level-up"]').disabled = off || lv >= 10;
       this.q('.lv').textContent = lv === 0 ? 'Ground' : `L${lv}`;
-      this.q('.eh').textContent = lv === 0 ? 'Ground · tunnels through mountains' : lv < 6 ? 'Viaduct · 1 bridge' : 'Viaduct · clears mountains';
+      this.q('.eh').textContent = lv === 0 ? 'Ground · tunnels through mountains' : lv < 6 ? `Viaduct · price ×${(T.VIADUCT_X + T.VIADUCT_LEVEL_X * lv).toFixed(1)}` : 'Viaduct · clears mountains';
       const y = String(lv === 0 ? 22 : 20 - lv * 1.6);
       const deck = st.querySelector('.deck')!;
       deck.setAttribute('y1', y);
@@ -511,7 +438,7 @@ export class HUD {
       L.dayFrac = undefined;
       this.q('.wk').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Week </span><span class="short">W</span>${g.week}`;
       this.dots.forEach((d, i) => { d.className = i + 1 < g.day ? 'past' : i + 1 === g.day ? 'now' : ''; });
-      this.q('.week').dataset.tip = `Week ${g.week}, day ${g.day} of 7. At the end of the week you choose a reward.`;
+      this.q('.week').dataset.tip = `Week ${g.week}, day ${g.day} of 7. Upkeep is paid at the end of each day.`;
     }
     const frac = Math.round(((g.time % DAY_SECONDS) / DAY_SECONDS) * 20) / 20;
     if (frac !== L.dayFrac) {
@@ -535,8 +462,7 @@ export class HUD {
       if (g.message) this.toast(g.message);
     }
 
-    if (g.pendingReward !== L.reward || g.gameOver !== L.over) {
-      L.reward = g.pendingReward;
+    if (g.gameOver !== L.over) {
       L.over = g.gameOver;
       this.renderModal();
     }

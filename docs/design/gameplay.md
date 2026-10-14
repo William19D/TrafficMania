@@ -168,7 +168,7 @@ ponytail: Euclidean gravity and undirected components. Use network distance and 
 - **Growth**, per hour, as 1/24 of the daily rate: `happy >= GROW_HI`: +`GROW_FAST` of capacity. `GROW_LO..GROW_HI`: +`GROW_SLOW`, but only with a door edge. `< GROW_LO`: -`SHRINK`. Residents are clamped to 0..capacity. Population = Σ residents.
 
 ### Economy
-- **Road price** = `ceil(len / TILE * laneFactor(type) * TIERS[tier].cost * m)`. `m` = 1 for ground, `BRIDGE_X` for ground over water, `VIADUCT_X + VIADUCT_LEVEL_X * level` for level >= 1, `TUNNEL_X` for a tunnel. The multiplier applies per segment, not per run.
+- **Road price** = `len / TILE * laneFactor(type) * TIERS[tier].cost * m` (no rounding: money is a float and the HUD rounds, so splits and same-day refunds add up exactly). `m` = `VIADUCT_X + VIADUCT_LEVEL_X * level` for level >= 1; on the ground `m = 1 + (BRIDGE_X - 1) * water + (TUNNEL_X - 1) * mountain`, where `water`/`mountain` are the shares of the edge over water / through a mountain (`segmentCrosses` samples every 6px). So a long road over a narrow river only pays the bridge rate for the wet stretch.
 - **Tiers** (cost is $/tile at `laneFactor` 1; `limit` is in px/s, and `MAX_SPEED` = 110 = avenue):
 
 | Tier | Lvl | Limit | km/h (UI) | Lanes | One-way | Cost | Upkeep/tile/day | Noise | Building access |
@@ -294,6 +294,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - `CanvasRenderer.ts`: preview, bend and demolish labels in $. Lights and roundabouts read `$600`.
 - `Tutorial.ts`: `topUp` sets money. `simcheck`.
 - Assert: a straight street of N tiles costs exactly `price`, and demolishing it the same day restores the money.
+- As built: `Game.money` (Infinity in creative), `ledger {today, yesterday}`, `upkeepDay` (refreshed by every `spend` and at midnight), `price(a, b, flags)`, `refundOf(e)`, `controlPrice`, `controlRefund`, `upkeepPerDay()`, and `fmtMoney`/`income` helpers; prices live in `TUNING` (`ROAD_COST` = 60 stands in for the tier cost until S3). `Edge.refund` became `Edge.day` (a split keeps it) and `Node` gained `controlDay`. Until S5 a day is still `DAY_SECONDS` = 15 and upkeep is paid in one lump at each midnight; each arrival pays `ARRIVAL_PAY` ($15) x `taxMult` as business income. A bend credits the old run at full price but the rebuilt edges keep the run's oldest build day, so bending never buys a same-day refund. Switching a control (light <-> roundabout) sells the old one under the refund rule. The money chip shows the net per day as income (yesterday's, or today's on the first day) minus `upkeepDay`. The unused `planBuild`/`commitBuild` went with the inventory.
 - Must keep working: building, bending, retyping and demolishing, with the week dots still running.
 
 **S3 Road hierarchy tiers.**

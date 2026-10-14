@@ -153,17 +153,16 @@ export function inMountain(t: Terrain, p: Vec, pad = 0): boolean {
   return t.mountains.some(m => dist(m, p) < m.r * 0.85 + pad);
 }
 
-// Samples the segment every 6px
-export function segmentCrosses(t: Terrain, a: Vec, b: Vec): { water: boolean; mountain: boolean } {
+// Share (0..1) of the segment over water / through a mountain, sampled every ~6px
+export function segmentCrosses(t: Terrain, a: Vec, b: Vec): { water: number; mountain: number } {
   const n = Math.max(1, Math.ceil(dist(a, b) / 6));
-  let water = false, mountain = false;
+  let water = 0, mountain = 0;
   for (let i = 0; i <= n; i++) {
     const p = { x: a.x + (b.x - a.x) * (i / n), y: a.y + (b.y - a.y) * (i / n) };
-    if (!water && inWater(t, p)) water = true;
-    if (!mountain && inMountain(t, p)) mountain = true;
-    if (water && mountain) break;
+    if (inWater(t, p)) water++;
+    if (inMountain(t, p)) mountain++;
   }
-  return { water, mountain };
+  return { water: water / (n + 1), mountain: mountain / (n + 1) };
 }
 
 const SYLLABLES = [

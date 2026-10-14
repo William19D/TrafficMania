@@ -2,8 +2,8 @@ import type { Game } from '../core/Game.ts';
 import type { Vec } from '../util/geom.ts';
 import { icon } from './icons.ts';
 
-// The tutorial must never strand the player without material for its own tasks.
-const topUp = (g: Game, asphalt: number): void => { g.inventory.asphalt = Math.max(asphalt, g.inventory.asphalt); };
+// The tutorial must never strand the player without money for its own tasks.
+const topUp = (g: Game, money = 20000): void => { g.money = Math.max(money, g.money); };
 
 interface Step {
   title: string;
@@ -25,19 +25,19 @@ function steps(g: Game): Step[] {
     { title: 'Welcome!', task: 'Press Next to start.', text: 'Colored squares are cities. Cars drive to the city of their color. Keep them moving.' },
     {
       title: 'Build your first road', task: `Click ${A.name}, then click ${B.name}.`,
-      text: 'Click = start point, click again = end point. Esc cancels.',
-      enter: g => { g.tool = 'road'; topUp(g, 40); }, targets: () => [at(A), at(B)],
+      text: 'Click = start point, click again = end point. The label shows the price. Esc cancels.',
+      enter: g => { g.tool = 'road'; topUp(g); }, targets: () => [at(A), at(B)],
       done: g => g.graph.edges.length >= 1, hint: '[data-tool="road"]',
     },
     {
       title: 'Watch the cars', task: 'Wait for the first trip to complete.',
-      text: 'Each car that reaches its destination is 1 trip. Press 4x to speed up.',
+      text: 'Each car that reaches its destination is 1 trip and earns money. Press 4x to speed up.',
       done: g => g.score >= 1, hint: '[data-speed="4"]',
     },
     {
       title: 'Make an intersection', task: `Build a road from ${C.name} to the middle of your first road.`,
       text: 'Three or more roads meeting = intersection. Cars take turns there.',
-      enter: g => { g.tool = 'road'; topUp(g, 30); },
+      enter: g => { g.tool = 'road'; topUp(g); },
       targets: g => {
         const e = g.graph.edges[0];
         return e ? [at(C), { x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }] : [at(C)];
@@ -47,7 +47,7 @@ function steps(g: Game): Step[] {
     {
       title: 'Add a traffic light', task: 'Press 2, then click the intersection.',
       text: 'Lights alternate green between the two axes. Roundabouts (3) let 3 cars through at once.',
-      enter: g => { g.inventory.lights = Math.max(1, g.inventory.lights); },
+      enter: g => topUp(g),
       targets: g => junctions(g).map(at),
       done: g => g.graph.nodes.some(n => n.control !== 'none'), hint: '[data-tool="light"]',
     },
@@ -55,18 +55,18 @@ function steps(g: Game): Step[] {
       title: 'Bend a road', task: 'Click a start point, then press and HOLD on the end point and drag to bend it. Release to build.',
       text: 'Roads also curve on their own when they join an existing road.',
       // ponytail: clearing lastBuild on enter means only a build made in this step counts
-      enter: g => { g.tool = 'road'; g.lastBuild = null; topUp(g, 20); },
+      enter: g => { g.tool = 'road'; g.lastBuild = null; topUp(g); },
       done: g => g.lastBuild !== null && g.lastBuild.segs >= 3, hint: '[data-tool="road"]',
     },
     {
       title: 'Go up: viaducts', task: 'Press + (or PageUp) to set L1, then build a road over water or over another road.',
-      text: 'Viaducts cost 1 bridge and never create intersections with lower roads. L6+ clears mountains. Ground roads through mountains dig tunnels.',
-      enter: g => { g.inventory.bridges = Math.max(1, g.inventory.bridges); g.lastBuild = null; topUp(g, 20); },
+      text: 'Viaducts cost more per tile and never create intersections with lower roads. L6+ clears mountains. Ground roads through mountains dig tunnels, the priciest option.',
+      enter: g => { g.lastBuild = null; topUp(g); },
       done: g => g.lastBuild !== null && g.lastBuild.level >= 1, hint: '[data-action="level-up"]',
     },
     {
       title: 'You are ready', task: 'Press Finish and keep the traffic flowing!',
-      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds materials. A red ring around a city means overcrowding: if it fills, game over. Every week you pick a reward.',
+      text: 'Edit (4) changes lanes or bends a road. Demolish (5) refunds all of a road built today, half of an older one. Roads and controls cost upkeep every day. A red ring around a city means overcrowding: if it fills, game over.',
     },
   ];
 }

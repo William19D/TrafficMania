@@ -1,13 +1,13 @@
 // Headless simulation check: builds a fixed network, runs ~300 game seconds and asserts the car invariants.
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
-import { Game } from '../src/core/Game.ts';
+import { Game, DAY_SECONDS } from '../src/core/Game.ts';
 import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
-import { BIOMES, DEFAULT_CONFIG } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 
@@ -27,7 +27,7 @@ const blank = (): Game => {
   w.graph = new RoadGraph();
   w.cities = [];
   w.tutorialActive = true;
-  w.inventory = { asphalt: 9999, bridges: 0, tunnels: 0, lights: 5, roundabouts: 5 };
+  w.money = 1e6;
   return w;
 };
 const town = (w: Game, name: string, x: number, y: number): Node => {
@@ -79,7 +79,6 @@ const kinds = new Set<string>();
 // Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
 const exits = new Map<Car, [Lane, Lane | null]>();
 for (let i = 0; i < STEPS; i++) {
-  if (game.pendingReward) game.applyReward(0);
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
   const live = new Set(game.cars);
   maxCars = Math.max(maxCars, live.size);
@@ -108,6 +107,27 @@ if (game.score <= 0) fail('no car arrived');
 if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x the kind's top speed`);
 if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
 
+// Money: a straight 10-tile road costs 10 x ROAD_COST, a same-day demolish gives it all back; built again and demolished
+// the next day it refunds REFUND_LATER after one day of upkeep; no money, no road
+{
+  const w = blank(), m0 = w.money, a = { x: 100, y: 500 }, b = { x: 500, y: 500 }, mid = { x: 300, y: 500 };
+  const plan = w.planPath([a, b], 0, { lanes: 1, oneWay: false });
+  if (!plan.ok || plan.cost !== 10 * TUNING.ROAD_COST) fail(`money: 10-tile road priced ${plan.cost}`);
+  w.commitPath(plan);
+  if (w.money !== m0 - plan.cost) fail(`money: building left ${w.money}, expected ${m0 - plan.cost}`);
+  w.demolishAt(mid);
+  if (w.graph.edges.length || w.money !== m0) fail(`money: same-day demolish left ${w.money}, expected ${m0}`);
+  w.commitPath(w.planPath([a, b], 0, { lanes: 1, oneWay: false }));
+  w.time = DAY_SECONDS - DT / 2;
+  w.update(DT);
+  const upkeep = plan.cost * TUNING.UPKEEP_RATE;
+  if (Math.abs(w.ledger.yesterday.upkeep - upkeep) > 1e-6) fail(`money: upkeep ${w.ledger.yesterday.upkeep}, expected ${upkeep}`);
+  w.demolishAt(mid);
+  const left = m0 - plan.cost - upkeep + plan.cost * TUNING.REFUND_LATER;
+  if (Math.abs(w.money - left) > 1e-6) fail(`money: next-day demolish left ${w.money}, expected ${left}`);
+  w.money = plan.cost - 1;
+  if (w.planPath([a, b], 0, { lanes: 1, oneWay: false }).reason !== 'Not enough money') fail('money: built without the money');
+}
 // Deadlock: a parked car (not in game.cars, never moves) blocks the start of lane J->Y.
 // 'a' waits at J, reroutes via K after REROUTE_S and arrives; 'c' is stuck behind it, gives up and goes home to Z.
 {

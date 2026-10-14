@@ -25,7 +25,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let plan: PathPlan | null = null;
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
 
-  const blocked = () => game.gameOver || !!game.pendingReward;
+  const blocked = () => game.gameOver;
 
   const cancel = () => {
     mode = 'idle';

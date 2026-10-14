@@ -46,5 +46,12 @@ export const BIOMES: Record<Biome, {
   },
 };
 
-// Gameplay tuning, filled by later steps
-export const TUNING = {} as const;
+// Gameplay tuning ($); later steps add theirs
+export const TUNING = {
+  ROAD_COST: 60,             // $ per tile of a two-way 1-lane road (laneFactor 1); ponytail: one rate until S3's tiers
+  BRIDGE_X: 4, VIADUCT_X: 2.5, VIADUCT_LEVEL_X: 0.1, TUNNEL_X: 5, // price multipliers: water share, viaduct (+ per level), mountain share
+  LIGHT_COST: 600, LIGHT_UPKEEP: 4, ROUNDABOUT_COST: 1200, ROUNDABOUT_UPKEEP: 2,
+  UPKEEP_RATE: 0.02,         // of a road's build price, per day
+  REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
+  ARRIVAL_PAY: 15,           // placeholder income per arrived trip until S7's taxes
+} as const;

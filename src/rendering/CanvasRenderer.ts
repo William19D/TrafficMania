@@ -2,10 +2,11 @@ import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
-import { ROAD_W, NODE_R, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, CAR_W, LANE_W, lightGroup, roadWidth } from '../network/RoadGraph.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
+import { fmtMoney } from '../core/Game.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -359,13 +360,11 @@ export class CanvasRenderer {
 
       let label = preview.reason;
       if (preview.ok && preview.net !== undefined) {
-        // Bend: price of the new curve minus the refund of the old run
-        const n = preview.net;
-        label = n > 0 ? `${n} asphalt` : n < 0 ? `+${-n} asphalt back` : 'free';
+        // Bend: price of the new curve minus the old run's price
+        const n = Math.round(preview.net);
+        label = n > 0 ? fmtMoney(n) : n < 0 ? `+${fmtMoney(-n)} back` : 'free';
       } else if (preview.ok) {
-        label = `${preview.cost.asphalt} asphalt`;
-        if (preview.cost.bridges) label += ` +${preview.cost.bridges} bridge${preview.cost.bridges > 1 ? 's' : ''}`;
-        if (preview.cost.tunnels) label += ` +${preview.cost.tunnels} tunnel${preview.cost.tunnels > 1 ? 's' : ''}`;
+        label = fmtMoney(preview.cost);
       }
       if (label && preview.level > 0) label += ' · L' + preview.level;
       const last = preview.points[preview.points.length - 1] ?? segs[segs.length - 1].b;
@@ -469,7 +468,7 @@ export class CanvasRenderer {
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
         this.ring(n.x, n.y, NODE_R + 6, RED, 3);
-        label(n.control === 'light' ? 'Remove light · +1 light' : 'Remove roundabout · +1 roundabout', n.x, n.y, RED);
+        label(`Remove ${n.control} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
       const hit = g.nearestEdge(p, ROAD_W, game.level) ?? g.nearestEdge(p, ROAD_W);
@@ -480,20 +479,17 @@ export class CanvasRenderer {
       this.line(e, RED, e.width + 6);
       ctx.globalAlpha = 1;
       this.line(e, ROAD_FILL, e.width);
-      // floor, matching the refund in Game.demolishAt
-      let s = `Demolish · +${Math.floor((e.length / TILE) * laneFactor(e.type))} asphalt`;
-      if (e.refund.bridges) s += ` +${e.refund.bridges} bridge`;
-      if (e.refund.tunnels) s += ` +${e.refund.tunnels} tunnel`;
-      label(s, hit.point.x, hit.point.y, RED);
+      label(`Demolish · +${fmtMoney(game.refundOf(e))}`, hit.point.x, hit.point.y, RED);
     } else if (game.tool === 'light' || game.tool === 'roundabout') {
       const n = g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
-      const stock = game.inventory[kind === 'light' ? 'lights' : 'roundabouts'];
+      const cost = game.controlPrice(kind) - game.controlRefund(n);
       const reason = n.city || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
-        : stock <= 0 && n.control !== kind ? `No ${kind === 'light' ? 'traffic lights' : 'roundabouts'} left` : null;
+        : n.control !== kind && cost > game.money ? 'Not enough money' : null;
       this.ring(n.x, n.y, NODE_R + 6, reason ? RED : GREEN, 3);
-      label(reason ? '⚠ ' + reason : kind === 'light' ? 'Place traffic light' : 'Place roundabout', n.x, n.y, reason ? RED : '#2E8B4A');
+      const place = n.control === kind ? 'Already here' : `${kind === 'light' ? 'Place traffic light' : 'Place roundabout'} · ${fmtMoney(cost)}`;
+      label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
       const n = g.nearestNode(p, NODE_R + 4, game.level);
       const pt = n ?? g.nearestEdge(p, ROAD_W, game.level)?.point;

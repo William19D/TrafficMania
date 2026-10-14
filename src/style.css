@@ -66,17 +66,6 @@ body[data-tool="edit"] canvas { cursor: pointer; }
 .ico svg { width: 100%; height: 100%; }
 .ico.big { width: 2em; height: 2em; }
 
-/* zero stock: diagonal strikethrough over the icon */
-.zero > .ico::after {
-  content: '';
-  position: absolute;
-  left: -2px; right: -2px; top: 50%;
-  height: 2px;
-  background: currentColor;
-  box-shadow: 0 0 0 1.5px var(--panel);
-  transform: rotate(-45deg);
-}
-
 #hud button {
   font: inherit;
   color: inherit;
@@ -159,15 +148,10 @@ kbd {
   border-radius: 8px;
 }
 .chip .num { font-size: 1em; min-width: 1.5ch; }
-.chip.low::after {
-  content: '';
-  position: absolute;
-  top: .3em; right: .3em;
-  width: .5em; height: .5em;
-  border-radius: 50%;
-  background: var(--warning);
-}
-.chip.zero { border: 1px dashed var(--line); color: var(--muted); }
+.chip .net { font-size: var(--label); font-weight: 600; }
+/* darker than --success/--danger: 4.5:1 on white */
+.chip .net.pos { color: #1B6E3D; }
+.chip .net.neg, .chip.debt .num { color: #B42F34; }
 .chip .delta {
   position: absolute;
   left: 50%; top: 100%;
@@ -252,7 +236,6 @@ kbd {
   background: conic-gradient(var(--accent) calc(var(--p, 0) * 360deg), transparent 0);
   transform: scale(1.25);
 }
-.week > .ico { width: 1.25em; height: 1.25em; }
 
 /* ---------- C: help ---------- */
 #hud .helpbtn {
@@ -326,21 +309,6 @@ kbd {
   font-weight: 700;
   line-height: 1.25;
 }
-.tool .stock {
-  position: absolute;
-  top: -6px; right: -6px;
-  min-width: 1.6em; height: 1.6em;
-  padding: 0 .3em;
-  border-radius: 999px;
-  background: var(--ink);
-  color: #fff;
-  font-size: var(--label);
-  line-height: 1.6;
-  border: 2px solid var(--panel);
-}
-.tool.zero > .ico { color: var(--muted); }
-.tool.zero .stock { background: var(--muted); }
-
 #hud .tool[aria-pressed="true"] { background: var(--accent); color: #fff; }
 #hud .tool[aria-pressed="true"] .kb { background: rgba(0, 0, 0, .18); color: #fff; }
 #hud .tool[aria-pressed="true"]::after {
@@ -351,8 +319,6 @@ kbd {
   border-radius: 2px;
   background: var(--accent);
 }
-#hud .tool.zero[aria-pressed="true"] > .ico { color: #fff; }
-#hud .tool.zero[aria-pressed="true"] > .ico::after { box-shadow: 0 0 0 1.5px var(--accent); }
 /* destructive: danger icon always; danger-soft fill + ink label when active (white on danger is under 4.5:1) */
 .tool.destroy > .ico { color: var(--danger); }
 #hud .tool.destroy[aria-pressed="true"] { background: var(--danger-soft); color: var(--ink); border-color: var(--danger); }
@@ -501,37 +467,6 @@ kbd {
 .modal h2 .ico { color: var(--accent); }
 .modal h2.bad .ico { color: var(--danger); }
 .modal .sub { margin: .375em 0 1.25em; color: var(--muted); font-size: max(14px, .875em); }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(12.5em, 1fr)); gap: 1em; }
-#hud .rcard {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: .625em;
-  min-height: 10em;
-  padding: 1.75em 1.25em 1.25em;
-  border: 2px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  text-align: left;
-}
-#hud .rcard:hover { border-color: var(--accent); }
-#hud .rcard[aria-pressed="true"] { border: 3px solid var(--accent); background: var(--accent-soft); }
-.rcard .kb {
-  position: absolute;
-  top: .5em; left: .5em;
-  min-width: 1.6em;
-  border-radius: 4px;
-  background: var(--soft);
-  color: var(--muted);
-  font-size: var(--label);
-  font-weight: 700;
-  text-align: center;
-}
-.rcard .selmark { position: absolute; top: .5em; right: .5em; color: var(--accent); visibility: hidden; }
-.rcard[aria-pressed="true"] .selmark { visibility: visible; }
-.rcard .row { display: flex; align-items: center; gap: .5em; font-size: max(14px, .875em); }
-.rcard .row b { font-size: 1.6em; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
 .stats > div { display: flex; flex-direction: column; align-items: center; gap: .25em; padding: 1em; background: var(--soft); border-radius: 10px; }
 .stats span { color: var(--muted); }
@@ -555,7 +490,7 @@ kbd {
     gap: .5em;
     padding-right: .5em;
   }
-  .status .sep, .week > .ico { display: none; }
+  .status .sep { display: none; }
   #hud .speed { width: 40px; height: 40px; }
   .dots i { width: 6px; height: 6px; border-width: 1.5px; }
   .wk .long { display: none; }
@@ -568,13 +503,12 @@ kbd {
     max-width: none;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
-    padding-block: 8px; /* room for the stock badge and the active underline inside the scroller */
+    padding-block: 8px; /* room for the active underline inside the scroller */
   }
   .dock > * { scroll-snap-align: start; }
   #hud .tool { min-width: 56px; min-height: 56px; }
   .tool .kb, .eh { display: none; }
   .tool .lbl { font-size: 13px; }
-  .tool .stock { top: -4px; right: -2px; }
   .elev { width: auto; min-width: 3.5em; }
 
   .toasts { left: 12px; right: 12px; transform: none; width: auto; max-width: none; }
