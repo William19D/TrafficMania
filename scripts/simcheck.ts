@@ -165,5 +165,27 @@ if (game.score <= 0) fail('no car arrived');
     if (seen.size !== 1 || !seen.has(side)) fail(`lane by turn: car to ${dest.city!.name} used lanes ${[...seen]}`);
   }
 }
+// Lane change: a car spawned in the left lane of a long 2-lane road moves right mid-edge (clear of both nodes,
+// sliding without a jump) before turning right at J, and arrives
+{
+  const w = blank(), wg = w.graph, two: RoadType = { lanes: 2, oneWay: false }, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 900), Z = town(w, 'Z', 900, 100), J = wg.addNode(700, 500);
+  for (const [a, b, t] of [[X, J, two], [J, Y, flat], [J, Z, flat]] as const) w.commitPath(w.planPath([a, b], 0, t));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const ls = wg.lanesFrom(wg.edgeBetween(X, J)!, X), c = new Car(ls[0]!, Y.city!, X.city!);
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  let at = -1, jump = 0, p = wg.carPos(c);
+  for (let t = 0; t < 20 * 60 && w.cars.includes(c); t++) {
+    w.update(DT);
+    if (at < 0 && c.lane === ls[1]) at = c.s;
+    const q = wg.carPos(c);
+    if (c.lane.edge === ls[0]!.edge) jump = Math.max(jump, Math.hypot(q.x - p.x, q.y - p.y), Math.abs(q.angle - p.angle) * 20);
+    p = q;
+  }
+  if (w.score !== 1 || at < 0) fail(`lane change: car did not move right and arrive (s=${at.toFixed(0)}, score ${w.score})`);
+  if (at > ls[0]!.edge.length - 100) fail(`lane change: changed too late, s=${at.toFixed(0)}`);
+  if (jump > 3) fail(`lane change: car jumped ${jump.toFixed(1)}px`);
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

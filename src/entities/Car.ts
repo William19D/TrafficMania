@@ -1,4 +1,4 @@
-import { CAR_LEN, GAP, NODE_R, stopDist } from '../network/RoadGraph.ts';
+import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node } from '../network/RoadGraph.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { City } from './City.ts';
@@ -24,6 +24,9 @@ export class Car {
   exit: Lane | null = null;
   // Seconds spent stopped
   wait = 0;
+  // Mid-edge lane change: seconds left of the slide, and the old lane's offset minus the new one's
+  lc = 0;
+  lcOff = 0;
 
   constructor(public lane: Lane, public dest: City, public origin: City) {}
 
@@ -32,7 +35,7 @@ export class Car {
   }
 
   update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
-    const lane = this.lane;
+    let lane = this.lane;
     const node = lane.to;
     const remaining = lane.edge.length - this.s;
     const isDest = node === this.dest.node;
@@ -66,6 +69,8 @@ export class Car {
     // ponytail: unshift/splice move us by at most 1 per event, so check the neighbours before the O(n) scan
     let idx = this.idx;
     if (lane.cars[idx] !== this) idx = lane.cars[idx + 1] === this ? idx + 1 : lane.cars[idx - 1] === this ? idx - 1 : lane.cars.indexOf(this);
+    if (this.lc > 0) this.lc = Math.max(0, this.lc - dt);
+    else { idx = this.changeLane(graph, idx); lane = this.lane; }
     this.idx = idx;
     const ahead = lane.cars[idx + 1];
     if (ahead) gap = ahead.s - this.s - CAR_LEN;
@@ -108,5 +113,34 @@ export class Car {
     this.path = null;
     if (this.granted === node) { this.clearing?.occupants.delete(this); this.clearing = node; this.granted = null; }
     return 'ok';
+  }
+
+  // Mid-edge lane change, LC_M clear of both nodes: into the lane the next turn needs, or past a slow car into a roomier lane.
+  // Needs room ahead to brake behind the new leader and room for the follower to stop. Returns the index in this.lane.
+  // ponytail: a car still in the wrong lane at the node just takes the turn from there
+  private changeLane(graph: RoadGraph, idx: number): number {
+    const lane = this.lane, ls = graph.lanesFrom(lane.edge, lane.from);
+    if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
+    const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
+    const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - CAR_LEN : Infinity;
+    const slow = !!ahead && ahead.speed < MAX_SPEED * 0.6 && gap < 4 * CAR_LEN;
+    const brake = (v: number) => v * v / (2 * BRAKE);
+    for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
+      if (!to) continue;
+      let at = to.cars.findIndex(o => o.s > this.s);
+      if (at < 0) at = to.cars.length;
+      const a = to.cars[at], b = to.cars[at - 1];
+      const room = a ? a.s - this.s - CAR_LEN : Infinity;
+      if (a && room < GAP + Math.max(0, brake(this.speed) - brake(a.speed))) continue;
+      if (b && this.s - b.s - CAR_LEN < GAP + brake(b.speed)) continue;
+      if (!t && room < gap + 2 * CAR_LEN) continue;
+      lane.cars.splice(idx, 1);
+      to.cars.splice(at, 0, this);
+      this.lcOff = lane.offset - to.offset;
+      this.lc = LC_S;
+      this.lane = to;
+      return at;
+    }
+    return idx;
   }
 }

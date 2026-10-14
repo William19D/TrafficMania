@@ -9,6 +9,9 @@ export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 1
 export const RING_R = NODE_R + 5, RING_IN = Math.sqrt(RING_R * RING_R - LANE_OFFSET * LANE_OFFSET);
 // Where a car stops before a junction (distance from the node): outside the ring on roundabouts
 export const stopDist = (n: Node): number => n.control === 'roundabout' ? RING_R + ROAD_W / 2 + 4 : NODE_R + 3;
+// Mid-edge lane change: slide seconds, and how far from both nodes it may start (past the node blends, the slide done
+// before the end, room left for cars granted into the lane)
+export const LC_S = 0.6, LC_M = 110;
 
 // Road types: lanes PER DIRECTION; a one-way road only has lanes a->b
 export const LANE_W = 9;
@@ -181,9 +184,10 @@ export class RoadGraph {
   }
 
   // Turn at the first junction from path[j] on (inner nodes of a bent road don't count): 1 right, -1 left or U-turn, 0 straight / none
-  turn(path: Node[], j: number): number {
+  // from: the node before path[0], for j = 0
+  turn(path: Node[], j: number, from?: Node): number {
     for (; j < path.length - 1; j++) {
-      const n = path[j]!, p = path[j - 1]!, q = path[j + 1]!;
+      const n = path[j]!, p = path[j - 1] ?? from!, q = path[j + 1]!;
       if (!n.city && n.edges.length === 2 && n.control === 'none') continue;
       const ax = n.x - p.x, ay = n.y - p.y, bx = q.x - n.x, by = q.y - n.y;
       // y points down, so a positive cross product is a right turn on screen
@@ -236,7 +240,10 @@ export class RoadGraph {
     // roundabouts: the ring is a single lane at LANE_OFFSET, so outer lanes slide inward before entering / after leaving it
     if (lane.to.control === 'roundabout' && remaining < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - RING_IN) / B);
     if (lane.from.control === 'roundabout' && c.s < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (c.s - RING_IN) / B);
-    return this.lanePos(lane, c.s, off);
+    if (!c.lc) return this.lanePos(lane, c.s, off);
+    // mid-edge lane change: smoothstep slide from the old lane, nose turned along the sideways speed
+    const u = c.lc / LC_S, q = this.lanePos(lane, c.s, off + c.lcOff * u * u * (3 - 2 * u));
+    return { ...q, angle: q.angle + Math.atan2(-c.lcOff * 6 * u * (1 - u) / LC_S, Math.max(c.speed, 40)) };
   }
 
   // Left turn from lane l (offset l.offset) onto the opposite lane (offset oo), NODE_R before l.to; p = 0..2*NODE_R
