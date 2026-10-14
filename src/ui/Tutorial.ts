@@ -3,6 +3,7 @@ import type { Vec } from '../util/geom.ts';
 import { DEFAULT_TYPE } from '../network/RoadGraph.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { Building } from '../entities/Building.ts';
+import { FAILED } from '../entities/Trip.ts';
 import { icon } from './icons.ts';
 
 // The tutorial must never strand the player without money for its own tasks.
@@ -32,7 +33,7 @@ function steps(g: Game): Step[] {
   return [
     {
       title: 'Welcome!', task: 'Press Next to start.',
-      text: 'Homes (white) send commuters to work and shoppers to the shops (blue). Factories (ochre) send trucks with goods. Car colours show the trip. Build the roads that get them there.',
+      text: 'Homes (white) send commuters to work in the morning and shoppers to the shops (blue) during the day. Factories (ochre) with workers send trucks with goods. Car colours show the trip. Build the roads that get them there. Time is paused while you read and build.',
     },
     {
       title: 'Build your first road', task: 'Draw a road between the homes, then on to the office door.',
@@ -42,9 +43,12 @@ function steps(g: Game): Step[] {
       hint: '[data-tool="road"]',
     },
     {
-      title: 'Watch the cars', task: 'Wait for the first trip to complete.',
-      text: 'Each car that reaches its destination is 1 trip and earns money. Press 4x to speed up.',
-      done: g => g.score >= 1, hint: '[data-speed="4"]',
+      title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
+      text: 'Commuters leave home between 6:00 and 10:00 and drive back after a 9-hour shift. Each trip that arrives earns money. Press 4x to speed up.',
+      // the clock starts again here (start() paused it), so the morning rush is still ahead
+      enter: g => { if (!g.speed) g.speed = 1; },
+      done: g => g.reports.some(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)),
+      hint: '[data-speed="4"]',
     },
     {
       title: 'Make an intersection', task: 'Build a road from the shop door to the middle of one of your roads.',
@@ -125,6 +129,8 @@ export class Tutorial {
     this.steps = steps(this.game);
     this.shown = true;
     this.game.tutorialActive = true;
+    // paused until the 'Watch the commute' step, so the first morning is not over before the first road
+    this.game.speed = 0;
     this.game.setRoadType(DEFAULT_TYPE); // the tutorial's own tasks assume a default two-way street
     this.card.hidden = false;
     this.show(0);
@@ -168,6 +174,8 @@ export class Tutorial {
   }
 
   private finish(): void {
+    // start() paused the clock; a skip before the commute step would leave it paused
+    if (!this.game.speed) this.game.speed = 1;
     this.shown = false;
     this.game.tutorialActive = false;
     this.game.tutorialTargets = [];

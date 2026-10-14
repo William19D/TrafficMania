@@ -425,8 +425,8 @@ export class CanvasRenderer {
     if (b.kind === 'shop') for (let y = -w + 1; y < w - 1; y += 6) rect(h - 6, y, 5, 3, 0, '#FFFFFF');
     if (b.kind === 'office') for (let x = -h + 7; x < h - 5; x += 7) for (let y = -w + 7; y < w - 5; y += 7) rect(x, y, 3, 3, 0.5, z.out);
     if (b.kind === 'industry') {
-      // smoke drifts off the chimney only while the factory has a road (S5: while it has workers)
-      if (b.connected) for (let i = 0; i < 3; i++) {
+      // smoke drifts off the chimney only while the factory has workers
+      if (b.staffed > 0) for (let i = 0; i < 3; i++) {
         const t = (time * 0.4 + i / 3) % 1;
         ctx.globalAlpha = 0.5 * (1 - t);
         this.circle(-h + 8 - t * 14, -w + 8 - t * 6, 3 + t * 4, '#D6D6D2');

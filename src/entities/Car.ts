@@ -10,7 +10,7 @@ export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
-// Vehicle kinds: length, top speed and acceleration factors, spawn weight (trucks only carry freight, so 0).
+// Vehicle kinds: length, top speed and acceleration factors, spawn weight for passenger trips (trucks only carry freight, so 0).
 // Ambulances jump node queues (RoadGraph.update).
 export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
 export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
@@ -153,6 +153,8 @@ export class Car {
     this.brake = target < this.speed || this.speed < 1;
     this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
+    this.trip.driven += this.speed * dt;
+    if (this.speed < 1) this.trip.stopped += dt;
 
     // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that)
     if (this.clearing && this.s - this.len / 2 > NODE_R) { this.clearing.occupants.delete(this); this.clearing = null; }

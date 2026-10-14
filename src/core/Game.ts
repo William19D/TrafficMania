@@ -7,14 +7,19 @@ import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameTyp
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R } from '../entities/Building.ts';
-import type { Building } from '../entities/Building.ts';
+import type { Building, Commuter } from '../entities/Building.ts';
+import { makeTrip, OUTCOMES } from '../entities/Trip.ts';
+import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
-import { DEFAULT_CONFIG, DIFFICULTY, TIERS, TUNING as T } from './config.ts';
+import { DEFAULT_CONFIG, DIFFICULTY, TIERS, ZONES, TUNING as T } from './config.ts';
 import type { GameConfig, Purpose, Tier } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
-export const DAY_SECONDS = 15; // one week = 7 days
+// Game seconds per in-game hour
+export const HOUR = T.DAY_SECONDS / 24;
+const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
+const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map(o => [o, 0])) as Record<Outcome, number>;
 // $ per day by category; build is the net spent on construction (refunds count negative)
 export interface Ledger { taxes: number; business: number; upkeep: number; build: number; grants: number }
 const ledger0 = (): Ledger => ({ taxes: 0, business: 0, upkeep: 0, build: 0, grants: 0 });
@@ -40,7 +45,11 @@ export class Game {
   terrain: Terrain;
   graph = new RoadGraph();
   buildings: Building[] = [];
+  commuters: Commuter[] = [];
   cars: Car[] = [];
+  // Last 200 finished trips, oldest first; arrived / failed since the start, outcomes since midnight
+  reports: TripReport[] = [];
+  stats = { arrived: 0, failed: 0, today: outcomes0() };
   // Infinity in creative mode
   money: number;
   ledger = { today: ledger0(), yesterday: ledger0() };
@@ -60,15 +69,18 @@ export class Game {
   lastBuilt: Edge[] = [];
   gameOver = false;
   message = '';
-  // While true: slower demand (later steps: no fail checks)
+  // Set while the tutorial runs (S7: no fail checks)
   tutorialActive = false;
-  // No placeholder demand and no return trips (simcheck drives its own trips)
+  // No departures, shopping, freight or return trips (simcheck drives its own trips)
   demandOff = false;
   // World points the renderer highlights while tutorialActive
   tutorialTargets: Vec[] = [];
   // Last successful commitPath: edges created and plan level (read by the tutorial)
   lastBuild: { segs: number; level: number } | null = null;
   private lastDay = 0;
+  private lastHour: number = T.START_HOUR;
+  // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
+  private assignAt = 0;
   private msgTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(public cfg: GameConfig = DEFAULT_CONFIG) {
@@ -87,42 +99,57 @@ export class Game {
     }
   }
 
-  // Adds the building with its door node; demand timers are staggered so the town does not pulse
+  // Adds the building with its door node; a home moves in START_OCC full (S6: growth)
   addBuilding(b: Building): Building {
     const d = b.door();
     this.graph.addNode(d.x, d.y, b);
-    b.demandTimer = random() * T.HOME_TRIP_S[1];
+    b.residents ||= Math.round(ZONES[b.kind].residents * T.START_OCC);
     this.buildings.push(b);
+    this.changed();
     return b;
   }
 
-  queueTrip(from: Building, to: Building, purpose: Purpose, back = false): void {
-    from.pending.push({ purpose, from, to, back });
+  queueTrip(from: Building, to: Building, purpose: Purpose, back = false, who: Commuter | null = null): Trip {
+    const t = makeTrip(purpose, from, to, back, who, this.time);
+    from.pending.push(t);
+    return t;
   }
 
-  get day(): number { return (Math.floor(this.time / DAY_SECONDS) % 7) + 1; }
-  get week(): number { return Math.floor(this.time / (DAY_SECONDS * 7)) + 1; }
+  // Clock: in-game hours since Day 1 00:00 (the game starts at START_HOUR)
+  get clock(): number { return this.time / HOUR + T.START_HOUR; }
+  get hour(): number { return this.clock % 24; }
   // Days since the start: the refund rule's "today"
-  get today(): number { return Math.floor(this.time / DAY_SECONDS); }
+  get today(): number { return Math.floor(this.clock / 24); }
+  get day(): number { return this.today + 1; }
   get running(): boolean { return !this.gameOver && this.speed > 0; }
+
+  // Buildings or roads changed: commuters are re-assigned an in-game hour later (so a road being drawn is not chased)
+  private changed(): void {
+    this.assignAt = Math.min(this.assignAt, this.time + HOUR);
+  }
 
   update(dt: number): void {
     if (!this.running) return;
     this.time += dt;
 
     if (this.today > this.lastDay) {
-      // ponytail: upkeep is paid in one lump at midnight; hourly once S5's clock exists
+      // ponytail: upkeep is paid in one lump at midnight; hourly with S7's taxes
       this.lastDay = this.today;
       this.upkeepDay = this.upkeepPerDay();
       this.money -= this.upkeepDay;
       this.ledger.today.upkeep += this.upkeepDay;
       this.ledger = { today: ledger0(), yesterday: this.ledger.today };
+      this.stats.today = outcomes0();
     }
+    const hr = Math.floor(this.clock);
+    if (hr > this.lastHour) {
+      this.lastHour = hr;
+      this.hourly(hr % 24);
+    }
+    if (this.time >= this.assignAt) this.assign();
+    if (!this.demandOff) this.departures();
 
-    for (const b of this.buildings) {
-      this.demand(b, dt);
-      this.trySpawnCar(b, dt);
-    }
+    for (const b of this.buildings) this.trySpawnCar(b, dt);
 
     this.graph.update(dt);
 
@@ -130,48 +157,200 @@ export class Game {
       const car = this.cars[i];
       const r = car.update(dt, this.graph);
       if (r === 'ok') continue;
-      if (r === 'stuck' || r === 'lost') { this.dropCars([car]); continue; }
+      if (r === 'stuck' || r === 'lost') { this.dropCars([car], true); continue; }
       if (r === 'arrived') {
         this.score++;
+        this.stats.arrived++;
         // ponytail: flat pay per arrival until S7's taxes and business income
         const pay = T.ARRIVAL_PAY * DIFFICULTY[this.cfg.difficulty].tax;
         this.money += pay;
         this.ledger.today.business += pay;
-        const t = car.trip;
-        if (!t.back && !this.demandOff) this.queueTrip(t.to, t.from, t.purpose, true);
+        const t = car.trip, secs = this.time - t.departed;
+        this.report(t, this.outcome(t, secs), secs);
+        if (t.back) { if (t.who) t.who.at = 'home'; }
+        else if (!this.demandOff) this.park(t);
       }
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
     }
   }
 
-  // Placeholder demand until S5: a home queues a commute (70%) or a shopping trip, a factory a freight run, to a random
-  // connected destination; the car comes back on arrival (Game.update)
-  private demand(b: Building, dt: number): void {
-    if (this.demandOff || !b.connected || (b.kind !== 'home' && b.kind !== 'industry') || (b.demandTimer -= dt) > 0) return;
-    const [lo, hi] = b.kind === 'home' ? T.HOME_TRIP_S : T.FACTORY_TRIP_S;
-    b.demandTimer = (lo + random() * (hi - lo)) * (this.tutorialActive ? 1.5 : 1) / DIFFICULTY[this.cfg.difficulty].trips;
-    const purpose: Purpose = b.kind === 'industry' ? 'freight' : random() < 0.7 ? 'commute' : 'shop';
-    const to = this.buildings.filter(o => o !== b && o.connected && (purpose === 'commute' ? o.kind !== 'home' : o.kind === 'shop'));
-    if (to.length && b.pending.length < T.MAX_PENDING) this.queueTrip(b, to[Math.floor(random() * to.length)], purpose);
+  // On the hour: workplaces count their staff, homes accrue shopping trips along SHOP_CURVE, staffed factories accrue
+  // trucks during TRUCK_HOURS; each whole trip goes to a gravity-picked reachable shop
+  private hourly(h: number): void {
+    if (h === 3) this.assign();
+    if (this.demandOff) return;
+    const comp = this.components(), mult = DIFFICULTY[this.cfg.difficulty].trips, [t0, t1] = T.TRUCK_HOURS;
+    for (const b of this.buildings) {
+      if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.who).length * T.PEOPLE_PER_CAR / b.jobs);
+      if (b.kind === 'home') {
+        b.shopAcc += b.residents / T.PEOPLE_PER_CAR * T.SHOP_RATE * T.SHOP_CURVE[h] / SHOP_SUM * mult;
+        for (; b.shopAcc >= 1; b.shopAcc--) {
+          const to = this.pick(b, comp, s => s.kind === 'shop' ? s.jobs : 0);
+          if (to) this.queueTrip(b, to, 'shop');
+        }
+      } else if (b.kind === 'industry' && h >= t0 && h < t1) {
+        // empty shops pull the goods
+        b.truckAcc += T.TRUCKS_PER_DAY * b.staffed * mult / (t1 - t0);
+        for (; b.truckAcc >= 1; b.truckAcc--) {
+          const to = this.pick(b, comp, s => s.kind === 'shop' ? 1 + Math.max(0, T.STOCK_START - s.stock) : 0);
+          if (to) this.queueTrip(b, to, 'freight');
+        }
+      }
+    }
   }
 
-  // First pending trip whose first lane has room goes out; a trip with no route is dropped (S5 reports it)
+  // Undirected road components by node; a door without a road is a component of its own.
+  // ponytail: undirected, so a one-way trap still counts as reachable; findPath at departure is the final judge (noroute)
+  private components(): Map<Node, number> {
+    const comp = new Map<Node, number>();
+    let id = 0;
+    for (const n of this.graph.nodes) {
+      if (comp.has(n)) continue;
+      comp.set(n, ++id);
+      for (const stack = [n]; stack.length;) {
+        const m = stack.pop()!;
+        for (const e of m.edges) {
+          const o = e.a === m ? e.b : e.a;
+          if (!comp.has(o)) { comp.set(o, id); stack.push(o); }
+        }
+      }
+    }
+    return comp;
+  }
+
+  // Gravity model: a building in from's component, picked with weight cap(b) x exp(-distance / GRAVITY_D)
+  // ponytail: straight-line distance; network distance if far-but-straight picks show up in the reports
+  private pick(from: Building, comp: Map<Node, number>, cap: (b: Building) => number): Building | null {
+    const c = comp.get(from.node);
+    let sum = 0;
+    const ws = this.buildings.map(b => {
+      const w = b !== from && comp.get(b.node) === c ? cap(b) * Math.exp(-dist(from, b) / T.GRAVITY_D) : 0;
+      sum += w;
+      return w;
+    });
+    if (!sum) return null;
+    let r = random() * sum;
+    return this.buildings.find((_, i) => ws[i] > 0 && (r -= ws[i]) < 0) ?? null;
+  }
+
+  // Each home keeps floor(residents x EMPLOY_RATE / PEOPLE_PER_CAR) commuters, each leaving at an hour ~ N(COMMUTE_MEAN, COMMUTE_SD).
+  // A commuter cut off from its workplace loses it; one without a job gets a reachable workplace with a free slot (jobs / PEOPLE_PER_CAR).
+  private assign(): void {
+    this.assignAt = Infinity;
+    const comp = this.components(), count = new Map<Building, number>(), extra = new Map<Building, number>();
+    for (const c of this.commuters) count.set(c.home, (count.get(c.home) ?? 0) + 1);
+    for (const h of this.buildings) {
+      if (h.kind !== 'home') continue;
+      const n = Math.floor(h.residents * T.EMPLOY_RATE / T.PEOPLE_PER_CAR) - (count.get(h) ?? 0);
+      if (n < 0) extra.set(h, -n);
+      for (let i = 0; i < n; i++) {
+        const z = Math.sqrt(-2 * Math.log(1 - random())) * Math.cos(2 * Math.PI * random());
+        const depart = Math.max(T.COMMUTE_MIN, Math.min(T.COMMUTE_MAX, T.COMMUTE_MEAN + T.COMMUTE_SD * z));
+        this.commuters.push({ home: h, work: null, depart, next: this.time + ((depart - this.hour + 24) % 24) * HOUR, at: 'home' });
+      }
+    }
+    // fewer residents (S6/S7): commuters at home move out first; one on the road finishes its day
+    this.commuters = this.commuters.filter(c => {
+      const x = extra.get(c.home) ?? 0;
+      if (!x || c.at !== 'home') return true;
+      extra.set(c.home, x - 1);
+      return false;
+    });
+    const free = new Map<Building, number>();
+    for (const b of this.buildings) if (b.jobs) free.set(b, Math.floor(b.jobs / T.PEOPLE_PER_CAR));
+    for (const c of this.commuters) {
+      if (c.work && comp.get(c.work.node) !== comp.get(c.home.node)) c.work = null;
+      if (c.work) free.set(c.work, free.get(c.work)! - 1);
+    }
+    for (const c of this.commuters) {
+      if (c.work) continue;
+      c.work = this.pick(c.home, comp, b => Math.max(0, free.get(b) ?? 0));
+      if (c.work) free.set(c.work, free.get(c.work)! - 1);
+    }
+  }
+
+  // Commuters at home leave at their hour (a day they are still out is skipped); parked trips start their return leg when due
+  private departures(): void {
+    for (const c of this.commuters) {
+      if (this.time < c.next) continue;
+      const dep = c.next;
+      while (c.next <= this.time) c.next += T.DAY_SECONDS;
+      if (c.at !== 'home' || !c.work) continue;
+      c.at = 'driving';
+      this.queueTrip(c.home, c.work, 'commute', false, c).leave = dep + T.WORK_HOURS * HOUR;
+    }
+    for (const b of this.buildings) {
+      for (let i = 0; i < b.parked.length; i++) {
+        const t = b.parked[i];
+        if (this.time < t.leave) continue;
+        b.parked.splice(i--, 1);
+        if (t.who) t.who.at = 'driving';
+        this.queueTrip(b, t.from, t.purpose, true, t.who);
+      }
+    }
+  }
+
+  // Arrived: a shopper buys one item and stays SHOP_STAY hours, a truck unloads and turns back at once,
+  // a commuter stays for its shift (leave was set when it left home)
+  private park(t: Trip): void {
+    const b = t.to;
+    if (t.purpose === 'shop') { b.stock = Math.max(0, b.stock - 1); t.leave = this.time + T.SHOP_STAY * HOUR; }
+    if (t.purpose === 'freight') b.stock += T.STOCK_PER_TRUCK;
+    if (t.who) t.who.at = 'away';
+    b.parked.push(t);
+  }
+
+  // Waited at the door over an hour or stopped for WAIT_SHARE of the drive = wait; drove DETOUR_X the free-flow length = detour;
+  // otherwise smooth within SMOOTH_X of the free-flow time, else wait
+  private outcome(t: Trip, secs: number): Outcome {
+    if (t.stopped > T.WAIT_SHARE * secs || t.departed - t.queued > HOUR) return 'wait';
+    if (t.driven > T.DETOUR_X * t.idealLen) return 'detour';
+    return secs <= T.SMOOTH_X * t.ideal ? 'smooth' : 'wait';
+  }
+
+  private report(t: Trip, outcome: Outcome, seconds: number): void {
+    this.stats.today[outcome]++;
+    this.reports.push({ purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour });
+    if (this.reports.length > 200) this.reports.shift();
+  }
+
+  // A trip that never arrives; its commuter is home again
+  private fail(t: Trip, outcome: Outcome): void {
+    if (t.who) t.who.at = 'home';
+    this.stats.failed++;
+    this.report(t, outcome, t.departed ? this.time - t.departed : 0);
+  }
+
+  // Trips waiting SPAWN_FAIL hours give up. Then, below MAX_CARS, the first pending trip whose first lane has room goes out;
+  // a trip with no route is reported and dropped. The free-flow route (empty roads) at departure is the trip's ideal.
   private trySpawnCar(b: Building, dt: number): void {
     b.retryTimer -= dt;
-    if (b.retryTimer > 0 || !b.pending.length || !b.connected) return;
+    if (b.retryTimer > 0 || !b.pending.length) return;
     b.retryTimer = 0.4;
+    for (let i = 0; i < b.pending.length; i++) {
+      if (this.time - b.pending[i].queued > T.SPAWN_FAIL * HOUR) this.fail(b.pending.splice(i--, 1)[0], 'gaveup');
+    }
+    if (!b.connected || this.cars.length >= T.MAX_CARS) return;
     const rk = randomKind();
     for (let i = 0; i < b.pending.length; i++) {
       const trip = b.pending[i], kind = trip.purpose === 'freight' ? 'truck' : rk, len = KINDS[kind].len;
       const path = findPath(this.graph, b.node, trip.to.node);
-      if (!path || path.length < 2) { b.pending.splice(i--, 1); continue; }
+      if (!path || path.length < 2) { this.fail(b.pending.splice(i--, 1)[0], 'noroute'); continue; }
       const e = this.graph.edgeBetween(b.node, path[1]);
       if (!e) continue;
       const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1));
       const f = lane?.cars[0];
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       b.pending.splice(i, 1);
+      const ideal = findPath(this.graph, b.node, trip.to.node, null, true) ?? path;
+      trip.ideal = trip.idealLen = trip.driven = trip.stopped = 0;
+      for (let j = 1; j < ideal.length; j++) {
+        const x = this.graph.edgeBetween(ideal[j - 1], ideal[j])!;
+        trip.idealLen += x.length;
+        trip.ideal += x.length / TIERS[x.type.tier].limit / KINDS[kind].v;
+      }
+      trip.departed = this.time;
       const car = new Car(lane, trip, kind);
       car.path = path.slice(1);
       lane.cars.unshift(car);
@@ -285,6 +464,7 @@ export class Game {
     this.money -= cost;
     this.ledger.today.build += cost;
     this.upkeepDay = this.upkeepPerDay();
+    this.changed();
   }
 
   // Build price of a road from a to b: per tile and lane at the tier's rate, x the viaduct factor, or x the bridge / tunnel factor on the
@@ -479,14 +659,17 @@ export class Game {
     this.spend(-back);
   }
 
-  // Takes the cars off the road and puts their trips back in their origin's queue,
-  // so demolishing or retyping a busy road is not a free way to clear traffic
-  private dropCars(cars: Car[]): void {
+  // Takes the cars off the road and puts their trips back in their origin's queue, so demolishing or retyping a busy road
+  // is not a free way to clear traffic. retry (stuck or lost): counts a retry, and past MAX_RETRIES the trip gives up.
+  private dropCars(cars: Car[], retry = false): void {
     for (const car of cars) {
       this.graph.detachCar(car);
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
-      car.origin.pending.push(car.trip);
+      const t = car.trip;
+      if (retry && ++t.retries > T.MAX_RETRIES) { this.fail(t, 'gaveup'); continue; }
+      t.queued = this.time;
+      car.origin.pending.push(t);
     }
   }
 

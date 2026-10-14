@@ -1,10 +1,11 @@
 // Headless simulation check: builds a fixed network, runs ~300 game seconds and asserts the car invariants.
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
-import { Game, DAY_SECONDS } from '../src/core/Game.ts';
+import { Game, HOUR } from '../src/core/Game.ts';
 import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
+import { makeTrip } from '../src/entities/Trip.ts';
 import type { Trip } from '../src/entities/Trip.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
@@ -20,7 +21,7 @@ Math.random = () => { throw new Error('Math.random used: route it through random
 
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
-// Blank world: no terrain, no starter town; tutorialActive = slower demand
+// Blank world: no terrain, no starter town
 const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
@@ -34,7 +35,7 @@ const blank = (): Game => {
 };
 // A building with its door at (x, y); its footprint lies below the door, or above it (up) when a road leaves the door downward
 const town = (w: Game, x: number, y: number, kind: Zone = 'home', up = false): Node => w.addBuilding(buildingAt(kind, { x, y }, up ? Math.PI / 2 : -Math.PI / 2)).node;
-const trip = (from: Node, to: Node): Trip => ({ purpose: 'commute', from: from.building!, to: to.building!, back: false });
+const trip = (from: Node, to: Node): Trip => makeTrip('commute', from.building!, to.building!);
 // Seeded maps: a seed replays its terrain in every biome, another seed changes it, and the biomes differ
 {
   const maps = new Set<string>();
@@ -62,9 +63,10 @@ const city = (x: number, y: number, kind: Zone = 'home', up = false): Node => to
 //   F         A=2-lane=J1(light)---B---J2(plain 3-way)---E
 //             |                    |   |
 //   C------R(roundabout)-----------+---D
-// Homes A C D F, shop B, factory E (freight trucks to B)
+// Homes A C D F, shop B, factory E (freight trucks to B). A busy town: 5x a home's capacity (no growth until S6).
 const A = city(200, 300), B = city(1000, 300, 'shop', true), C = city(600, 800), D = city(1400, 800), E = city(1800, 300, 'industry');
 const F = city(600, 60, 'home', true);
+for (const n of [A, C, D, F]) n.building!.residents = 150;
 const J1 = g.addNode(600, 300), R = g.addNode(1000, 800), J2 = g.addNode(1400, 300);
 const one: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
 const roads: [Node, Node, RoadType][] = [
@@ -85,9 +87,18 @@ let maxCars = 0, lo = Infinity, hi = 0;
 const kinds = new Set<string>();
 // Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
 const exits = new Map<Car, [Lane, Lane | null]>();
+// Day cycle: hour each commute left the door; when each commuter's car was first seen parked at work
+const commutes: number[] = [], parkedAt = new Map<Trip, number>();
 for (let i = 0; i < STEPS; i++) {
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
   const live = new Set(game.cars);
+  for (const c of live) if (c.trip.who && !c.trip.back && c.trip.departed === game.time) commutes.push(game.hour);
+  // a commuter's return leg is queued once its shift is over (or at once, after a late arrival)
+  for (const b of game.buildings) for (const t of b.parked) {
+    if (!t.who) continue;
+    if (!parkedAt.has(t)) parkedAt.set(t, game.time);
+    if (game.time > Math.max(t.leave, parkedAt.get(t)!) + DT) fail(`day cycle: commuter still at work ${((game.time - t.leave) / HOUR).toFixed(2)}h after its shift`);
+  }
   maxCars = Math.max(maxCars, live.size);
   for (const c of live) { const v = c.vmax / (MAX_SPEED * KINDS[c.kind].v); lo = Math.min(lo, v); hi = Math.max(hi, v); kinds.add(c.kind); }
   for (const c of live) {
@@ -110,6 +121,10 @@ for (let i = 0; i < STEPS; i++) {
   }
 }
 if (game.score <= 0) fail('no car arrived');
+// Commuters leave home in the morning rush, and some reached work and drove home
+const rush = commutes.filter(h => h >= TUNING.COMMUTE_MIN && h <= TUNING.COMMUTE_MAX).length;
+if (commutes.length < 5 || rush < 0.7 * commutes.length) fail(`day cycle: ${rush} of ${commutes.length} commutes left between 6:00 and 10:00`);
+if (!parkedAt.size || !game.reports.some(r => r.purpose === 'commute' && r.back)) fail('day cycle: no commuter reached work and came home');
 // Drivers differ: top speeds spread within ±10% (the overlap check above covers their safety)
 if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x the kind's top speed`);
 if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
@@ -125,7 +140,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
   w.demolishAt(mid);
   if (w.graph.edges.length || w.money !== m0) fail(`money: same-day demolish left ${w.money}, expected ${m0}`);
   w.commitPath(w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }));
-  w.time = DAY_SECONDS - DT / 2;
+  w.time = (24 - TUNING.START_HOUR) * HOUR - DT / 2; // just before the first midnight
   w.update(DT);
   const upkeep = plan.cost * TUNING.UPKEEP_RATE;
   if (Math.abs(w.ledger.yesterday.upkeep - upkeep) > 1e-6) fail(`money: upkeep ${w.ledger.yesterday.upkeep}, expected ${upkeep}`);
@@ -368,5 +383,7 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (let t = 0; t < 20 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`buildings: commute over the driveways did not arrive (score ${w.score})`);
 }
-console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)}`);
+const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
+console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
+  + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)}`);
 process.exit(0);

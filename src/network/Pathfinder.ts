@@ -6,8 +6,8 @@ import { dist } from '../util/geom.ts';
 // Heuristic speed: the fastest tier, so the straight-line time never overestimates
 const VMAX = Math.max(...Object.values(TIERS).map(t => t.limit));
 
-// A* on travel time: length / tier limit × congestion of the outgoing lanes; 'avoid' is treated as closed
-export function findPath(graph: RoadGraph, start: Node, goal: Node, avoid: Edge | null = null): Node[] | null {
+// A* on travel time: length / tier limit × congestion of the outgoing lanes (free: empty roads); 'avoid' is treated as closed
+export function findPath(graph: RoadGraph, start: Node, goal: Node, avoid: Edge | null = null, free = false): Node[] | null {
   if (start === goal) return [start];
   const g = new Map<Node, number>([[start, 0]]);
   const came = new Map<Node, Node>();
@@ -56,7 +56,7 @@ export function findPath(graph: RoadGraph, start: Node, goal: Node, avoid: Edge 
       if (closed.has(next) || e === avoid) continue;
       const lanes = graph.lanesFrom(e, cur);
       if (!lanes.length) continue;
-      const cars = lanes.reduce((n, l) => n + l.cars.length, 0);
+      const cars = free ? 0 : lanes.reduce((n, l) => n + l.cars.length, 0);
       const load = cars * (CAR_LEN + GAP) / (e.length * lanes.length);
       const cost = g.get(cur)! + e.length / TIERS[e.type.tier].limit * (1 + 3 * load);
       if (cost < (g.get(next) ?? Infinity)) {

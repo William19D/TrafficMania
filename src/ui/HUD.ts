@@ -1,5 +1,5 @@
 import type { Game, Tool } from '../core/Game.ts';
-import { DAY_SECONDS, fmtMoney, income } from '../core/Game.ts';
+import { fmtMoney, income } from '../core/Game.ts';
 import { PURPOSES, TIERS, TUNING as T } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
@@ -65,6 +65,9 @@ const CONTROLS: [string, string][] = [
 ];
 
 const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
+// Rush hours tinted on the clock bar
+const RUSH = new Set([7, 8, 9, 16, 17, 18, 19]);
+const pad = (n: number) => String(n).padStart(2, '0');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
@@ -85,15 +88,15 @@ interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<ty
 export class HUD {
   private toolBtns: HTMLButtonElement[];
   private speedBtns: HTMLButtonElement[];
-  private dots: HTMLElement[];
+  private cells: HTMLElement[];
   private tip: HTMLElement;
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
   private toasts: Toast[] = [];
   private helpOpen = false;
   private last: {
-    money?: number; net?: number; score?: number; speed?: number; tool?: Tool; level?: number;
-    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string; over: boolean;
+    money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
+    clock?: number; msg: string; danger?: number; pick?: string; over: boolean;
   } = { msg: '', over: false };
   onTutorial: (() => void) | null = null;
   // Called with the next building without a road each time the warning chip is clicked
@@ -111,11 +114,11 @@ export class HUD {
           ${SPEEDS.map(s => `<button class="speed" data-speed="${s.s}" aria-pressed="false" aria-label="${s.tip}" data-tip="${s.tip}"${s.key ? ` data-key="${s.key}"` : ''}>${icon(s.icon)}<small>${s.lbl}</small></button>`).join('')}
         </div>
         <span class="sep"></span>
-        <div class="trips" tabindex="0" data-tip="Trips completed: cars that reached their destination.">${icon('car')}<b class="score num">0</b></div>
+        <div class="trips" tabindex="0" data-tip="">${icon('car')}<b class="score num">0</b><small class="smooth num"></small></div>
         <span class="sep"></span>
-        <div class="week" tabindex="0" data-tip="">
-          <span class="wk"></span>
-          <span class="dots">${'<i></i>'.repeat(7)}</span>
+        <div class="clock" tabindex="0" data-tip="">
+          <span class="ck num"></span>
+          <span class="hours">${Array.from({ length: 24 }, (_, h) => `<i${RUSH.has(h) ? ' class="rush"' : ''}></i>`).join('')}</span>
         </div>
       </div>
       <button class="panel helpbtn" data-action="help" aria-label="Controls" aria-expanded="false" data-tip="Controls" data-key="?">${icon('help')}</button>
@@ -162,7 +165,7 @@ export class HUD {
       <div class="tip" role="tooltip" hidden></div>`;
     this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
-    this.dots = Array.from(root.querySelectorAll<HTMLElement>('.dots i'));
+    this.cells = Array.from(root.querySelectorAll<HTMLElement>('.hours i'));
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
@@ -329,7 +332,7 @@ export class HUD {
           <h2 id="m-title" class="bad">${icon('warning')} Game over</h2>
           <div class="stats">
             <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.score}</b></div>
-            <div>${icon('week', 'big')}<span>Weeks</span><b class="num">${g.week}</b></div>
+            <div>${icon('week', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
           </div>
           <div class="actions"><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
         </div>`;
@@ -413,7 +416,7 @@ export class HUD {
       L.speed = g.speed;
       for (const b of this.speedBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === g.speed));
       this.q('.status').classList.toggle('paused', g.speed === 0);
-      L.week = undefined; // relabel Week / Paused below
+      L.clock = undefined; // relabel the clock / Paused below
     }
 
     const toolChanged = g.tool !== L.tool;
@@ -449,26 +452,30 @@ export class HUD {
 
     this.updatePicker();
 
-    if (g.score !== L.score) {
-      const up = L.score !== undefined && g.score > L.score;
-      L.score = g.score;
+    // Trips today: arrivals and their smooth share
+    const td = g.stats.today, arrived = td.smooth + td.wait + td.detour, tk = `${g.stats.arrived}|${g.stats.failed}|${g.day}`;
+    if (tk !== L.trips) {
+      const up = L.arrived !== undefined && g.stats.arrived > L.arrived;
+      L.trips = tk;
+      L.arrived = g.stats.arrived;
       const s = this.q('.score');
-      s.textContent = String(g.score);
+      s.textContent = String(arrived);
+      this.q('.smooth').textContent = arrived ? ` · ${Math.round(100 * td.smooth / arrived)}% smooth` : '';
+      this.q('.trips').dataset.tip = `Trips today: ${arrived} arrived (${td.smooth} smooth, ${td.wait} long waits, ${td.detour} detours), `
+        + `${td.gaveup} gave up, ${td.noroute} found no road. All time: ${g.stats.arrived} arrived.`;
       if (up) flash(s, 'bump');
     }
 
-    if (g.week !== L.week || g.day !== L.day) {
-      L.week = g.week;
-      L.day = g.day;
-      L.dayFrac = undefined;
-      this.q('.wk').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Week </span><span class="short">W</span>${g.week}`;
-      this.dots.forEach((d, i) => { d.className = i + 1 < g.day ? 'past' : i + 1 === g.day ? 'now' : ''; });
-      this.q('.week').dataset.tip = `Week ${g.week}, day ${g.day} of 7. Upkeep is paid at the end of each day.`;
-    }
-    const frac = Math.round(((g.time % DAY_SECONDS) / DAY_SECONDS) * 20) / 20;
-    if (frac !== L.dayFrac) {
-      L.dayFrac = frac;
-      this.dots[g.day - 1]?.style.setProperty('--p', String(frac));
+    // Clock in 10-minute steps: Day 4 · 08:20, past hours filled, the current one filling up
+    const tick = Math.floor(g.clock * 6);
+    if (tick !== L.clock) {
+      L.clock = tick;
+      const h = Math.floor(g.hour), m = Math.floor((g.hour - h) * 6) * 10, time = `${pad(h)}:${pad(m)}`;
+      this.q('.ck').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Day </span><span class="short">D</span>${g.day} · ${time}`;
+      this.cells.forEach((c, i) => { c.classList.toggle('past', i < h); c.classList.toggle('now', i === h); });
+      this.cells[h].style.setProperty('--p', String(m / 60));
+      this.q('.clock').dataset.tip = `Day ${g.day}, ${time}. Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift;`
+        + ' shoppers go out from mid-morning to the evening. Upkeep is paid at midnight.';
     }
 
     const off = g.buildings.reduce((n, b) => n + +!b.connected, 0);

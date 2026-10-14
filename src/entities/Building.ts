@@ -1,23 +1,33 @@
 import type { Node } from '../network/RoadGraph.ts';
 import type { Vec } from '../util/geom.ts';
-import { ZONES } from '../core/config.ts';
+import { TUNING as T, ZONES } from '../core/config.ts';
 import type { Zone } from '../core/config.ts';
 import type { Trip } from './Trip.ts';
 
 // Door: DOOR_D px out from the middle of the front face; roads snap to it within DOOR_R
 export const DOOR_D = 10, DOOR_R = 14;
 
+// PEOPLE_PER_CAR workers driving one car; next = game time of its next departure, at = where the car is
+export interface Commuter { home: Building; work: Building | null; depart: number; next: number; at: 'home' | 'driving' | 'away' }
+
 // A footprint (rounded rect) facing 'angle' (radians, toward its door). node = the door, its access point to the network.
+// pending: trips waiting at the door; parked: trips that arrived here and wait for their return leg.
 export class Building {
   node!: Node;
   pending: Trip[] = [];
-  demandTimer = 0;
+  parked: Trip[] = [];
+  residents = 0;
+  stock: number = T.STOCK_START; // shop goods
+  staffed = 0;           // 0..1 share of jobs with a commuter parked here
+  shopAcc = 0;           // fractional shopping / freight trips accrued hourly
+  truckAcc = 0;
   retryTimer = 0;
 
   constructor(public kind: Zone, public x: number, public y: number, public angle: number) {}
 
   get w(): number { return ZONES[this.kind].w; }
   get h(): number { return ZONES[this.kind].h; }
+  get jobs(): number { return ZONES[this.kind].jobs; }
   get connected(): boolean { return this.node.edges.length > 0; }
 
   door(): Vec {

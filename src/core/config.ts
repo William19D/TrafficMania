@@ -63,13 +63,13 @@ export const TIERS: Record<Tier, {
   highway: { label: 'Highway', limit: 150, kmh: 90, lanes: [2, 3], oneWay: true, cost: 220, noise: 0.9, access: false, level: 6, fill: '#F7F7F5', out: '#8A99AD', shoulder: 3, median: 0, line: 'double' },
 };
 
-// Building zones: footprint w (along the front) x h (depth) px; look: fill, outline, roof inset. Capacities come in S6.
+// Building zones: footprint w (along the front) x h (depth) px; residents / jobs: capacity; look: fill, outline, roof inset
 export type Zone = 'home' | 'shop' | 'office' | 'industry';
-export const ZONES: Record<Zone, { label: string; w: number; h: number; fill: string; out: string; roof: string }> = {
-  home: { label: 'Home', w: 28, h: 24, fill: '#FFFFFF', out: '#8DB17A', roof: '#BCDCA8' },
-  shop: { label: 'Shop', w: 44, h: 30, fill: '#8EC3EE', out: '#4F8CC6', roof: '#BBDAF5' },
-  office: { label: 'Office', w: 38, h: 38, fill: '#ABA3CF', out: '#7468A8', roof: '#CBC5E4' },
-  industry: { label: 'Factory', w: 56, h: 40, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
+export const ZONES: Record<Zone, { label: string; w: number; h: number; residents: number; jobs: number; fill: string; out: string; roof: string }> = {
+  home: { label: 'Home', w: 28, h: 24, residents: 30, jobs: 0, fill: '#FFFFFF', out: '#8DB17A', roof: '#BCDCA8' },
+  shop: { label: 'Shop', w: 44, h: 30, residents: 0, jobs: 10, fill: '#8EC3EE', out: '#4F8CC6', roof: '#BBDAF5' },
+  office: { label: 'Office', w: 38, h: 38, residents: 0, jobs: 30, fill: '#ABA3CF', out: '#7468A8', roof: '#CBC5E4' },
+  industry: { label: 'Factory', w: 56, h: 40, residents: 0, jobs: 25, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
 };
 // Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
 export type Purpose = 'commute' | 'shop' | 'freight';
@@ -87,6 +87,17 @@ export const TUNING = {
   REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
   ARRIVAL_PAY: 15,           // placeholder income per arrived trip until S7's taxes
   ACCESS_R: 60,              // px from a door to the road its free driveway joins
-  // placeholder demand until S5: seconds between trips a home (commute or shopping) / a factory (freight) queues, and the cap
-  HOME_TRIP_S: [6, 10], FACTORY_TRIP_S: [12, 18], MAX_PENDING: 6,
+  // Day clock: game seconds per in-game day (1x = 4 real minutes, 10 s per hour); Day 1 starts at 06:00
+  DAY_SECONDS: 240, START_HOUR: 6,
+  // Trips: one commuter (car) = PEOPLE_PER_CAR workers; homes start START_OCC full; departures ~ N(MEAN, SD) hours clamped to MIN..MAX
+  PEOPLE_PER_CAR: 5, EMPLOY_RATE: 0.5, START_OCC: 0.6,
+  COMMUTE_MEAN: 8, COMMUTE_SD: 0.75, COMMUTE_MIN: 6, COMMUTE_MAX: 10, WORK_HOURS: 9,
+  SHOP_RATE: 0.35,           // shopping round trips per car-unit (5 residents) per day
+  SHOP_CURVE: [0, 0, 0, 0, 0, 0, 0, .2, .4, .7, 1, 1.2, 1.2, 1, .9, .9, 1, 1.3, 1.3, 1, .6, .3, 0, 0], // per hour, normalised to sum 1
+  SHOP_STAY: 1,              // in-game hours parked at the shop
+  TRUCKS_PER_DAY: 8, TRUCK_HOURS: [6, 18], STOCK_PER_TRUCK: 10, STOCK_START: 20,
+  GRAVITY_D: 900,            // px, destination weight = capacity x exp(-d / GRAVITY_D)
+  SPAWN_FAIL: 3,             // in-game hours waiting at the door -> gave up
+  MAX_RETRIES: 1, MAX_CARS: 450,
+  SMOOTH_X: 1.5, WAIT_SHARE: 0.4, DETOUR_X: 1.3, // outcome: time vs free-flow ideal, share of the trip stopped, length vs ideal
 } as const;
