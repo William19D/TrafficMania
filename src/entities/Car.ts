@@ -44,6 +44,9 @@ export class Car {
   // Mid-edge lane change: seconds left of the slide, and the old lane's offset minus the new one's
   lc = 0;
   lcOff = 0;
+  // Lights for the renderer: decelerating or stopped; indicator 1 right / -1 left / 0 off (lane change, or turn within 60px)
+  brake = false;
+  blink = 0;
   // Driver on top of the kind: top speed ±10%, acceleration ±15%, reaction time in seconds (extra headway at speed);
   // braking stays shared so gaps hold
   len: number;
@@ -101,6 +104,7 @@ export class Car {
     if (this.lc > 0) this.lc = Math.max(0, this.lc - dt);
     else { idx = this.changeLane(graph, idx); lane = this.lane; }
     this.idx = idx;
+    this.blink = this.lc ? -Math.sign(this.lcOff) : !isDest && this.path && remaining < 60 ? graph.turn(this.path, 0, lane.from) : 0;
     const ahead = lane.cars[idx + 1];
     if (ahead) gap = ahead.s - this.s - sep(this, ahead);
     else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - sep(this, nextLane.cars[0]!);
@@ -123,6 +127,7 @@ export class Car {
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
+    this.brake = target < this.speed || this.speed < 1;
     this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
 

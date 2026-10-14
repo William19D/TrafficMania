@@ -18,6 +18,9 @@ const RED = '#E5484D';
 const RAIL = '#55657A';
 const PILLAR = '#8A99AD';
 const ACCENT = '#2F6FED';
+const BRAKE_ON = '#FF2A2A';
+const BRAKE_OFF = '#8C2A2A';
+const AMBER = '#FFB020';
 
 // Fixed house offsets around a city square (above and to the sides, away from the label below)
 const HOUSES: [number, number][] = [
@@ -741,6 +744,16 @@ export class CanvasRenderer {
         ctx.fillStyle = on ? ACCENT : RED;
         ctx.fillRect(1, 0, 2, w / 2 - 0.5);
       }
+    }
+    // Tail lights (one on a moto), bright while braking; indicator blinks on game time so pause freezes it
+    ctx.fillStyle = car.brake ? BRAKE_ON : BRAKE_OFF;
+    if (k === 'moto') ctx.fillRect(-h - 0.5, -0.75, 1.5, 1.5);
+    else { ctx.fillRect(-h - 0.5, y + 0.5, 1.5, 1.5); ctx.fillRect(-h - 0.5, -y - 2, 1.5, 1.5); }
+    if (car.blink && (game.time * 3 | 0) % 2) {
+      const sy = car.blink > 0 ? -y - 1.5 : y - 0.5;
+      ctx.fillStyle = AMBER;
+      ctx.fillRect(-h - 1, sy, 2, 2);
+      ctx.fillRect(h - 1, sy, 2, 2);
     }
     ctx.restore();
   }

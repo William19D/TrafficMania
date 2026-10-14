@@ -184,6 +184,8 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
   for (let t = 0; t < 20 * 60 && w.cars.includes(c); t++) {
     w.update(DT);
     if (at < 0 && c.lane === ls[1]) at = c.s;
+    // Lights: right indicator while sliding right and within 60px of the right turn at J, off elsewhere on the edge
+    if (c.lane.edge === ls[0]!.edge && c.blink !== (c.lc || c.lane.edge.length - c.s < 60 ? 1 : 0) && Math.abs(c.lane.edge.length - c.s - 60) > 2) fail(`lights: blink ${c.blink} at s=${c.s.toFixed(0)}`);
     const q = wg.carPos(c);
     if (c.lane.edge === ls[0]!.edge) jump = Math.max(jump, Math.hypot(q.x - p.x, q.y - p.y), Math.abs(q.angle - p.angle) * 20);
     p = q;
@@ -228,6 +230,7 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.cars.push(c);
   J.phase = lightGroup(J, e) ^ 1;
   for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
+  if (kind === 'car' && !c.brake) fail('lights: brake lights off while held at the red');
   if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`ambulance: ${kind} ${kind === 'ambulance' ? 'held at' : 'ran'} the red light`);
 }
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
