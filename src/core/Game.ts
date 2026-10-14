@@ -130,6 +130,7 @@ export class Game {
       const car = this.cars[i];
       const r = car.update(dt, this.graph);
       if (r === 'ok') continue;
+      if (r === 'stuck') { this.sendHome(car); continue; }
       if (r === 'arrived') this.score++;
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
@@ -149,7 +150,7 @@ export class Game {
       const lane = this.graph.pickLane(e, city.node);
       if (!lane || (lane.cars[0]?.s ?? Infinity) < CAR_LEN + GAP * 2) continue;
       city.pending.splice(i, 1);
-      const car = new Car(lane, dest);
+      const car = new Car(lane, dest, city);
       car.path = path.slice(1);
       lane.cars.unshift(car);
       this.cars.push(car);
@@ -429,6 +430,12 @@ export class Game {
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
     }
+  }
+
+  // Takes the car off the road and puts its trip back in its origin's queue
+  sendHome(car: Car): void {
+    this.dropCars([car]);
+    car.origin.pending.push(car.dest);
   }
 
   // ---- Edit tool ----

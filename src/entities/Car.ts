@@ -4,6 +4,8 @@ import { findPath } from '../network/Pathfinder.ts';
 import type { City } from './City.ts';
 
 export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
+// Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
+export const REROUTE_S = 8, GIVE_UP_S = 20;
 
 export class Car {
   s = 0;
@@ -20,23 +22,33 @@ export class Car {
   idx = 0;
   // Lane we will take past lane.to; RoadGraph only grants the turn when it has room
   exit: Lane | null = null;
+  // Seconds spent stopped
+  wait = 0;
 
-  constructor(public lane: Lane, public dest: City) {}
+  constructor(public lane: Lane, public dest: City, public origin: City) {}
 
   get color(): string {
     return this.dest.color;
   }
 
-  update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' {
+  update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
     const lane = this.lane;
     const node = lane.to;
     const remaining = lane.edge.length - this.s;
     const isDest = node === this.dest.node;
 
+    const w = this.wait;
+    this.wait = this.speed < 1 ? w + dt : 0;
+    if (this.wait > GIVE_UP_S) return 'stuck';
+
     // Recompute route from the node we are heading to
     if (!isDest && (!this.path || this.path[0] !== node)) {
       this.path = findPath(graph, node, this.dest.node);
       if (!this.path) return 'lost';
+    } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
+      // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up
+      const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!));
+      if (p) this.path = p;
     }
 
     let nextLane: Lane | null = null;

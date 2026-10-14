@@ -1,10 +1,10 @@
-import type { RoadGraph, Node } from './RoadGraph.ts';
+import type { RoadGraph, Node, Edge } from './RoadGraph.ts';
 import { CAR_LEN, GAP } from './RoadGraph.ts';
 import { dist } from '../util/geom.ts';
 
-// A* with cost = length × congestion of the outgoing lane
+// A* with cost = length × congestion of the outgoing lane; 'avoid' is treated as closed
 // ponytail: open list with linear search, use a heap if the graph grows large
-export function findPath(graph: RoadGraph, start: Node, goal: Node): Node[] | null {
+export function findPath(graph: RoadGraph, start: Node, goal: Node, avoid: Edge | null = null): Node[] | null {
   if (start === goal) return [start];
   const g = new Map<Node, number>([[start, 0]]);
   const f = new Map<Node, number>([[start, dist(start, goal)]]);
@@ -25,7 +25,7 @@ export function findPath(graph: RoadGraph, start: Node, goal: Node): Node[] | nu
     closed.add(cur);
     for (const e of cur.edges) {
       const next = e.a === cur ? e.b : e.a;
-      if (closed.has(next)) continue;
+      if (closed.has(next) || e === avoid) continue;
       const lanes = graph.lanesFrom(e, cur);
       if (!lanes.length) continue;
       const cars = lanes.reduce((n, l) => n + l.cars.length, 0);

@@ -5,6 +5,7 @@ import { Game } from '../src/core/Game.ts';
 import { RoadGraph, CAR_LEN } from '../src/network/RoadGraph.ts';
 import type { Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
+import { Car } from '../src/entities/Car.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -20,18 +21,23 @@ Math.random = () => {
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
 // Blank world: no terrain, no random cities; tutorialActive = no game over and no city spawning
-const game = new Game();
-game.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [] };
-game.graph = new RoadGraph();
-game.cities = [];
-game.tutorialActive = true;
-game.inventory = { asphalt: 9999, bridges: 0, tunnels: 0, lights: 5, roundabouts: 5 };
-const g = game.graph;
-const city = (name: string, x: number, y: number): Node => {
-  const c = new City(name, '#888', x, y, 3);
-  game.cities.push(c);
-  return g.addNode(x, y, c);
+const blank = (): Game => {
+  const w = new Game();
+  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [] };
+  w.graph = new RoadGraph();
+  w.cities = [];
+  w.tutorialActive = true;
+  w.inventory = { asphalt: 9999, bridges: 0, tunnels: 0, lights: 5, roundabouts: 5 };
+  return w;
 };
+const town = (w: Game, name: string, x: number, y: number): Node => {
+  const c = new City(name, '#888', x, y, 3);
+  w.cities.push(c);
+  return w.graph.addNode(x, y, c);
+};
+const game = blank();
+const g = game.graph;
+const city = (name: string, x: number, y: number): Node => town(game, name, x, y);
 
 //   F         A=2-lane=J1(light)---B---J2(plain 3-way)---E
 //             |                    |   |
@@ -75,5 +81,24 @@ for (let i = 0; i < STEPS; i++) {
   }
 }
 if (game.score <= 0) fail('no car arrived');
+
+// Deadlock: a parked car (not in game.cars, never moves) blocks the start of lane J->Y.
+// 'a' waits at J, reroutes via K after REROUTE_S and arrives; 'c' is stuck behind it, gives up and goes home to Z.
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 100, 900);
+  const J = wg.addNode(500, 500), K = wg.addNode(700, 200);
+  for (const [a, b] of [[X, J], [J, Y], [J, K], [K, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const lane = wg.lanesFrom(wg.edgeBetween(J, Y)!, J)[0]!;
+  const parked = new Car(lane, Y.city!, Z.city!), c = new Car(lane, Y.city!, Z.city!);
+  parked.s = 40;
+  lane.cars.push(c, parked);
+  w.cars.push(c);
+  X.city!.pending.push(Y.city!);
+  for (let t = 0; t < 40 * 60; t++) w.update(DT);
+  if (w.score !== 1) fail(`deadlock: rerouted car did not arrive (score ${w.score})`);
+  if (w.cars.includes(c) || lane.cars.includes(c) || !Z.city!.pending.includes(Y.city!)) fail('deadlock: stuck car not sent home');
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);
