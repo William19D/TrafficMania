@@ -3,11 +3,11 @@ import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { generateTerrain, CITY_COLORS, inWater, inMountain, segmentCrosses, randomName, findCitySpot } from '../world/MapGenerator.ts';
 import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, CAR_LEN, GAP, DEFAULT_TYPE, laneFactor, sameType } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { City, OVERCROWD_SECONDS, CITY_R } from '../entities/City.ts';
-import { Car } from '../entities/Car.ts';
+import { Car, KINDS, randomKind } from '../entities/Car.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
 export interface Inventory { asphalt: number; bridges: number; tunnels: number; lights: number; roundabouts: number }
@@ -130,6 +130,7 @@ export class Game {
       const car = this.cars[i];
       const r = car.update(dt, this.graph);
       if (r === 'ok') continue;
+      if (r === 'stuck' || r === 'lost') { this.dropCars([car]); continue; }
       if (r === 'arrived') this.score++;
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
@@ -140,16 +141,18 @@ export class Game {
     city.retryTimer -= dt;
     if (city.retryTimer > 0 || !city.pending.length) return;
     city.retryTimer = 0.4;
+    const kind = randomKind(), len = KINDS[kind].len;
     for (let i = 0; i < city.pending.length; i++) {
       const dest = city.pending[i];
       const path = findPath(this.graph, city.node, dest.node);
       if (!path || path.length < 2) continue;
       const e = this.graph.edgeBetween(city.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.pickLane(e, city.node);
-      if (!lane || lane.cars.some(c => c.s < CAR_LEN + GAP * 2)) continue;
+      const lane = this.graph.pickLane(e, city.node, this.graph.turn(path, 1));
+      const f = lane?.cars[0];
+      if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       city.pending.splice(i, 1);
-      const car = new Car(lane, dest);
+      const car = new Car(lane, dest, city, kind);
       car.path = path.slice(1);
       lane.cars.unshift(car);
       this.cars.push(car);
@@ -423,11 +426,14 @@ export class Game {
     this.inventory.tunnels += e.refund.tunnels;
   }
 
+  // Takes the cars off the road and puts their trips back in their origin's queue,
+  // so demolishing or retyping a busy road is not a free way to clear traffic
   private dropCars(cars: Car[]): void {
     for (const car of cars) {
       this.graph.detachCar(car);
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
+      car.origin.pending.push(car.dest);
     }
   }
 

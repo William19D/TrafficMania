@@ -9,6 +9,9 @@ export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 1
 export const RING_R = NODE_R + 5, RING_IN = Math.sqrt(RING_R * RING_R - LANE_OFFSET * LANE_OFFSET);
 // Where a car stops before a junction (distance from the node): outside the ring on roundabouts
 export const stopDist = (n: Node): number => n.control === 'roundabout' ? RING_R + ROAD_W / 2 + 4 : NODE_R + 3;
+// Mid-edge lane change: slide seconds, and how far from both nodes it may start (past the node blends, the slide done
+// before the end, room left for cars granted into the lane)
+export const LC_S = 0.6, LC_M = 110;
 
 // Road types: lanes PER DIRECTION; a one-way road only has lanes a->b
 export const LANE_W = 9;
@@ -180,17 +183,33 @@ export class RoadGraph {
     return e.lanes.filter(l => l.from === from);
   }
 
-  // Lane with the most room at its start
-  pickLane(e: Edge, from: Node): Lane | null {
+  // Turn at the first junction from path[j] on (inner nodes of a bent road don't count): 1 right, -1 left or U-turn, 0 straight / none
+  // from: the node before path[0], for j = 0
+  turn(path: Node[], j: number, from?: Node): number {
+    for (; j < path.length - 1; j++) {
+      const n = path[j]!, p = path[j - 1] ?? from!, q = path[j + 1]!;
+      if (!n.city && n.edges.length === 2 && n.control === 'none') continue;
+      const ax = n.x - p.x, ay = n.y - p.y, bx = q.x - n.x, by = q.y - n.y;
+      // y points down, so a positive cross product is a right turn on screen
+      const a = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+      return Math.abs(a) > Math.PI * 0.95 ? -1 : a > Math.PI / 6 ? 1 : a < -Math.PI / 6 ? -1 : 0;
+    }
+    return 0;
+  }
+
+  // Lane for the turn after this edge: rightmost / leftmost (lanesFrom is ascending by offset), straight: the most room at its start
+  pickLane(e: Edge, from: Node, turn = 0): Lane | null {
+    const ls = this.lanesFrom(e, from);
+    if (turn) return ls[turn > 0 ? ls.length - 1 : 0] ?? null;
     let best: Lane | null = null, room = -1;
-    for (const l of this.lanesFrom(e, from)) {
+    for (const l of ls) {
       const r = l.cars[0]?.s ?? Infinity;
       if (r > room) { best = l; room = r; }
     }
     return best;
   }
 
-  lanePos(lane: Lane, s: number, offset = lane.offset): { x: number; y: number; angle: number } {
+  lanePos(lane: Pick<Lane, 'from' | 'to' | 'offset'>, s: number, offset = lane.offset): { x: number; y: number; angle: number } {
     const dx = lane.to.x - lane.from.x, dy = lane.to.y - lane.from.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
@@ -208,18 +227,55 @@ export class RoadGraph {
     const next = c.path?.[1];
     if (lane.to.control === 'roundabout' && remaining < RING_IN && next) return this.ringPos(lane.to, lane.from, next, RING_IN - remaining);
     if (lane.from.control === 'roundabout' && c.s < RING_IN && c.prev) return this.ringPos(lane.from, c.prev, lane.to, RING_IN + c.s);
+    // U-turn back down the same edge (dead end / one-way ahead): half circle in the last and first NODE_R
+    if (next === lane.from && c.exit?.edge === lane.edge && remaining < NODE_R && lane.to.control !== 'roundabout') return this.uturnPos(lane, c.exit.offset, NODE_R - remaining);
+    if (c.prev === lane.to && c.s < NODE_R && lane.from.control !== 'roundabout') return this.uturnPos({ ...lane, from: lane.to, to: lane.from, offset: c.prevOffset }, lane.offset, NODE_R + c.s);
+    // Plain junction: a Bezier arc over the last / first NODE_R or so of the two lanes (exit is stale for a tick after a hand-off)
+    const nl = c.exit;
+    if (nl && next === nl.to && next !== lane.from && lane.to.control !== 'roundabout') {
+      const q = this.arcPos(lane.from, lane.to, nl.to, lane.offset, nl.offset, -remaining);
+      if (q) return q;
+    }
+    if (c.prev && c.prev !== lane.to && lane.from.control !== 'roundabout') {
+      const q = this.arcPos(c.prev, lane.from, lane.to, c.prevOffset, lane.offset, c.s);
+      if (q) return q;
+    }
     const B = 2 * NODE_R;
     let off = lane.offset;
-    if (next && remaining < B && lane.to.control !== 'roundabout') {
-      const e = this.edgeBetween(lane.to, next);
-      const nl = e && this.pickLane(e, lane.to);
-      if (nl) off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
-    }
+    if (nl && next === nl.to && remaining < B && lane.to.control !== 'roundabout') off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
     if (c.prev && c.s < B && lane.from.control !== 'roundabout') off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
     // roundabouts: the ring is a single lane at LANE_OFFSET, so outer lanes slide inward before entering / after leaving it
     if (lane.to.control === 'roundabout' && remaining < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - RING_IN) / B);
     if (lane.from.control === 'roundabout' && c.s < RING_IN + B) off += (LANE_OFFSET - lane.offset) * (1 - (c.s - RING_IN) / B);
-    return this.lanePos(lane, c.s, off);
+    if (!c.lc) return this.lanePos(lane, c.s, off);
+    // mid-edge lane change: smoothstep slide from the old lane, nose turned along the sideways speed
+    const u = c.lc / LC_S, q = this.lanePos(lane, c.s, off + c.lcOff * u * u * (3 - 2 * u));
+    return { ...q, angle: q.angle + Math.atan2(-c.lcOff * 6 * u * (1 - u) / LC_S, Math.max(c.speed, 40)) };
+  }
+
+  // Cubic Bezier across node n from lane a->n (offset oi) onto n->b (offset oo); x = signed distance past n, the arc spans |x| <= r
+  // (NODE_R on single-lane roads).
+  // Its ends sit where the straight lane's halfway offset blend is, tangent to the lanes, so the hand-off is seamless.
+  // ponytail: ignores the roundabout / next-node blends that only reach the ends on edges under ~3 NODE_R; a glitch there is cosmetic
+  private arcPos(a: Node, n: Node, b: Node, oi: number, oo: number, x: number): { x: number; y: number; angle: number } | null {
+    // outer lanes of wide roads start the arc earlier, or a turn from one onto an inner lane is a hook
+    const la = dist(a, n), r = Math.min(NODE_R + Math.max(Math.abs(oi), Math.abs(oo)) - LANE_OFFSET, 2 * NODE_R, la / 2, dist(n, b) / 2);
+    if (x < -r || x > r) return null;
+    const f = 0.5 - r / (4 * NODE_R);
+    const P = this.lanePos({ from: a, to: n, offset: 0 }, la - r, oi + (oo - oi) * f);
+    const Q = this.lanePos({ from: n, to: b, offset: 0 }, r, oo + (oi - oo) * f);
+    const t = (x + r) / (2 * r), m = 1 - t, d = Math.hypot(Q.x - P.x, Q.y - P.y) * 0.4;
+    const x1 = P.x + Math.cos(P.angle) * d, y1 = P.y + Math.sin(P.angle) * d, x2 = Q.x - Math.cos(Q.angle) * d, y2 = Q.y - Math.sin(Q.angle) * d;
+    const bz = (p0: number, p1: number, p2: number, p3: number) => m * m * m * p0 + 3 * m * t * (m * p1 + t * p2) + t * t * t * p3;
+    const dz = (p0: number, p1: number, p2: number, p3: number) => m * m * (p1 - p0) + 2 * m * t * (p2 - p1) + t * t * (p3 - p2);
+    return { x: bz(P.x, x1, x2, Q.x), y: bz(P.y, y1, y2, Q.y), angle: Math.atan2(dz(P.y, y1, y2, Q.y), dz(P.x, x1, x2, Q.x)) };
+  }
+
+  // Left turn from lane l (offset l.offset) onto the opposite lane (offset oo), NODE_R before l.to; p = 0..2*NODE_R
+  private uturnPos(l: Lane, oo: number, p: number): { x: number; y: number; angle: number } {
+    const t = Math.PI * Math.min(1, p / (2 * NODE_R)), r = (l.offset + oo) / 2;
+    const q = this.lanePos(l, l.edge.length - NODE_R + r * Math.sin(t), (l.offset - oo) / 2 + r * Math.cos(t));
+    return { ...q, angle: q.angle - t };
   }
 
   // Counter-clockwise (on screen) around n from the 'from' approach to the 'to' exit; p = straight-line progress 0..2*RING_IN
@@ -282,22 +338,39 @@ export class RoadGraph {
     n.occupants.add(c);
   }
 
+  // Don't block the box: the exit lane needs the car's length of room past the junction, after the cars already granted into it
+  private fits(n: Node, c: Car): boolean {
+    const l = c.exit;
+    if (!l) return false;
+    const f = l.cars[0];
+    let room = (f ? f.s - f.len / 2 : Infinity) - CAR_LEN / 2 - stopDist(n);
+    for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= o.len + GAP;
+    return room >= c.len + GAP;
+  }
+
   update(dt: number): void {
     for (const n of this.nodes) {
       n.queue = n.queue.filter(c => c.lane.to === n);
       if (n.control === 'light') {
         n.phaseTimer += dt;
         if (n.phaseTimer >= LIGHT_PERIOD) { n.phaseTimer = 0; n.phase ^= 1; }
-        n.queue = n.queue.filter(c => {
-          if (lightGroup(n, c.lane.edge) !== n.phase) return true;
-          this.grant(n, c);
-          return false;
-        });
-      } else {
-        // FIFO: arrival order; the roundabout admits up to 3 cars at once
-        const cap = n.control === 'roundabout' ? 3 : 1;
-        while (n.queue.length && n.occupants.size < cap) this.grant(n, n.queue.shift()!);
       }
+      // Arrival order; lights admit their whole green group, the roundabout up to 3 cars, a plain junction 1.
+      // A car that can't go holds back the cars queued behind it in its lane.
+      const cap = n.control === 'light' ? Infinity : n.control === 'roundabout' ? 3 : 1;
+      // Ambulance: its whole lane goes first (stable sort keeps the cars ahead of it in order) and runs red into an empty box
+      const amb = new Set(n.queue.filter(c => c.kind === 'ambulance').map(c => c.lane));
+      if (amb.size) n.queue.sort((p, q) => +amb.has(q.lane) - +amb.has(p.lane));
+      const held = new Set<Lane>();
+      n.queue = n.queue.filter(c => {
+        const red = n.control === 'light' && lightGroup(n, c.lane.edge) !== n.phase && !(amb.has(c.lane) && !n.occupants.size);
+        if (held.has(c.lane) || n.occupants.size >= cap || red || !this.fits(n, c)) {
+          held.add(c.lane);
+          return true;
+        }
+        this.grant(n, c);
+        return false;
+      });
     }
   }
 
