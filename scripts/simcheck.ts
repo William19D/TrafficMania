@@ -7,7 +7,8 @@ import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
-import { BIOMES, DEFAULT_CONFIG, TUNING } from '../src/core/config.ts';
+import { findPath } from '../src/network/Pathfinder.ts';
+import { BIOMES, DEFAULT_CONFIG, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 
@@ -59,7 +60,7 @@ const city = (name: string, x: number, y: number): Node => town(game, name, x, y
 const A = city('A', 200, 300), B = city('B', 1000, 300), C = city('C', 600, 800), D = city('D', 1400, 800), E = city('E', 1800, 300);
 const F = city('F', 600, 60);
 const J1 = g.addNode(600, 300), R = g.addNode(1000, 800), J2 = g.addNode(1400, 300);
-const one: RoadType = { lanes: 1, oneWay: false }, two: RoadType = { lanes: 2, oneWay: false };
+const one: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
 const roads: [Node, Node, RoadType][] = [
   [A, J1, two], [J1, B, one], [J1, C, one], [J1, F, one],
   [C, R, one], [R, D, one], [B, R, one], [B, J2, one], [J2, E, one], [J2, D, one],
@@ -107,17 +108,17 @@ if (game.score <= 0) fail('no car arrived');
 if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x the kind's top speed`);
 if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
 
-// Money: a straight 10-tile road costs 10 x ROAD_COST, a same-day demolish gives it all back; built again and demolished
+// Money: a straight 10-tile avenue costs 10 x its tier rate, a same-day demolish gives it all back; built again and demolished
 // the next day it refunds REFUND_LATER after one day of upkeep; no money, no road
 {
   const w = blank(), m0 = w.money, a = { x: 100, y: 500 }, b = { x: 500, y: 500 }, mid = { x: 300, y: 500 };
-  const plan = w.planPath([a, b], 0, { lanes: 1, oneWay: false });
-  if (!plan.ok || plan.cost !== 10 * TUNING.ROAD_COST) fail(`money: 10-tile road priced ${plan.cost}`);
+  const plan = w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false });
+  if (!plan.ok || plan.cost !== 10 * TIERS.avenue.cost) fail(`money: 10-tile road priced ${plan.cost}`);
   w.commitPath(plan);
   if (w.money !== m0 - plan.cost) fail(`money: building left ${w.money}, expected ${m0 - plan.cost}`);
   w.demolishAt(mid);
   if (w.graph.edges.length || w.money !== m0) fail(`money: same-day demolish left ${w.money}, expected ${m0}`);
-  w.commitPath(w.planPath([a, b], 0, { lanes: 1, oneWay: false }));
+  w.commitPath(w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }));
   w.time = DAY_SECONDS - DT / 2;
   w.update(DT);
   const upkeep = plan.cost * TUNING.UPKEEP_RATE;
@@ -126,12 +127,12 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
   const left = m0 - plan.cost - upkeep + plan.cost * TUNING.REFUND_LATER;
   if (Math.abs(w.money - left) > 1e-6) fail(`money: next-day demolish left ${w.money}, expected ${left}`);
   w.money = plan.cost - 1;
-  if (w.planPath([a, b], 0, { lanes: 1, oneWay: false }).reason !== 'Not enough money') fail('money: built without the money');
+  if (w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }).reason !== 'Not enough money') fail('money: built without the money');
 }
 // Deadlock: a parked car (not in game.cars, never moves) blocks the start of lane J->Y.
 // 'a' waits at J, reroutes via K after REROUTE_S and arrives; 'c' is stuck behind it, gives up and goes home to Z.
 {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 100, 900);
   const J = wg.addNode(500, 500), K = wg.addNode(700, 200);
   for (const [a, b] of [[X, J], [J, Y], [J, K], [K, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
@@ -148,7 +149,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 }
 // Lost: a car whose destination has no road at all goes back to its origin's queue instead of vanishing
 {
-  const w = blank(), flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), J = w.graph.addNode(500, 500);
   w.commitPath(w.planPath([X, J], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -160,7 +161,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 }
 // Demolish: a car on a demolished road goes back to its origin's queue instead of vanishing
 {
-  const w = blank(), flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500);
   w.commitPath(w.planPath([X, Y], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -173,12 +174,12 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 }
 // U-turn: the road ahead turns one-way against the car, so it turns back at M along a smooth half circle and arrives via K
 {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), M = wg.addNode(500, 500), K = wg.addNode(500, 200);
   for (const [a, b] of [[X, M], [M, Y], [X, K], [K, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
   const my = wg.edgeBetween(M, Y)!;
-  wg.setEdgeType(my, { lanes: 1, oneWay: true }, my.a === Y);
+  wg.setEdgeType(my, { tier: 'avenue', lanes: 1, oneWay: true }, my.a === Y);
   const c = new Car(wg.lanesFrom(wg.edgeBetween(X, M)!, X)[0]!, Y.city!, X.city!);
   c.lane.cars.push(c);
   w.cars.push(c);
@@ -195,7 +196,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 }
 // Lane by turn: on a 2-lane road (through the inner node M) a car turning right at J keeps right, one turning left keeps left
 {
-  const w = blank(), wg = w.graph, two: RoadType = { lanes: 2, oneWay: false }, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false }, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 900), Z = town(w, 'Z', 900, 100);
   const M = wg.addNode(300, 500), J = wg.addNode(500, 500);
   for (const [a, b, t] of [[X, M, two], [M, J, two], [J, Y, flat], [J, Z, flat]] as const) w.commitPath(w.planPath([a, b], 0, t));
@@ -214,7 +215,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 // Lane change: a car spawned in the left lane of a long 2-lane road moves right mid-edge (clear of both nodes,
 // sliding without a jump) before turning right at J, and arrives
 {
-  const w = blank(), wg = w.graph, two: RoadType = { lanes: 2, oneWay: false }, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false }, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 900), Z = town(w, 'Z', 900, 100), J = wg.addNode(700, 500);
   for (const [a, b, t] of [[X, J, two], [J, Y, flat], [J, Z, flat]] as const) w.commitPath(w.planPath([a, b], 0, t));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -238,7 +239,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
 // Curve speed: through a plain inner node M a car takes a right-angle corner at TURN_SPEED and a gentle 10 degree joint near full speed,
 // drawn along an arc across M (no jump in position or heading)
 for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SPEED * 0.95, MAX_SPEED]]) {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), M = wg.addNode(500, 500), Y = town(w, 'Y', yx!, yy!);
   for (const [a, b] of [[X, M], [M, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -260,7 +261,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
 }
 // Short approach: a fast moto through inner node M onto a 45px edge stops before busy plain J instead of running it
 {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900);
   const M = wg.addNode(455, 500), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, M], [M, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
@@ -276,7 +277,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
 }
 // Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -292,7 +293,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
 }
 // Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
 for (const kind of ['ambulance', 'car'] as const) {
-  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
@@ -305,6 +306,44 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
   if (kind === 'car' && !c.brake) fail('lights: brake lights off while held at the red');
   if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`ambulance: ${kind} ${kind === 'ambulance' ? 'held at' : 'ran'} the red light`);
+}
+// Tiers: a car never beats its top speed x dirt's limit on dirt (it brakes before the avenue -> dirt joint M);
+// A* takes a longer highway over a shorter dirt road; highways never connect to a city;
+// retyping dirt to street clamps the lanes to the tier and charges the price difference
+{
+  const w = blank(), wg = w.graph, ave: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, dirt: RoadType = { tier: 'dirt', lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), M = wg.addNode(500, 500), Y = town(w, 'Y', 900, 500);
+  w.commitPath(w.planPath([X, M], 0, ave));
+  w.commitPath(w.planPath([M, Y], 0, dirt));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const md = wg.edgeBetween(M, Y)!, c = new Car(wg.lanesFrom(wg.edgeBetween(X, M)!, X)[0]!, Y.city!, X.city!);
+  c.vmax = MAX_SPEED * 1.1;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  let over = -Infinity, fast = 0;
+  for (let t = 0; t < 30 * 60 && w.cars.includes(c); t++) {
+    w.update(DT);
+    if (c.lane.edge === md) over = Math.max(over, c.speed - c.vmax * TIERS.dirt.limit / MAX_SPEED);
+    else fast = Math.max(fast, c.speed);
+  }
+  if (w.score !== 1 || over > 1 || over < -5) fail(`tiers: car on dirt at ${over.toFixed(1)} over its limit (score ${w.score})`);
+  if (fast < c.vmax * 0.95) fail(`tiers: car on the avenue only reached ${fast.toFixed(0)}`);
+
+  const hw: RoadType = { tier: 'highway', lanes: 2, oneWay: false };
+  const P = wg.addNode(100, 1000), Q = wg.addNode(900, 1000), K = wg.addNode(500, 700);
+  w.commitPath(w.planPath([P, Q], 0, dirt));
+  w.commitPath(w.planPath([P, K], 0, hw));
+  w.commitPath(w.planPath([K, Q], 0, hw));
+  const route = findPath(wg, P, Q);
+  if (route?.length !== 3 || route[1] !== K) fail(`tiers: A* took ${route?.map(n => n.id)} instead of the highway via ${K.id}`);
+  if (w.planPath([X, P], 0, hw).reason !== 'Highways give no building access') fail('tiers: a highway connected to a city');
+
+  const pq = [wg.edgeBetween(P, Q)!], m0 = w.money, d = w.retypeDelta(pq, { tier: 'street', lanes: 3, oneWay: false });
+  w.retype(pq, { tier: 'street', lanes: 3, oneWay: false });
+  const t = pq[0].type;
+  if (t.tier !== 'street' || t.lanes !== 1 || Math.abs(d - 20 * (TIERS.street.cost - TIERS.dirt.cost)) > 1e-6 || Math.abs(w.money - (m0 - d)) > 1e-6) {
+    fail(`tiers: dirt -> street gave ${JSON.stringify(t)} for ${d}`);
+  }
 }
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

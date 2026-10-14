@@ -3,13 +3,13 @@ import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { generateTerrain, CITY_COLORS, inWater, inMountain, segmentCrosses, randomName, findCitySpot } from '../world/MapGenerator.ts';
 import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType, fitType } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { City, OVERCROWD_SECONDS, CITY_R } from '../entities/City.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
-import { DEFAULT_CONFIG, DIFFICULTY, TUNING as T } from './config.ts';
-import type { GameConfig } from './config.ts';
+import { DEFAULT_CONFIG, DIFFICULTY, TIERS, TUNING as T } from './config.ts';
+import type { GameConfig, Tier } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
@@ -173,8 +173,20 @@ export class Game {
     }
   }
 
+  // Unlock hook for tools and tiers; ponytail: everything is unlocked until S6 compares TIERS[t].level with the city level
+  tierUnlocked(_t: Tier): boolean {
+    return true;
+  }
+
+  private lockedMsg(t: Tier): string {
+    return this.tierUnlocked(t) ? '' : `Unlocks at level ${TIERS[t].level}`;
+  }
+
+  // Lanes and one-way are clamped to the tier (fitType)
   setRoadType(t: RoadType): void {
-    this.roadType = { ...t };
+    const locked = this.lockedMsg(t.tier);
+    if (locked) { this.say(locked); return; }
+    this.roadType = fitType(t);
   }
 
   setLevel(n: number): void {
@@ -268,11 +280,11 @@ export class Game {
     this.upkeepDay = this.upkeepPerDay();
   }
 
-  // Build price of a road from a to b: per tile and lane, x the viaduct factor, or x the bridge / tunnel factor on the
+  // Build price of a road from a to b: per tile and lane at the tier's rate, x the viaduct factor, or x the bridge / tunnel factor on the
   // share of its length over water / through a mountain. Geometry only, so a split road keeps its total.
   // ponytail: money stays a float (no rounding), so splits and same-day refunds add up exactly; the HUD rounds
   price(a: Vec, b: Vec, f: EdgeFlags): number {
-    const base = dist(a, b) / TILE * laneFactor(f.type) * T.ROAD_COST;
+    const base = dist(a, b) / TILE * laneFactor(f.type) * TIERS[f.type.tier].cost;
     if (f.level > 0) return base * (T.VIADUCT_X + T.VIADUCT_LEVEL_X * f.level);
     if (!f.bridge && !f.tunnel) return base;
     const s = segmentCrosses(this.terrain, a, b);
@@ -363,6 +375,7 @@ export class Game {
     if (this.badGround(list[0]) || this.badGround(list[list.length - 1])) { plan.reason = 'Invalid terrain'; return plan; }
 
     let total = 0, built = 0, blocked = false;
+    const noAccess = !TIERS[type.tier].access && list.some(s => s.node?.city);
     for (let i = 1; i < list.length; i++) {
       const a = list[i - 1], b = list[i];
       const r = this.planSeg(a, b, level, type);
@@ -377,7 +390,8 @@ export class Game {
     if (!built) { plan.reason = 'Already exists'; return plan; }
     if (total < TILE / 2) return plan; // 'Too short'
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
-    plan.reason = this.afford(plan.cost);
+    if (noAccess) { plan.reason = 'Highways give no building access'; return plan; }
+    plan.reason = this.lockedMsg(type.tier) || this.afford(plan.cost);
     plan.ok = !plan.reason;
     return plan;
   }
@@ -464,19 +478,25 @@ export class Game {
     return run.reduce((n, e) => n + this.edgePrice(e, type), 0);
   }
 
-  // $ to pay (negative = refund). Same type on every edge (a flip) is free.
+  // $ to pay (negative = refund) for the run as fitType(type). Same type on every edge (a flip) is free.
   retypeDelta(run: Edge[], type: RoadType): number {
+    type = fitType(type);
     if (run.every(e => sameType(e.type, type))) return 0;
     return this.runPrice(run, type) - this.runPrice(run);
   }
 
+  // Retypes the run as fitType(type), upgrades and downgrades across tiers included.
   // Keeps the run's current travel direction (for one-way results) unless reverse.
   retype(run: Edge[], type: RoadType, reverse = false): boolean {
+    type = fitType(type);
     if (!reverse && run.every(e => sameType(e.type, type))) return true;
+    const { edges, nodes } = this.graph.runOf(run[0]);
+    const why = this.lockedMsg(type.tier)
+      || (!TIERS[type.tier].access && (nodes[0].city || nodes[nodes.length - 1].city) ? 'Highways give no building access' : '');
+    if (why) { this.say(why); return false; }
     const d = this.retypeDelta(run, type);
     if (d > this.money) { this.say('Not enough money'); return false; }
     const dir = this.runForward(run) !== reverse;
-    const { edges, nodes } = this.graph.runOf(run[0]);
     edges.forEach((e, i) => this.dropCars(this.graph.setEdgeType(e, type, (e.a === nodes[i]) === dir)));
     this.spend(d);
     this.say('Road updated');

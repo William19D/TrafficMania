@@ -1,5 +1,6 @@
 import type { Game } from '../core/Game.ts';
 import type { Vec } from '../util/geom.ts';
+import { DEFAULT_TYPE } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
 
 // The tutorial must never strand the player without money for its own tasks.
@@ -113,7 +114,7 @@ export class Tutorial {
     this.steps = steps(this.game);
     this.shown = true;
     this.game.tutorialActive = true;
-    this.game.setRoadType({ lanes: 1, oneWay: false }); // the tutorial's own tasks assume a default two-way road
+    this.game.setRoadType(DEFAULT_TYPE); // the tutorial's own tasks assume a default two-way street
     this.card.hidden = false;
     this.show(0);
   }

@@ -3,6 +3,8 @@ import { dist, distToSegment, segmentsCross } from '../util/geom.ts';
 import type { City } from '../entities/City.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Car } from '../entities/Car.ts';
+import { TIERS } from '../core/config.ts';
+import type { Tier } from '../core/config.ts';
 
 export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5, LIGHT_PERIOD = 5;
 // Roundabout ring (centre line radius) and where an approach lane meets it
@@ -13,14 +15,22 @@ export const stopDist = (n: Node): number => n.control === 'roundabout' ? RING_R
 // before the end, room left for cars granted into the lane)
 export const LC_S = 0.6, LC_M = 110;
 
-// Road types: lanes PER DIRECTION; a one-way road only has lanes a->b
+// Road types: tier (config TIERS), lanes PER DIRECTION; a one-way road only has lanes a->b
 export const LANE_W = 9;
-export interface RoadType { lanes: 1 | 2 | 3; oneWay: boolean }
-export const DEFAULT_TYPE: RoadType = { lanes: 1, oneWay: false };
-export const roadWidth = (t: RoadType): number => t.lanes * (t.oneWay ? 1 : 2) * LANE_W;
-// Asphalt multiplier per tile (today's two-way 1-lane road = 1)
+export interface RoadType { tier: Tier; lanes: 1 | 2 | 3; oneWay: boolean }
+export const DEFAULT_TYPE: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+// Half the median: how far a two-way road's lanes sit out from the centre line
+const halfMedian = (t: RoadType): number => t.oneWay ? 0 : TIERS[t.tier].median / 2;
+export const roadWidth = (t: RoadType): number => t.lanes * (t.oneWay ? 1 : 2) * LANE_W + 2 * TIERS[t.tier].shoulder + 2 * halfMedian(t);
+// Asphalt multiplier per tile (a two-way 1-lane road = 1)
 export const laneFactor = (t: RoadType): number => (t.lanes * (t.oneWay ? 1 : 2)) / 2;
-export const sameType = (a: RoadType, b: RoadType): boolean => a.lanes === b.lanes && a.oneWay === b.oneWay;
+export const sameType = (a: RoadType, b: RoadType): boolean => a.tier === b.tier && a.lanes === b.lanes && a.oneWay === b.oneWay;
+// Clamps lanes into the tier's range and drops one-way where the tier has none
+export const fitType = (t: RoadType): RoadType => {
+  const T = TIERS[t.tier];
+  const lanes = Math.max(T.lanes[0], Math.min(T.lanes[T.lanes.length - 1], t.lanes)) as RoadType['lanes'];
+  return { tier: t.tier, lanes, oneWay: t.oneWay && T.oneWay };
+};
 
 export type Control = 'none' | 'light' | 'roundabout';
 
@@ -75,15 +85,16 @@ export class RoadGraph {
     return e;
   }
 
-  // Two-way: lane k sits (k + 0.5) lanes right of the centre line; one-way: lanes centred on the axis
+  // Two-way: lane k sits (k + 0.5) lanes (plus half the median) right of the centre line; one-way: lanes centred on the axis
   private buildLanes(e: Edge, t: RoadType): void {
     e.type = { ...t };
     e.width = roadWidth(t);
     e.lanes = [];
     const lane = (from: Node, to: Node, offset: number): Lane => ({ edge: e, from, to, cars: [], offset });
+    const m = halfMedian(t);
     for (let k = 0; k < t.lanes; k++) {
       if (t.oneWay) e.lanes.push(lane(e.a, e.b, (k - (t.lanes - 1) / 2) * LANE_W));
-      else e.lanes.push(lane(e.a, e.b, (k + 0.5) * LANE_W), lane(e.b, e.a, (k + 0.5) * LANE_W));
+      else e.lanes.push(lane(e.a, e.b, (k + 0.5) * LANE_W + m), lane(e.b, e.a, (k + 0.5) * LANE_W + m));
     }
   }
 

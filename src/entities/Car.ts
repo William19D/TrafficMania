@@ -1,5 +1,6 @@
 import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
-import type { RoadGraph, Lane, Node } from '../network/RoadGraph.ts';
+import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
+import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { City } from './City.ts';
 import { random } from '../util/rng.ts';
@@ -63,6 +64,11 @@ export class Car {
     this.react = 0.2 * random();
   }
 
+  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit
+  top(e: Edge): number {
+    return this.vmax * TIERS[e.type.tier].limit / MAX_SPEED;
+  }
+
   get color(): string {
     return this.dest.color;
   }
@@ -121,7 +127,7 @@ export class Car {
       gap = Math.min(gap, remaining - NODE_R - 3);
     } else if (!isDest && this.path) {
       // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
-      // ponytail: 150px horizon covers the fastest driver's braking + reaction headway; widen it if KINDS get faster
+      // ponytail: 150px horizon covers the fastest driver's braking + reaction headway on a highway (~145px); widen it if KINDS or TIERS get faster
       for (let j = 0, d = remaining; j + 1 < this.path.length && d < 150; j++) {
         const n = this.path[j + 1]!;
         d += graph.edgeBetween(this.path[j]!, n)?.length ?? Infinity;
@@ -130,12 +136,14 @@ export class Car {
       }
     }
 
-    let target = needs && remaining < 60 ? TURN_SPEED : this.vmax;
+    let target = this.top(lane.edge);
+    if (needs && remaining < 60) target = Math.min(target, TURN_SPEED);
     if (nextLane) {
-      // Corner speed: vmax * cos(turn angle) at the node, floored at TURN_SPEED, braked down to by the node box
+      // Corner speed: top speed (the slower tier of the two) * cos(turn angle) at the node, floored at TURN_SPEED,
+      // braked down to by the node box; so a car also slows down before a slower tier
       // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
       const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
-      const v = Math.max(TURN_SPEED, this.vmax * cos);
+      const v = Math.max(TURN_SPEED, Math.min(this.top(lane.edge), this.top(nextLane.edge)) * cos);
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
@@ -176,7 +184,7 @@ export class Car {
     if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
     const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
     const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - sep(this, ahead) : Infinity;
-    const slow = !!ahead && ahead.speed < this.vmax * 0.6 && gap < 4 * CAR_LEN;
+    const slow = !!ahead && ahead.speed < this.top(lane.edge) * 0.6 && gap < 4 * CAR_LEN;
     const brake = (v: number) => v * v / (2 * BRAKE);
     for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
       if (!to) continue;
