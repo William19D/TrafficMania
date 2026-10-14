@@ -2,7 +2,7 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game } from '../src/core/Game.ts';
-import { RoadGraph, LIGHT_PERIOD, lightGroup } from '../src/network/RoadGraph.ts';
+import { RoadGraph, LIGHT_PERIOD, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import type { Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
@@ -216,6 +216,22 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   }
   if (w.score !== 1 || v < lo! || v > hi!) fail(`curve speed: crossed a ${yx === 500 ? 'sharp' : 'gentle'} corner at ${v.toFixed(0)} (score ${w.score})`);
   if (jump > 3) fail(`turn arc: car jumped ${jump.toFixed(1)} (px or 20x rad) crossing M`);
+}
+// Short approach: a fast moto through inner node M onto a 45px edge stops before busy plain J instead of running it
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900);
+  const M = wg.addNode(455, 500), J = wg.addNode(500, 500);
+  for (const [a, b] of [[X, M], [M, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const e = wg.edgeBetween(X, M)!, c = new Car(wg.lanesFrom(e, X)[0]!, Y.city!, X.city!, 'moto');
+  c.vmax = c.speed = MAX_SPEED * 1.21;
+  c.s = e.length - 150;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  J.occupants.add(new Car(c.lane, Y.city!, X.city!));
+  for (let t = 0; t < 3 * 60; t++) w.update(DT);
+  if (c.lane.from === J || c.granted || c.lane.edge.length - c.s < stopDist(J) - 1) fail(`short approach: moto ran the busy junction (on ${c.lane.from.id}->${c.lane.to.id}, s=${c.s.toFixed(1)})`);
 }
 // Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {

@@ -116,6 +116,15 @@ export class Car {
       gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);
+    } else if (!isDest && this.path) {
+      // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
+      // ponytail: 150px horizon covers the fastest driver's braking + reaction headway; widen it if KINDS get faster
+      for (let j = 0, d = remaining; j + 1 < this.path.length && d < 150; j++) {
+        const n = this.path[j + 1]!;
+        d += graph.edgeBetween(this.path[j]!, n)?.length ?? Infinity;
+        if (n === this.dest.node) break;
+        if (graph.needsControl(n)) { gap = Math.min(gap, d - stopDist(n)); break; }
+      }
     }
 
     let target = needs && remaining < 60 ? TURN_SPEED : this.vmax;
@@ -136,9 +145,9 @@ export class Car {
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
-    // No exit, or another car just entered it (same light group / roundabout): wait in the box
+    // No exit, no grant (a control placed too close to stop), or another car just entered it (same light group / roundabout): wait in the box
     const first = nextLane?.cars[0];
-    if (!nextLane || (first && first.s < sep(this, first) + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
+    if (!nextLane || (needs && this.granted !== node) || (first && first.s < sep(this, first) + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
 
     // Move to the next lane
     let ns = this.s - lane.edge.length;
