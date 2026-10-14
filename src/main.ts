@@ -5,9 +5,26 @@ import { HUD } from './ui/HUD.ts';
 import { Tutorial } from './ui/Tutorial.ts';
 import { attachInput } from './ui/Input.ts';
 import { GameLoop } from './core/GameLoop.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
+import type { GameConfig } from './core/config.ts';
+
+// ponytail: new-game settings from ?seed=&biome=&difficulty=&size=&mode= until the main menu exists
+const q = new URLSearchParams(location.search);
+const pick = <T extends string>(key: string, allowed: readonly string[], dflt: T): T => {
+  const v = q.get(key);
+  return v !== null && allowed.includes(v) ? v as T : dflt;
+};
+const d = DEFAULT_CONFIG;
+const cfg: GameConfig = {
+  seed: q.get('seed')?.slice(0, 64) || d.seed,
+  biome: pick('biome', Object.keys(BIOMES), d.biome),
+  difficulty: pick('difficulty', Object.keys(DIFFICULTY), d.difficulty),
+  size: pick('size', Object.keys(SIZES), d.size),
+  mode: pick('mode', ['career', 'creative'], d.mode),
+};
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
-const game = new Game();
+const game = new Game(cfg);
 const renderer = new CanvasRenderer(canvas);
 const hudRoot = document.getElementById('hud') as HTMLElement;
 const hud = new HUD(hudRoot, game);

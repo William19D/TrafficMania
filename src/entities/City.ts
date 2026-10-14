@@ -1,4 +1,5 @@
 import type { Node } from '../network/RoadGraph.ts';
+import { random } from '../util/rng.ts';
 
 export const CITY_R = 22, MAX_PENDING = 8, OVERCROWD_SECONDS = 25;
 
@@ -10,7 +11,7 @@ export class City {
   retryTimer = 0;
 
   constructor(public name: string, public color: string, public x: number, public y: number, interval: number) {
-    this.demandTimer = interval * (0.6 + Math.random() * 0.8);
+    this.demandTimer = interval * (0.6 + random() * 0.8);
   }
 
   // 0..1 fraction of the "Overcrowded!" ring
@@ -23,10 +24,10 @@ export class City {
     if (cities.length > 1) {
       this.demandTimer -= dt;
       if (this.demandTimer <= 0) {
-        this.demandTimer = interval * (0.7 + Math.random() * 0.6);
+        this.demandTimer = interval * (0.7 + random() * 0.6);
         if (this.pending.length < MAX_PENDING + 4) {
           const others = cities.filter(c => c !== this);
-          this.pending.push(others[Math.floor(Math.random() * others.length)]!);
+          this.pending.push(others[Math.floor(random() * others.length)]!);
         }
       }
     }

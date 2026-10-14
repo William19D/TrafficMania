@@ -8,6 +8,9 @@ import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { City, OVERCROWD_SECONDS, CITY_R } from '../entities/City.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
+import { DEFAULT_CONFIG, DIFFICULTY } from './config.ts';
+import type { GameConfig } from './config.ts';
+import { hashSeed, random, setSeed } from '../util/rng.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit';
 export interface Inventory { asphalt: number; bridges: number; tunnels: number; lights: number; roundabouts: number }
@@ -71,8 +74,10 @@ export class Game {
   private cityTimer = 0;
   private msgTimeout: ReturnType<typeof setTimeout> | undefined;
 
-  constructor() {
-    this.terrain = generateTerrain();
+  constructor(public cfg: GameConfig = DEFAULT_CONFIG) {
+    // the trip/driver stream is seeded apart from the terrain's, so the two never mirror each other
+    setSeed(hashSeed('sim:' + cfg.seed));
+    this.terrain = generateTerrain(cfg);
     for (let i = 0; i < 3; i++) this.spawnCity();
   }
 
@@ -80,7 +85,9 @@ export class Game {
   get week(): number { return Math.floor(this.time / (DAY_SECONDS * 7)) + 1; }
   get running(): boolean { return !this.gameOver && !this.pendingReward && this.speed > 0; }
 
-  private get demandInterval(): number { return Math.max(2.5, 7 - this.week * 0.5) * (this.tutorialActive ? 1.5 : 1); }
+  private get demandInterval(): number {
+    return Math.max(2.5, 7 - this.week * 0.5) * (this.tutorialActive ? 1.5 : 1) / DIFFICULTY[this.cfg.difficulty].trips;
+  }
 
   private spawnCity(): void {
     const spot = findCitySpot(this.terrain, this.cities, this.graph.edges);
@@ -88,7 +95,7 @@ export class Game {
     const used = new Set(this.cities.map(c => c.color));
     const free = CITY_COLORS.filter(c => !used.has(c));
     const pool = free.length ? free : CITY_COLORS;
-    const color = pool[Math.floor(Math.random() * pool.length)];
+    const color = pool[Math.floor(random() * pool.length)];
     const names = new Set(this.cities.map(c => c.name));
     let name = randomName();
     for (let i = 0; i < 10 && names.has(name); i++) name = randomName();
@@ -104,14 +111,14 @@ export class Game {
     const week = this.week;
     if (week > this.lastWeek) {
       this.lastWeek = week;
-      const i = Math.floor(Math.random() * REWARDS.length);
-      let j = Math.floor(Math.random() * (REWARDS.length - 1));
+      const i = Math.floor(random() * REWARDS.length);
+      let j = Math.floor(random() * (REWARDS.length - 1));
       if (j >= i) j++;
       this.pendingReward = [REWARDS[i], REWARDS[j]];
     }
 
     if (!this.tutorialActive) this.cityTimer += dt;
-    if (this.cityTimer >= CITY_SPAWN_SECONDS) {
+    if (this.cityTimer >= CITY_SPAWN_SECONDS / DIFFICULTY[this.cfg.difficulty].growth) {
       this.cityTimer = 0;
       if (this.cities.length < MAX_CITIES) this.spawnCity();
     }
@@ -120,7 +127,7 @@ export class Game {
     for (const city of this.cities) {
       const collapsed = city.tick(dt, this.cities, interval);
       if (this.tutorialActive) city.overTimer = Math.min(city.overTimer, OVERCROWD_SECONDS * 0.9);
-      else if (collapsed) { this.gameOver = true; return; }
+      else if (collapsed && this.cfg.mode === 'career') { this.gameOver = true; return; }
       this.trySpawnCar(city, dt);
     }
 

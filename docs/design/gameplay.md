@@ -34,6 +34,7 @@ Victory: reaching level 10 opens a "City complete" modal with the stats. Continu
 | Tax multiplier | 1.25 | 1.0 | 0.8 |
 | Upkeep multiplier | 0.75 | 1.0 | 1.25 |
 | Trip-rate multiplier (shopping, freight) | 0.8 | 1.0 | 1.2 |
+| Growth multiplier (occupancy fill rate) | 1.25 | 1.0 | 0.8 |
 | `FAIL_HAPPY` | 15 | 25 | 35 |
 | `DEBT_DAYS` | 5 | 3 | 2 |
 | Rivers | 1 | 1-2 | 2 |
@@ -71,12 +72,12 @@ New file `src/core/config.ts` holds `GameConfig`, `DIFFICULTY`, `BIOMES`, `SIZES
 // src/core/config.ts
 export type Mode = 'career' | 'creative';
 export type Difficulty = 'easy' | 'normal' | 'hard';
-export type Biome = 'temperate' | 'desert' | 'alpine';
+export type Biome = 'temperate' | 'desert' | 'alpine' | 'archipelago';
 export type MapSize = 'small' | 'medium' | 'large';
 export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize }
 export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'career', difficulty: 'normal', biome: 'temperate', size: 'medium' };
 export const SIZES: Record<MapSize, { w: number; h: number }> = { small: { w: 2000, h: 1200 }, medium: { w: 2600, h: 1560 }, large: { w: 3200, h: 1920 } };
-export const DIFFICULTY: Record<Difficulty, { money: number; tax: number; upkeep: number; trips: number; failHappy: number; debtDays: number; rivers: [number, number]; mountains: [number, number] }>;
+export const DIFFICULTY: Record<Difficulty, { money: number; tax: number; upkeep: number; trips: number; growth: number; failHappy: number; debtDays: number; rivers: [number, number]; mountains: [number, number] }>;
 export type Tier = 'dirt' | 'street' | 'avenue' | 'boulevard' | 'highway';
 export const TIERS: Record<Tier, { label: string; limit: number; kmh: number; lanes: (1 | 2 | 3)[]; oneWay: boolean; cost: number; noise: number; access: boolean; level: number }>;
 export type Zone = 'home' | 'shop' | 'office' | 'industry';
@@ -280,8 +281,10 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - temperate: today's palette, trees 120-200, lakes 0-2.
   - desert: land `#EFE6D2`, dune patches `#E6D3A8`, 20-40 shrubs `#A7B36A`, rivers 0-1, lakes 1-2, mesa bands `#C9A882/#B08D68/#94735A`.
   - alpine: land `#E8EBE6`, snow patches `#F2F3F1`, 200-280 conifers `#5E8F5A`, mountains +3, bands `#8E9296/#6F7377/#F4F5F6`.
+  - archipelago (added in S1): land `#EDEBE1`, 6-9 large lakes (r 130-230) and 2-3 river channels, so the land reads as islands joined by bridges; mountains -2, trees 90-150.
   - Water stays `#A9C1EC/#BFD3F3` in every biome.
 - Assert: the same seed gives `JSON.stringify` equal terrain twice, and a different seed gives a different one.
+- As built: `generateTerrain(cfg)` sizes `WORLD` itself. The sim stream is seeded from `hashSeed('sim:' + seed)` in `new Game(cfg)`, so terrain and trips never mirror each other. Until S2/S7 replace the old loop, `trips` divides the demand interval, `growth` divides the city spawn interval, and creative mode disables the overcrowding game over. simcheck makes `Math.random` throw, so any unseeded model roll fails the check.
 - Must keep working: the whole current game, unchanged in play.
 
 **S2 Money economy replaces the tile inventory.**

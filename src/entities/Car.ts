@@ -2,6 +2,7 @@ import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph
 import type { RoadGraph, Lane, Node } from '../network/RoadGraph.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { City } from './City.ts';
+import { random } from '../util/rng.ts';
 
 export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
@@ -17,7 +18,7 @@ export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number 
   ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
 };
 export const randomKind = (): Kind => {
-  let r = Math.random();
+  let r = random();
   for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
   return 'car';
 };
@@ -57,9 +58,9 @@ export class Car {
   constructor(public lane: Lane, public dest: City, public origin: City, public kind: Kind = 'car') {
     const k = KINDS[kind];
     this.len = k.len;
-    this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * Math.random());
-    this.acc = ACCEL * k.a * (0.85 + 0.3 * Math.random());
-    this.react = 0.2 * Math.random();
+    this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * random());
+    this.acc = ACCEL * k.a * (0.85 + 0.3 * random());
+    this.react = 0.2 * random();
   }
 
   get color(): string {

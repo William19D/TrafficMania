@@ -1,12 +1,12 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
+import { BIOMES } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
 import { ROAD_W, NODE_R, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 
-const LAND = '#ECEAE4';
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
 const YELLOW = '#E6C84B';
@@ -30,6 +30,8 @@ const HOUSES: [number, number][] = [
 export class CanvasRenderer {
   cam: { x: number; y: number; zoom: number };
   private ctx: CanvasRenderingContext2D;
+  // Land colour of the current biome, for the roundabout islands
+  private land = BIOMES.temperate.land;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -108,8 +110,10 @@ export class CanvasRenderer {
     const z = this.cam.zoom;
 
     // Background: flat land (in screen coordinates)
+    const biome = BIOMES[game.terrain.biome];
+    this.land = biome.land;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = LAND;
+    ctx.fillStyle = biome.land;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (innerWidth / 2 - this.cam.x * z), dpr * (innerHeight / 2 - this.cam.y * z));
@@ -127,7 +131,7 @@ export class CanvasRenderer {
 
     // Ground patches: soft, no outline
     for (const p of terrain.patches) {
-      const col = p.kind === 'sand' ? '#E6DCC0' : '#D7E3B5';
+      const col = biome.patch[p.kind === 'sand' ? 0 : 1];
       this.polyline(p.poly, true);
       ctx.fillStyle = col;
       ctx.fill();
@@ -157,7 +161,7 @@ export class CanvasRenderer {
       ctx.fillStyle = 'rgba(0,0,0,.10)';
       ctx.fill();
       ctx.restore();
-      for (const [s, col] of [[1, '#8C8C88'], [0.78, '#6E6E6A'], [0.5, '#5B5B58']] as const) {
+      for (const [s, col] of [[1, biome.bands[0]], [0.78, biome.bands[1]], [0.5, biome.bands[2]]] as const) {
         this.mountainPoly(m, s);
         ctx.fillStyle = col;
         ctx.fill();
@@ -182,8 +186,8 @@ export class CanvasRenderer {
     terrain.trees.forEach((t, i) => {
       const r = 4 + (i % 3) * 0.5;
       this.circle(t.x + 1, t.y + 1, r, 'rgba(0,0,0,.08)');
-      this.circle(t.x, t.y, r, '#7FAE5A');
-      ctx.strokeStyle = '#5E8A42';
+      this.circle(t.x, t.y, r, biome.tree);
+      ctx.strokeStyle = biome.treeOut;
       ctx.lineWidth = 1;
       ctx.stroke();
     });
@@ -616,7 +620,7 @@ export class CanvasRenderer {
     for (const n of nodes) {
       if (n.control === 'roundabout') {
         // Central island in the land color
-        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, LAND);
+        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, this.land);
         ctx.strokeStyle = ROAD_OUT;
         ctx.lineWidth = 1.5;
         ctx.stroke();

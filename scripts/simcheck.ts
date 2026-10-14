@@ -6,24 +6,24 @@ import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/ne
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
+import { generateTerrain } from '../src/world/MapGenerator.ts';
+import { BIOMES, DEFAULT_CONFIG } from '../src/core/config.ts';
+import type { Biome, GameConfig } from '../src/core/config.ts';
+import { setSeed } from '../src/util/rng.ts';
 
 declare const process: { exit(code: number): never };
 
-// Deterministic Math.random (mulberry32)
-let seed = 12345;
-Math.random = () => {
-  seed = (seed + 0x6d2b79f5) | 0;
-  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-};
+// Every model roll must go through the seeded stream (src/util/rng.ts)
+Math.random = () => { throw new Error('Math.random used: route it through random() in src/util/rng.ts'); };
 
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
 // Blank world: no terrain, no random cities; tutorialActive = no game over and no city spawning
+const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
-  const w = new Game();
-  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [] };
+  const w = new Game(SIM);
+  setSeed(12345);
+  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], biome: 'temperate' };
   w.graph = new RoadGraph();
   w.cities = [];
   w.tutorialActive = true;
@@ -35,6 +35,20 @@ const town = (w: Game, name: string, x: number, y: number): Node => {
   w.cities.push(c);
   return w.graph.addNode(x, y, c);
 };
+// Seeded maps: a seed replays its terrain in every biome, another seed changes it, and the biomes differ
+{
+  const maps = new Set<string>();
+  for (const biome of Object.keys(BIOMES) as Biome[]) {
+    const map = (seed: string): string => JSON.stringify(generateTerrain({ ...SIM, biome, seed }));
+    const a = map('alpha');
+    if (a !== map('alpha')) fail(`terrain: seed 'alpha' gave two different ${biome} maps`);
+    if (a === map('beta')) fail(`terrain: seeds 'alpha' and 'beta' gave the same ${biome} map`);
+    maps.add(a);
+  }
+  if (maps.size !== Object.keys(BIOMES).length) fail('terrain: two biomes gave the same map');
+  const t = generateTerrain({ ...SIM, biome: 'archipelago', size: 'medium' });
+  if (t.lakes.length < 4) fail(`terrain: archipelago has only ${t.lakes.length} lakes`);
+}
 const game = blank();
 const g = game.graph;
 const city = (name: string, x: number, y: number): Node => town(game, name, x, y);
