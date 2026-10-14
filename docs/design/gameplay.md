@@ -114,7 +114,7 @@ Removed: `City`, `CITY_COLORS`, `MAX_PENDING`, `OVERCROWD_SECONDS`, `City.overcr
 ### Constants (`TUNING`, all in `config.ts`)
 
 ```ts
-DAY_SECONDS: 120,          // game seconds per in-game day at 1x; 5 s per hour; the clock starts at Day 1 06:00
+DAY_SECONDS: 240,          // game seconds per in-game day at 1x; 10 s per hour; the clock starts at Day 1 06:00 (S5: was 120)
 PEOPLE_PER_CAR: 5, EMPLOY_RATE: 0.5,
 COMMUTE_MEAN: 8, COMMUTE_SD: 0.75, COMMUTE_MIN: 6, COMMUTE_MAX: 10, WORK_HOURS: 9,
 SHOP_RATE: 0.35,           // shopping round trips per car-unit (5 residents) per day
@@ -137,7 +137,7 @@ HEAT_TAU: 10, ACCESS_R: 60,
 ```
 
 ### Day clock
-`hour = (time / DAY_SECONDS * 24 + 6) % 24` and `day = floor((time / DAY_SECONDS * 24 + 6) / 24) + 1`. The hourly tick (every 5 game seconds) runs happiness, growth, taxes, upkeep, demand accrual and the metrics sample. At 03:00 the daily commuter assignment runs. At 00:00 the game checks the fail conditions, rolls the ledger (`yesterday = today`) and resets `stats.today`.
+`hour = (time / DAY_SECONDS * 24 + 6) % 24` and `day = floor((time / DAY_SECONDS * 24 + 6) / 24) + 1`. The hourly tick (every 10 game seconds) runs happiness, growth, taxes, upkeep, demand accrual and the metrics sample. At 03:00 the daily commuter assignment runs. At 00:00 the game checks the fail conditions, rolls the ledger (`yesterday = today`) and resets `stats.today`.
 
 ### Trip generation
 - **Commuters.** Each home has `floor(residents * EMPLOY_RATE / PEOPLE_PER_CAR)` commuters. Assignment (at 03:00 daily, and one in-game hour after any building or network change) gives each unassigned commuter a reachable workplace (shop/office/industry) that has free slots (`jobs / PEOPLE_PER_CAR`). The pick is gravity-weighted: `w = freeSlots * exp(-dist / GRAVITY_D)` (Euclidean). A commuter whose workplace became unreachable loses it. Its `depart` hour is drawn once from N(8:00, 0.75h), clamped to 6..10. At `depart` a `commute` trip is queued. When it arrives, the trip moves to `work.parked` and the commuter is `away`. At `depart + WORK_HOURS` a `return` trip is queued from work.
@@ -327,6 +327,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - `Tutorial.ts`: the "watch the cars" step waits for the first commute.
 - Assert: over one simulated day on a fixed town, at least 70% of commute departures fall between 6:00 and 10:00, and every arrived commuter's return trip is queued by `depart + WORK_HOURS`.
 - Must keep working: the deadlock, lost, demolish and U-turn scenarios (trips requeue at the origin).
+- As built: `DAY_SECONDS` is 240 (4 real minutes at 1x, 10 s per hour), not 120: at 5 s per hour a typical 1,000px commute took 2 in-game hours of a 9-hour shift. `HOUR` (Game) is game seconds per hour; `clock`/`hour`/`day`/`today` are derived from `time` + `START_HOUR`, and `week` is gone. Homes get `residents` = `START_OCC` (60%) of `ZONES.home.residents` in `addBuilding` (`ZONES` now carries `residents`/`jobs`, which S6 was to add). `Trip` keeps S4's `back` flag instead of a `'return'` purpose (a return keeps its purpose and colour) and adds `who`, `queued`, `departed`, `leave` (game time the return leg goes once parked; set at departure for a commute, at arrival for shopping, 0 for freight), `ideal`, `idealLen`, `driven`, `stopped`, `retries`; `makeTrip` builds one. `TripReport` holds the `Building`s (not ids) plus `back`. A `Commuter` also stores `next` (game time of its next departure); a commuter still out at that time skips the day. `assign()` runs at the first update, at 03:00, and an hour after any `spend` or `addBuilding`; it also removes commuters at home when residents drop. `staffed` counts parked commuters at the hourly tick. Factory smoke shows only while staffed. Placeholder demand (`HOME_TRIP_S`, `FACTORY_TRIP_S`, `MAX_PENDING`, `demandTimer`) and the tutorial's demand slowdown are gone. HUD: the trips chip shows today's arrivals and smooth share (tooltip: every outcome, plus all-time arrivals); the clock reads `Day 4 · 08:20` in 10-minute steps. Tutorial: `start()` pauses the clock and the "Watch the commute" step resumes it, so the first morning is still ahead after the first road (Finish/Skip resume a paused clock); the step is done on the first commute arrival. simcheck: the main town runs at 150 residents per home (so every vehicle kind shows up); the new checks are that at least 70% of commute departures fall within 6:00-10:00 (actual spawn hour), that no commuter stays parked at work past `max(leave, arrival)` + 1 tick, and that at least one commuter got home.
 
 **S6 City growth, levels and building batches.**
 - Files: `config.ts` (`ZONES` capacities, `LEVELS`); `Game.ts` (residents growth. Until S7 the "happy" input is `trips` x 100, so homes grow when their trips succeed. `level`, `pendingLevel`, grant, `tray`, `placing`, `placeBuilding(p, angle)` with an auto driveway, unlock checks on tools and tiers);
