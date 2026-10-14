@@ -60,12 +60,13 @@ game.placeControl(R, 'roundabout');
 if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not placed');
 
 const DT = 1 / 60, STEPS = 300 * 60;
-let maxCars = 0;
+let maxCars = 0, lo = Infinity, hi = 0;
 for (let i = 0; i < STEPS; i++) {
   if (game.pendingReward) game.applyReward(0);
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
   const live = new Set(game.cars);
   maxCars = Math.max(maxCars, live.size);
+  for (const c of live) { lo = Math.min(lo, c.vmax / MAX_SPEED); hi = Math.max(hi, c.vmax / MAX_SPEED); }
   for (const e of g.edges) for (const l of e.lanes) {
     for (let k = 0; k < l.cars.length; k++) {
       const c = l.cars[k];
@@ -81,6 +82,8 @@ for (let i = 0; i < STEPS; i++) {
   }
 }
 if (game.score <= 0) fail('no car arrived');
+// Drivers differ: top speeds spread within ±10% (the overlap check above covers their safety)
+if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x MAX_SPEED`);
 
 // Deadlock: a parked car (not in game.cars, never moves) blocks the start of lane J->Y.
 // 'a' waits at J, reroutes via K after REROUTE_S and arrives; 'c' is stuck behind it, gives up and goes home to Z.
@@ -194,6 +197,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (const [a, b] of [[X, M], [M, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   for (const c of w.cities) c.demandTimer = Infinity;
   const c = new Car(wg.lanesFrom(wg.edgeBetween(X, M)!, X)[0]!, Y.city!, X.city!);
+  c.vmax = MAX_SPEED;
   c.lane.cars.push(c);
   w.cars.push(c);
   let v = -1;

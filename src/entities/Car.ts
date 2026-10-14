@@ -27,6 +27,10 @@ export class Car {
   // Mid-edge lane change: seconds left of the slide, and the old lane's offset minus the new one's
   lc = 0;
   lcOff = 0;
+  // Driver: top speed ±10%, acceleration ±15%, reaction time in seconds (extra headway at speed); braking stays shared so gaps hold
+  vmax = MAX_SPEED * (0.9 + 0.2 * Math.random());
+  acc = ACCEL * (0.85 + 0.3 * Math.random());
+  react = 0.2 * Math.random();
 
   constructor(public lane: Lane, public dest: City, public origin: City) {}
 
@@ -85,16 +89,16 @@ export class Car {
       gap = Math.min(gap, remaining - NODE_R - 3);
     }
 
-    let target = needs && remaining < 60 ? TURN_SPEED : MAX_SPEED;
+    let target = needs && remaining < 60 ? TURN_SPEED : this.vmax;
     if (nextLane) {
-      // Corner speed: MAX_SPEED * cos(turn angle) at the node, floored at TURN_SPEED, braked down to by the node box
+      // Corner speed: vmax * cos(turn angle) at the node, floored at TURN_SPEED, braked down to by the node box
       // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
       const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
-      const v = Math.max(TURN_SPEED, MAX_SPEED * cos);
+      const v = Math.max(TURN_SPEED, this.vmax * cos);
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
-    target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP)));
-    this.speed = target > this.speed ? Math.min(target, this.speed + ACCEL * dt) : Math.max(target, this.speed - BRAKE * dt);
+    target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
+    this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
 
     // Release the intersection we just crossed
@@ -130,7 +134,7 @@ export class Car {
     if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
     const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
     const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - CAR_LEN : Infinity;
-    const slow = !!ahead && ahead.speed < MAX_SPEED * 0.6 && gap < 4 * CAR_LEN;
+    const slow = !!ahead && ahead.speed < this.vmax * 0.6 && gap < 4 * CAR_LEN;
     const brake = (v: number) => v * v / (2 * BRAKE);
     for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
       if (!to) continue;
