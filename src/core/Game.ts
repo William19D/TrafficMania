@@ -130,7 +130,7 @@ export class Game {
       const car = this.cars[i];
       const r = car.update(dt, this.graph);
       if (r === 'ok') continue;
-      if (r === 'stuck') { this.sendHome(car); continue; }
+      if (r === 'stuck' || r === 'lost') { this.sendHome(car); continue; }
       if (r === 'arrived') this.score++;
       this.graph.detachCar(car);
       this.cars.splice(i, 1);

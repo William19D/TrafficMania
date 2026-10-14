@@ -100,5 +100,17 @@ if (game.score <= 0) fail('no car arrived');
   if (w.score !== 1) fail(`deadlock: rerouted car did not arrive (score ${w.score})`);
   if (w.cars.includes(c) || lane.cars.includes(c) || !Z.city!.pending.includes(Y.city!)) fail('deadlock: stuck car not sent home');
 }
+// Lost: a car whose destination has no road at all goes back to its origin's queue instead of vanishing
+{
+  const w = blank(), flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), J = w.graph.addNode(500, 500);
+  w.commitPath(w.planPath([X, J], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const c = new Car(w.graph.lanesFrom(w.graph.edgeBetween(X, J)!, X)[0]!, Y.city!, X.city!);
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  w.update(DT);
+  if (w.cars.includes(c) || c.lane.cars.includes(c) || !X.city!.pending.includes(Y.city!) || w.score) fail('lost car not sent home');
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);
