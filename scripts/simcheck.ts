@@ -2,7 +2,7 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game } from '../src/core/Game.ts';
-import { RoadGraph, CAR_LEN, GAP } from '../src/network/RoadGraph.ts';
+import { RoadGraph, CAR_LEN } from '../src/network/RoadGraph.ts';
 import type { Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 
@@ -54,7 +54,7 @@ game.placeControl(R, 'roundabout');
 if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not placed');
 
 const DT = 1 / 60, STEPS = 300 * 60;
-let maxCars = 0, entryOverlaps = 0;
+let maxCars = 0;
 for (let i = 0; i < STEPS; i++) {
   if (game.pendingReward) game.applyReward(0);
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
@@ -67,9 +67,6 @@ for (let i = 0; i < STEPS; i++) {
       const n = l.cars[k + 1];
       if (n && n.s < c.s) fail(`lane ${e.id} not sorted at t=${game.time.toFixed(2)}`);
       if (!n || n.s - c.s - CAR_LEN >= -1e-6) continue;
-      // ponytail: two cars entering one exit lane in the same tick (light grants a whole group) overlap at s~0 and
-      // separate within a second; counted (in ticks), not fatal. Make it fatal once the exit-space check lands.
-      if (c.s < CAR_LEN + GAP) { entryOverlaps++; continue; }
       fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - CAR_LEN).toFixed(2)} at t=${game.time.toFixed(2)}`);
     }
   }
@@ -78,5 +75,5 @@ for (let i = 0; i < STEPS; i++) {
   }
 }
 if (game.score <= 0) fail('no car arrived');
-console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} entryOverlapTicks=${entryOverlaps} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
+console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

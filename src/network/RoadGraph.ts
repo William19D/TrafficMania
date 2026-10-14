@@ -282,22 +282,34 @@ export class RoadGraph {
     n.occupants.add(c);
   }
 
+  // Don't block the box: the exit lane needs a car's worth of room past the junction, after the cars already granted into it
+  private fits(n: Node, c: Car): boolean {
+    const l = c.exit;
+    if (!l) return false;
+    let room = (l.cars[0]?.s ?? Infinity) - CAR_LEN - stopDist(n);
+    for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= CAR_LEN + GAP;
+    return room >= CAR_LEN + GAP;
+  }
+
   update(dt: number): void {
     for (const n of this.nodes) {
       n.queue = n.queue.filter(c => c.lane.to === n);
       if (n.control === 'light') {
         n.phaseTimer += dt;
         if (n.phaseTimer >= LIGHT_PERIOD) { n.phaseTimer = 0; n.phase ^= 1; }
-        n.queue = n.queue.filter(c => {
-          if (lightGroup(n, c.lane.edge) !== n.phase) return true;
-          this.grant(n, c);
-          return false;
-        });
-      } else {
-        // FIFO: arrival order; the roundabout admits up to 3 cars at once
-        const cap = n.control === 'roundabout' ? 3 : 1;
-        while (n.queue.length && n.occupants.size < cap) this.grant(n, n.queue.shift()!);
       }
+      // Arrival order; lights admit their whole green group, the roundabout up to 3 cars, a plain junction 1.
+      // A car that can't go holds back the cars queued behind it in its lane.
+      const cap = n.control === 'light' ? Infinity : n.control === 'roundabout' ? 3 : 1;
+      const held = new Set<Lane>();
+      n.queue = n.queue.filter(c => {
+        if (held.has(c.lane) || n.occupants.size >= cap || (n.control === 'light' && lightGroup(n, c.lane.edge) !== n.phase) || !this.fits(n, c)) {
+          held.add(c.lane);
+          return true;
+        }
+        this.grant(n, c);
+        return false;
+      });
     }
   }
 

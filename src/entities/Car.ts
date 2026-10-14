@@ -18,6 +18,8 @@ export class Car {
   prevOffset = 0;
   // Index hint into lane.cars; verified before use since other cars shift it
   idx = 0;
+  // Lane we will take past lane.to; RoadGraph only grants the turn when it has room
+  exit: Lane | null = null;
 
   constructor(public lane: Lane, public dest: City) {}
 
@@ -45,6 +47,7 @@ export class Car {
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
     }
+    this.exit = nextLane;
 
     // Free distance to the car ahead
     let gap = Infinity;
@@ -75,12 +78,13 @@ export class Car {
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
-    if (!nextLane) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
+    // No exit, or another car just entered it (same light group / roundabout): wait in the box
+    const first = nextLane?.cars[0];
+    if (!nextLane || (first && first.s < CAR_LEN + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
 
     // Move to the next lane
     let ns = this.s - lane.edge.length;
-    const first = nextLane.cars[0];
-    if (first) ns = Math.min(ns, Math.max(0, first.s - CAR_LEN - GAP));
+    if (first) ns = Math.min(ns, first.s - CAR_LEN - GAP);
     lane.cars.splice(idx, 1);
     nextLane.cars.unshift(this);
     this.idx = 0;
