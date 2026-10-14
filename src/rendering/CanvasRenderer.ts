@@ -64,6 +64,8 @@ export class CanvasRenderer {
   // Keeps the zoom in range and the world on screen (at most MARGIN of empty land past its border)
   private clamp(): void {
     const MARGIN = 120;
+    // a page loaded hidden has a 0x0 viewport: Infinity - Infinity would turn the camera into NaN for good
+    if (!innerWidth || !innerHeight) return;
     this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom));
     const hw = innerWidth / 2 / this.cam.zoom, hh = innerHeight / 2 / this.cam.zoom;
     const axis = (v: number, size: number, half: number): number =>
@@ -108,6 +110,8 @@ export class CanvasRenderer {
   render(game: Game, preview: PathPlan | null, anchor: Vec | null, handle: Vec | null, hover: Vec | null = null): void {
     const ctx = this.ctx;
     const dpr = devicePixelRatio || 1;
+    // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
+    if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
     const z = this.cam.zoom;
 
     // Background: flat land (in screen coordinates)
