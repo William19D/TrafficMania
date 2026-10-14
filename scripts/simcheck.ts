@@ -5,7 +5,7 @@ import { Game } from '../src/core/Game.ts';
 import { RoadGraph, CAR_LEN } from '../src/network/RoadGraph.ts';
 import type { Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
-import { Car } from '../src/entities/Car.ts';
+import { Car, MAX_SPEED, TURN_SPEED } from '../src/entities/Car.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -186,6 +186,23 @@ if (game.score <= 0) fail('no car arrived');
   if (w.score !== 1 || at < 0) fail(`lane change: car did not move right and arrive (s=${at.toFixed(0)}, score ${w.score})`);
   if (at > ls[0]!.edge.length - 100) fail(`lane change: changed too late, s=${at.toFixed(0)}`);
   if (jump > 3) fail(`lane change: car jumped ${jump.toFixed(1)}px`);
+}
+// Curve speed: through a plain inner node M a car takes a right-angle corner at TURN_SPEED and a gentle 10 degree joint near full speed
+for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SPEED * 0.95, MAX_SPEED]]) {
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), M = wg.addNode(500, 500), Y = town(w, 'Y', yx!, yy!);
+  for (const [a, b] of [[X, M], [M, Y]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const c = new Car(wg.lanesFrom(wg.edgeBetween(X, M)!, X)[0]!, Y.city!, X.city!);
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  let v = -1;
+  for (let t = 0; t < 20 * 60 && w.cars.includes(c); t++) {
+    const l = c.lane;
+    w.update(DT);
+    if (l !== c.lane && l.to === M) v = c.speed;
+  }
+  if (w.score !== 1 || v < lo! || v > hi!) fail(`curve speed: crossed a ${yx === 500 ? 'sharp' : 'gentle'} corner at ${v.toFixed(0)} (score ${w.score})`);
 }
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

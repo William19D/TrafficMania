@@ -86,6 +86,13 @@ export class Car {
     }
 
     let target = needs && remaining < 60 ? TURN_SPEED : MAX_SPEED;
+    if (nextLane) {
+      // Corner speed: MAX_SPEED * cos(turn angle) at the node, floored at TURN_SPEED, braked down to by the node box
+      // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
+      const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
+      const v = Math.max(TURN_SPEED, MAX_SPEED * cos);
+      target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
+    }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP)));
     this.speed = target > this.speed ? Math.min(target, this.speed + ACCEL * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
