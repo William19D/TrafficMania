@@ -217,6 +217,22 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   if (w.score !== 1 || v < lo! || v > hi!) fail(`curve speed: crossed a ${yx === 500 ? 'sharp' : 'gentle'} corner at ${v.toFixed(0)} (score ${w.score})`);
   if (jump > 3) fail(`turn arc: car jumped ${jump.toFixed(1)} (px or 20x rad) crossing M`);
 }
+// Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900), J = wg.addNode(500, 500);
+  for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const out = wg.lanesFrom(wg.edgeBetween(J, Y)!, J)[0]!, parked = new Car(out, Y.city!, X.city!);
+  parked.s = 54 + parked.len / 2;
+  out.cars.push(parked);
+  const e = wg.edgeBetween(X, J)!, bus = new Car(wg.lanesFrom(e, X)[0]!, Y.city!, X.city!, 'bus');
+  bus.s = e.length - 80;
+  bus.lane.cars.push(bus);
+  w.cars.push(bus);
+  for (let t = 0; t < 10 * 60; t++) w.update(DT);
+  if (bus.lane !== out || J.occupants.size) fail(`box release: bus at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
+}
 // Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
 for (const kind of ['ambulance', 'car'] as const) {
   const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };

@@ -131,8 +131,8 @@ export class Car {
     this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
 
-    // Release the intersection we just crossed
-    if (this.clearing && this.s > NODE_R + this.len) { this.clearing.occupants.delete(this); this.clearing = null; }
+    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that)
+    if (this.clearing && this.s - this.len / 2 > NODE_R) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
