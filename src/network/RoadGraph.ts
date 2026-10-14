@@ -313,13 +313,14 @@ export class RoadGraph {
     n.occupants.add(c);
   }
 
-  // Don't block the box: the exit lane needs a car's worth of room past the junction, after the cars already granted into it
+  // Don't block the box: the exit lane needs the car's length of room past the junction, after the cars already granted into it
   private fits(n: Node, c: Car): boolean {
     const l = c.exit;
     if (!l) return false;
-    let room = (l.cars[0]?.s ?? Infinity) - CAR_LEN - stopDist(n);
-    for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= CAR_LEN + GAP;
-    return room >= CAR_LEN + GAP;
+    const f = l.cars[0];
+    let room = (f ? f.s - f.len / 2 : Infinity) - CAR_LEN / 2 - stopDist(n);
+    for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= o.len + GAP;
+    return room >= c.len + GAP;
   }
 
   update(dt: number): void {
@@ -332,9 +333,13 @@ export class RoadGraph {
       // Arrival order; lights admit their whole green group, the roundabout up to 3 cars, a plain junction 1.
       // A car that can't go holds back the cars queued behind it in its lane.
       const cap = n.control === 'light' ? Infinity : n.control === 'roundabout' ? 3 : 1;
+      // Ambulance: its whole lane goes first (stable sort keeps the cars ahead of it in order) and runs red into an empty box
+      const amb = new Set(n.queue.filter(c => c.kind === 'ambulance').map(c => c.lane));
+      if (amb.size) n.queue.sort((p, q) => +amb.has(q.lane) - +amb.has(p.lane));
       const held = new Set<Lane>();
       n.queue = n.queue.filter(c => {
-        if (held.has(c.lane) || n.occupants.size >= cap || (n.control === 'light' && lightGroup(n, c.lane.edge) !== n.phase) || !this.fits(n, c)) {
+        const red = n.control === 'light' && lightGroup(n, c.lane.edge) !== n.phase && !(amb.has(c.lane) && !n.occupants.size);
+        if (held.has(c.lane) || n.occupants.size >= cap || red || !this.fits(n, c)) {
           held.add(c.lane);
           return true;
         }

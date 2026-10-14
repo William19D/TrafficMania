@@ -2,10 +2,10 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game } from '../src/core/Game.ts';
-import { RoadGraph, CAR_LEN } from '../src/network/RoadGraph.ts';
+import { RoadGraph, LIGHT_PERIOD, lightGroup } from '../src/network/RoadGraph.ts';
 import type { Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
-import { Car, MAX_SPEED, TURN_SPEED } from '../src/entities/Car.ts';
+import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -61,20 +61,21 @@ if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not pla
 
 const DT = 1 / 60, STEPS = 300 * 60;
 let maxCars = 0, lo = Infinity, hi = 0;
+const kinds = new Set<string>();
 for (let i = 0; i < STEPS; i++) {
   if (game.pendingReward) game.applyReward(0);
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
   const live = new Set(game.cars);
   maxCars = Math.max(maxCars, live.size);
-  for (const c of live) { lo = Math.min(lo, c.vmax / MAX_SPEED); hi = Math.max(hi, c.vmax / MAX_SPEED); }
+  for (const c of live) { const v = c.vmax / (MAX_SPEED * KINDS[c.kind].v); lo = Math.min(lo, v); hi = Math.max(hi, v); kinds.add(c.kind); }
   for (const e of g.edges) for (const l of e.lanes) {
     for (let k = 0; k < l.cars.length; k++) {
       const c = l.cars[k];
       if (!live.has(c) || c.lane !== l) fail(`stale car on lane ${e.id} at t=${game.time.toFixed(2)}`);
       const n = l.cars[k + 1];
       if (n && n.s < c.s) fail(`lane ${e.id} not sorted at t=${game.time.toFixed(2)}`);
-      if (!n || n.s - c.s - CAR_LEN >= -1e-6) continue;
-      fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - CAR_LEN).toFixed(2)} at t=${game.time.toFixed(2)}`);
+      if (!n || n.s - c.s - sep(c, n) >= -1e-6) continue;
+      fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - sep(c, n)).toFixed(2)} at t=${game.time.toFixed(2)}`);
     }
   }
   for (const n of g.nodes) for (const c of n.occupants) {
@@ -83,7 +84,8 @@ for (let i = 0; i < STEPS; i++) {
 }
 if (game.score <= 0) fail('no car arrived');
 // Drivers differ: top speeds spread within ±10% (the overlap check above covers their safety)
-if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x MAX_SPEED`);
+if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x the kind's top speed`);
+if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
 
 // Deadlock: a parked car (not in game.cars, never moves) blocks the start of lane J->Y.
 // 'a' waits at J, reroutes via K after REROUTE_S and arrives; 'c' is stuck behind it, gives up and goes home to Z.
@@ -207,6 +209,21 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
     if (l !== c.lane && l.to === M) v = c.speed;
   }
   if (w.score !== 1 || v < lo! || v > hi!) fail(`curve speed: crossed a ${yx === 500 ? 'sharp' : 'gentle'} corner at ${v.toFixed(0)} (score ${w.score})`);
+}
+// Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
+for (const kind of ['ambulance', 'car'] as const) {
+  const w = blank(), wg = w.graph, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500), Z = town(w, 'Z', 500, 900), J = wg.addNode(500, 500);
+  for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  w.placeControl(J, 'light');
+  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, Y.city!, X.city!, kind);
+  c.s = e.length - 80;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  J.phase = lightGroup(J, e) ^ 1;
+  for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
+  if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`ambulance: ${kind} ${kind === 'ambulance' ? 'held at' : 'ran'} the red light`);
 }
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

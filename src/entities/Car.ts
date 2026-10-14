@@ -7,6 +7,23 @@ export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
+// Vehicle kinds: length, top speed and acceleration factors, spawn weight. Ambulances jump node queues (RoadGraph.update).
+export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
+export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
+  car: { len: CAR_LEN, v: 1, a: 1, w: 0.72 },
+  truck: { len: 24, v: 0.75, a: 0.55, w: 0.1 },
+  bus: { len: 26, v: 0.7, a: 0.5, w: 0.06 },
+  moto: { len: 10, v: 1.1, a: 1.4, w: 0.09 },
+  ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
+};
+export const randomKind = (): Kind => {
+  let r = Math.random();
+  for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
+  return 'car';
+};
+// Centre-to-centre distance of two touching vehicles (s is the centre)
+export const sep = (a: Car, b: Car): number => (a.len + b.len) / 2;
+
 export class Car {
   s = 0;
   speed = 0;
@@ -27,12 +44,20 @@ export class Car {
   // Mid-edge lane change: seconds left of the slide, and the old lane's offset minus the new one's
   lc = 0;
   lcOff = 0;
-  // Driver: top speed ±10%, acceleration ±15%, reaction time in seconds (extra headway at speed); braking stays shared so gaps hold
-  vmax = MAX_SPEED * (0.9 + 0.2 * Math.random());
-  acc = ACCEL * (0.85 + 0.3 * Math.random());
-  react = 0.2 * Math.random();
+  // Driver on top of the kind: top speed ±10%, acceleration ±15%, reaction time in seconds (extra headway at speed);
+  // braking stays shared so gaps hold
+  len: number;
+  vmax: number;
+  acc: number;
+  react: number;
 
-  constructor(public lane: Lane, public dest: City, public origin: City) {}
+  constructor(public lane: Lane, public dest: City, public origin: City, public kind: Kind = 'car') {
+    const k = KINDS[kind];
+    this.len = k.len;
+    this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * Math.random());
+    this.acc = ACCEL * k.a * (0.85 + 0.3 * Math.random());
+    this.react = 0.2 * Math.random();
+  }
 
   get color(): string {
     return this.dest.color;
@@ -77,8 +102,8 @@ export class Car {
     else { idx = this.changeLane(graph, idx); lane = this.lane; }
     this.idx = idx;
     const ahead = lane.cars[idx + 1];
-    if (ahead) gap = ahead.s - this.s - CAR_LEN;
-    else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - CAR_LEN;
+    if (ahead) gap = ahead.s - this.s - sep(this, ahead);
+    else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - sep(this, nextLane.cars[0]!);
 
     // Intersection control: request a turn and wait before the node
     const needs = !isDest && graph.needsControl(node);
@@ -102,17 +127,17 @@ export class Car {
     this.s += this.speed * dt;
 
     // Release the intersection we just crossed
-    if (this.clearing && this.s > NODE_R + CAR_LEN) { this.clearing.occupants.delete(this); this.clearing = null; }
+    if (this.clearing && this.s > NODE_R + this.len) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
     // No exit, or another car just entered it (same light group / roundabout): wait in the box
     const first = nextLane?.cars[0];
-    if (!nextLane || (first && first.s < CAR_LEN + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
+    if (!nextLane || (first && first.s < sep(this, first) + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
 
     // Move to the next lane
     let ns = this.s - lane.edge.length;
-    if (first) ns = Math.min(ns, first.s - CAR_LEN - GAP);
+    if (first) ns = Math.min(ns, first.s - sep(this, first) - GAP);
     lane.cars.splice(idx, 1);
     nextLane.cars.unshift(this);
     this.idx = 0;
@@ -133,7 +158,7 @@ export class Car {
     const lane = this.lane, ls = graph.lanesFrom(lane.edge, lane.from);
     if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
     const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
-    const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - CAR_LEN : Infinity;
+    const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - sep(this, ahead) : Infinity;
     const slow = !!ahead && ahead.speed < this.vmax * 0.6 && gap < 4 * CAR_LEN;
     const brake = (v: number) => v * v / (2 * BRAKE);
     for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
@@ -141,9 +166,9 @@ export class Car {
       let at = to.cars.findIndex(o => o.s > this.s);
       if (at < 0) at = to.cars.length;
       const a = to.cars[at], b = to.cars[at - 1];
-      const room = a ? a.s - this.s - CAR_LEN : Infinity;
+      const room = a ? a.s - this.s - sep(this, a) : Infinity;
       if (a && room < GAP + Math.max(0, brake(this.speed) - brake(a.speed))) continue;
-      if (b && this.s - b.s - CAR_LEN < GAP + brake(b.speed)) continue;
+      if (b && this.s - b.s - sep(this, b) < GAP + brake(b.speed)) continue;
       if (!t && room < gap + 2 * CAR_LEN) continue;
       lane.cars.splice(idx, 1);
       to.cars.splice(at, 0, this);

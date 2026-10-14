@@ -1,7 +1,7 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
-import { ROAD_W, NODE_R, CAR_LEN, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import { CITY_R } from '../entities/City.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
@@ -702,16 +702,46 @@ export class CanvasRenderer {
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.angle);
-    ctx.beginPath();
-    ctx.roundRect(-CAR_LEN / 2, -CAR_W / 2, CAR_LEN, CAR_W, 2);
-    ctx.fillStyle = car.color;
-    ctx.fill();
-    ctx.strokeStyle = CAR_OUT;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    // Windshield near the front (+x)
-    ctx.fillStyle = 'rgba(255,255,255,.6)';
-    ctx.fillRect(CAR_LEN / 2 - 4.5, -CAR_W / 2 + 1, 2.5, CAR_W - 2);
+    const L = car.len, h = L / 2, k = car.kind, w = k === 'moto' ? 4 : CAR_W, y = -w / 2;
+    const body = (x: number, len: number, fill: string) => {
+      ctx.beginPath();
+      ctx.roundRect(x, y, len, w, k === 'moto' ? w / 2 : 2);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = CAR_OUT;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    };
+    const glass = 'rgba(255,255,255,.6)';
+    if (k === 'truck') {
+      // Cargo box in the destination colour, darker cab in front
+      body(-h, L - 7, car.color);
+      body(h - 6, 6, darken(car.color, 0.3));
+      ctx.fillStyle = glass;
+      ctx.fillRect(h - 2.5, y + 1, 1.5, w - 2);
+    } else if (k === 'moto') {
+      body(-h, L, car.color);
+      // Rider
+      ctx.fillStyle = CAR_OUT;
+      ctx.beginPath();
+      ctx.arc(-1, 0, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      body(-h, L, k === 'ambulance' ? '#FFFFFF' : car.color);
+      ctx.fillStyle = glass;
+      ctx.fillRect(h - 4.5, y + 1, 2.5, w - 2);
+      if (k === 'bus') for (let x = -h + 2; x < h - 7; x += 4) { ctx.fillRect(x, y + 0.5, 2.5, 1.5); ctx.fillRect(x, -y - 2, 2.5, 1.5); }
+      if (k === 'ambulance') {
+        // Destination stripe and a light bar flashing red / blue
+        ctx.fillStyle = car.color;
+        ctx.fillRect(-h + 1, -1.5, L - 7, 3);
+        const on = (game.time * 4 | 0) % 2;
+        ctx.fillStyle = on ? RED : ACCENT;
+        ctx.fillRect(1, y + 0.5, 2, w / 2 - 0.5);
+        ctx.fillStyle = on ? ACCENT : RED;
+        ctx.fillRect(1, 0, 2, w / 2 - 0.5);
+      }
+    }
     ctx.restore();
   }
 
