@@ -1,6 +1,7 @@
 import type { Game, Tool } from '../core/Game.ts';
 import { DAY_SECONDS, fmtMoney, income } from '../core/Game.ts';
-import { TUNING as T } from '../core/config.ts';
+import { TIERS, TUNING as T } from '../core/config.ts';
+import type { Tier } from '../core/config.ts';
 import type { RoadType } from '../network/RoadGraph.ts';
 import { icon } from './icons.ts';
 
@@ -14,6 +15,21 @@ const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
 
 const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
 const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Price ×${n}`;
+const TIER_KEYS = Object.keys(TIERS) as Tier[];
+// Avenue · 50 km/h · 1-2 lanes · $90/tile
+const tierTip = (t: Tier): string => {
+  const x = TIERS[t], l = x.lanes;
+  return `${x.label} · ${x.kmh} km/h · ${l[0]}${l.length > 1 ? `-${l[l.length - 1]}` : ''} lane${l[l.length - 1] > 1 ? 's' : ''} · ${fmtMoney(x.cost)}/tile`
+    + (x.access ? '' : ' · no building access');
+};
+// Dock swatch of a tier: a short band, taller up the hierarchy, with the tier's centre marking
+function tierPic(t: Tier): string {
+  const h = 8 + 2 * TIER_KEYS.indexOf(t), x = TIERS[t];
+  const line = x.line === 'yellow' ? '<path d="M8 12h24" stroke="#E6C84B"/>'
+    : x.line === 'median' ? '<path d="M8 12h24" stroke="#BFD8A0" stroke-width="2.5"/>'
+    : x.line === 'double' ? '<path d="M8 11h24M8 13h24" stroke="#A3A39F" stroke-width="1"/>' : '';
+  return `<rect x="6" y="${12 - h / 2}" width="28" height="${h}" rx="1.5" fill="${x.fill}" stroke="${x.out}"/>${line}`;
+}
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -29,15 +45,16 @@ const FRIENDLY: Record<string, string> = {
   'Already exists': 'That road already exists: start or end somewhere new',
   'Invalid terrain': 'Roads cannot start or end in water or on a mountain',
   'Place on an intersection': 'Click a junction where 3 or more roads meet',
+  'Highways give no building access': 'Highways give no building access: join towns with a street or avenue to a junction on the highway',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on)/;
+const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at)/;
 
 const CONTROLS: [string, string][] = [
   ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
-  ['Road type', 'Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
+  ['Road type', 'Tier (dirt to highway), Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
@@ -46,18 +63,6 @@ const CONTROLS: [string, string][] = [
 ];
 
 const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
-
-// Dock picture of a road type: white band, gray outline, lane separators, yellow centre line or a one-way arrow
-function roadPic(t: RoadType): string {
-  const n = t.lanes * (t.oneWay ? 1 : 2), lw = 5, h = n * lw, y0 = 12 - h / 2;
-  let s = `<rect x="2" y="${y0}" width="36" height="${h}" rx="1.5" fill="#fff" stroke="#9E9E9A"/>`;
-  for (let k = 1; k < n; k++) {
-    const y = y0 + k * lw, mid = !t.oneWay && k === t.lanes;
-    s += `<path d="M4 ${y}h32" stroke="${mid ? '#E6C84B' : '#C9C9C5'}"${mid ? '' : ' stroke-dasharray="3 2"'}/>`;
-  }
-  if (t.oneWay) s += '<path d="M14 12h12M22 8l4 4-4 4" stroke="#9E9E9A" fill="none"/>';
-  return s;
-}
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
@@ -120,8 +125,10 @@ export class HUD {
         ${TOOLS.slice(0, 3).map(toolBtn).join('')}
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
-          <svg class="pic rpic" viewBox="0 0 40 24" aria-hidden="true"></svg>
-          <span class="plabel"><b>Lanes</b><small class="pctx">per direction</small></span>
+          <div class="seg tiers" role="group" aria-label="Road tier">
+            ${TIER_KEYS.map(t => `<button class="lane tier" data-tier="${t}" aria-pressed="false" aria-label="${TIERS[t].label}" data-tip="${tierTip(t)}"><svg class="pic" viewBox="0 0 40 24" aria-hidden="true">${tierPic(t)}</svg></button>`).join('')}
+          </div>
+          <span class="plabel"><b class="tname">Street</b><small class="pctx">per direction</small></span>
           <div class="seg" role="group" aria-label="Lanes per direction">
             ${[1, 2, 3].map(n => `<button class="lane" data-lanes="${n}" aria-pressed="false" data-tip="${laneTip(n)}"><b>${n}</b></button>`).join('')}
           </div>
@@ -159,6 +166,10 @@ export class HUD {
     const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
     root.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       b.onclick = () => setType({ ...cur(), lanes: Number(b.dataset.lanes) as RoadType['lanes'] });
+    });
+    // Tier: lanes and one-way are clamped to the new tier (fitType)
+    root.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach(b => {
+      b.onclick = () => setType({ ...cur(), tier: b.dataset.tier as Tier });
     });
     this.q('[data-action="oneway"]').onclick = () => setType({ ...cur(), oneWay: !cur().oneWay });
     this.q('[data-action="flip"]').onclick = () => { if (game.selected) game.flip(game.selected); };
@@ -329,29 +340,38 @@ export class HUD {
   private updatePicker(): void {
     const g = this.game, run = g.selected;
     const t = run ? g.typeOf(run) : g.roadType;
-    const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.lanes}|${t.oneWay}`;
+    const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.tier}|${t.lanes}|${t.oneWay}`;
     if (key === this.last.pick) return;
     this.last.pick = key;
     const off = g.tool !== 'road' && g.tool !== 'edit';
     const box = this.q('.lanes');
     box.classList.toggle('off', off);
     box.dataset.tip = off ? 'Lanes apply to the Road and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
-    this.q('.pctx').textContent = run ? 'editing road' : 'per direction';
-    this.q('.rpic').innerHTML = roadPic(t);
+    const tier = TIERS[t.tier];
+    this.q('.tname').textContent = tier.label;
+    this.q('.pctx').textContent = run ? 'editing road' : `${tier.kmh} km/h`;
     // $ to pay (or get back) if the selected run switched to type n
     const delta = (n: RoadType) => {
       if (!run) return '';
       const d = Math.round(g.retypeDelta(run, n));
       return d > 0 ? ` · costs ${fmtMoney(d)}` : d < 0 ? ` · refunds ${fmtMoney(-d)}` : '';
     };
+    box.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach(b => {
+      const k = b.dataset.tier as Tier, locked = !g.tierUnlocked(k);
+      b.disabled = off;
+      b.setAttribute('aria-pressed', String(t.tier === k));
+      // ponytail: locked tiers stay clickable so Game toasts 'Unlocks at level N'; S6 adds the lock icon
+      b.setAttribute('aria-disabled', String(locked));
+      b.dataset.tip = tierTip(k) + (locked ? ` · unlocks at level ${TIERS[k].level}` : delta({ ...t, tier: k }));
+    });
     box.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       const n = Number(b.dataset.lanes) as RoadType['lanes'];
-      b.disabled = off;
+      b.disabled = off || !tier.lanes.includes(n);
       b.setAttribute('aria-pressed', String(t.lanes === n));
       b.dataset.tip = laneTip(n) + delta({ ...t, lanes: n });
     });
     const ow = this.q<HTMLButtonElement>('[data-action="oneway"]');
-    ow.disabled = off;
+    ow.disabled = off || !tier.oneWay;
     ow.setAttribute('aria-pressed', String(t.oneWay));
     ow.dataset.tip = ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
     this.q('[data-action="flip"]').hidden = !(run && t.oneWay);

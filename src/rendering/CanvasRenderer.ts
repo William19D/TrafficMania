@@ -1,6 +1,6 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
-import { BIOMES } from '../core/config.ts';
+import { BIOMES, TIERS } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
 import { ROAD_W, NODE_R, CAR_W, LANE_W, lightGroup, roadWidth } from '../network/RoadGraph.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
@@ -234,18 +234,20 @@ export class CanvasRenderer {
 
     // A single white ribbon: full outline pass, then fill pass
     const joints = nodes.filter((n) => !n.city && n.edges.some((e) => !e.tunnel && e.level === 0));
-    const pass = (color: string, extra: number): void => {
+    // Colours per tier; a joint takes the tier of its widest road
+    const pass = (key: 'out' | 'fill', extra: number): void => {
       // Bridges keep their blue deck as the outline
-      for (const e of ground) if (!(extra && e.bridge)) this.line(e, color, e.width + extra);
+      for (const e of ground) if (!(extra && e.bridge)) this.line(e, TIERS[e.type.tier][key], e.width + extra);
       for (const n of joints) {
+        const j = jointEdge(n, 0), color = TIERS[j?.type.tier ?? 'street'][key];
         if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, (jointW(n, 0) + extra) / 2, color);
+        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, color);
       }
     };
-    pass(ROAD_OUT, 3);
-    pass(ROAD_FILL, 0);
+    pass('out', 3);
+    pass('fill', 0);
 
-    // Lane markings: yellow centre line, lane separators, one-way chevrons
+    // Lane markings: centre line / median, lane separators, shoulders, one-way chevrons
     for (const e of ground) this.markings(e.a, e.b, e.type);
 
     this.controls(levelNodes(0));
@@ -333,7 +335,7 @@ export class CanvasRenderer {
     // Build preview: polyline of segments
     if (preview && preview.segs.length) {
       const segs = preview.segs;
-      const W = roadWidth(preview.type);
+      const W = roadWidth(preview.type), look = TIERS[preview.type.tier];
       const draw = (g: PathSeg, color: string, width: number): void => this.seg(g.a, g.b, color, width);
       // Colored dashed outline: wider so it peeks out behind the gray outline
       ctx.setLineDash([8, 6]);
@@ -343,19 +345,19 @@ export class CanvasRenderer {
       for (const g of segs) {
         if (g.tunnel) {
           ctx.setLineDash([6, 6]);
-          draw(g, ROAD_OUT, W + 3);
+          draw(g, look.out, W + 3);
           ctx.setLineDash([]);
         } else if (g.level >= 1) {
           draw(g, BRIDGE, W + 5);
         } else if (g.bridge) {
           this.bridge(g.a, g.b, terrain, W);
         } else {
-          draw(g, ROAD_OUT, W + 3);
+          draw(g, look.out, W + 3);
         }
       }
       for (const g of segs) {
         if (g.tunnel) ctx.setLineDash([6, 6]);
-        draw(g, ROAD_FILL, W);
+        draw(g, look.fill, W);
         ctx.setLineDash([]);
       }
       for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W);
@@ -482,7 +484,7 @@ export class CanvasRenderer {
       ctx.globalAlpha = 0.6;
       this.line(e, RED, e.width + 6);
       ctx.globalAlpha = 1;
-      this.line(e, ROAD_FILL, e.width);
+      this.line(e, TIERS[e.type.tier].fill, e.width);
       label(`Demolish · +${fmtMoney(game.refundOf(e))}`, hit.point.x, hit.point.y, RED);
     } else if (game.tool === 'light' || game.tool === 'roundabout') {
       const n = g.nearestNode(p, NODE_R + 6);
@@ -510,25 +512,34 @@ export class CanvasRenderer {
     }
   }
 
-  // Centre line (two-way), dashed separators between same-direction lanes, chevrons a->b (one-way)
+  // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between
+  // same-direction lanes, solid shoulder lines (highway), chevrons a->b (one-way)
   private markings(a: Vec, b: Vec, t: RoadType): void {
     const ctx = this.ctx;
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
-    if (!t.oneWay) this.seg(a, b, YELLOW, 1.2);
+    const tier = TIERS[t.tier], m = t.oneWay ? 0 : tier.median / 2;
+    const at = (o: number, f: (p: Vec, q: Vec) => void) => f({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o });
+    ctx.lineCap = 'butt';
+    if (!t.oneWay && tier.line === 'yellow') this.seg(a, b, YELLOW, 1.2);
+    else if (!t.oneWay && tier.line === 'median') this.seg(a, b, '#BFD8A0', tier.median - 2);
+    else if (!t.oneWay && tier.line === 'double') for (const o of [1.2, -1.2]) at(o, (p, q) => this.seg(p, q, '#A3A39F', 1));
+    if (tier.shoulder >= 3) {
+      const o = roadWidth(t) / 2 - tier.shoulder;
+      for (const s of [o, -o]) at(s, (p, q) => this.seg(p, q, '#C9C9C5', 1));
+    }
     const offs: number[] = [];
     for (let k = 1; k < t.lanes; k++) {
       if (t.oneWay) offs.push((k - t.lanes / 2) * LANE_W);
-      else offs.push(k * LANE_W, -k * LANE_W);
+      else offs.push(k * LANE_W + m, -k * LANE_W - m);
     }
     if (offs.length) {
       ctx.setLineDash([6, 6]);
-      ctx.lineCap = 'butt';
-      for (const o of offs) this.seg({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o }, '#C9C9C5', 1);
+      for (const o of offs) at(o, (p, q) => this.seg(p, q, '#C9C9C5', 1));
       ctx.setLineDash([]);
-      ctx.lineCap = 'round';
     }
+    ctx.lineCap = 'round';
     if (!t.oneWay) return;
     ctx.beginPath();
     for (let s = Math.min(20, len / 2); s < len; s += 40) {
@@ -678,18 +689,20 @@ export class CanvasRenderer {
       }
     }
 
-    const joint = (color: string, extra: number): void => {
+    // color null: the tier fill of the joint's widest road
+    const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, (jointW(n, level) + extra) / 2, color);
+        const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
+        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, c, ROAD_W + extra);
+        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
     for (const e of edges) this.line(e, BRIDGE, e.width + 5);
     joint(BRIDGE, 5);
-    for (const e of edges) this.line(e, ROAD_FILL, e.width);
+    for (const e of edges) this.line(e, TIERS[e.type.tier].fill, e.width);
     for (const e of edges) this.rails(e.a, e.b, e.width);
-    // White joints after the railings keep junctions open
-    joint(ROAD_FILL, 0);
+    // Joints after the railings keep junctions open
+    joint(null, 0);
     for (const e of edges) this.markings(e.a, e.b, e.type);
   }
 
@@ -846,9 +859,9 @@ export class CanvasRenderer {
   }
 }
 
-// Joint disc width: the widest non-tunnel road of that level meeting at the node
-function jointW(n: Node, level: number): number {
-  return n.edges.reduce((w, e) => (!e.tunnel && e.level === level ? Math.max(w, e.width) : w), 0) || ROAD_W;
+// Joint disc: the widest non-tunnel road of that level meeting at the node sets its width and tier colour
+function jointEdge(n: Node, level: number): Edge | null {
+  return n.edges.reduce<Edge | null>((w, e) => (!e.tunnel && e.level === level && e.width > (w?.width ?? 0) ? e : w), null);
 }
 
 // Mixes a #RRGGBB color toward white by the given factor
