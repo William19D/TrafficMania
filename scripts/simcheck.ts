@@ -112,5 +112,18 @@ if (game.score <= 0) fail('no car arrived');
   w.update(DT);
   if (w.cars.includes(c) || c.lane.cars.includes(c) || !X.city!.pending.includes(Y.city!) || w.score) fail('lost car not sent home');
 }
+// Demolish: a car on a demolished road goes back to its origin's queue instead of vanishing
+{
+  const w = blank(), flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 500);
+  w.commitPath(w.planPath([X, Y], 0, flat));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  const e = w.graph.edgeBetween(X, Y)!, c = new Car(w.graph.lanesFrom(e, X)[0]!, Y.city!, X.city!);
+  c.s = e.length / 2;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  w.demolishAt({ x: (X.x + Y.x) / 2, y: X.y });
+  if (w.graph.edges.length || w.cars.includes(c) || !X.city!.pending.includes(Y.city!)) fail('demolished car not sent home');
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

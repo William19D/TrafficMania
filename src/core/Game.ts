@@ -130,7 +130,7 @@ export class Game {
       const car = this.cars[i];
       const r = car.update(dt, this.graph);
       if (r === 'ok') continue;
-      if (r === 'stuck' || r === 'lost') { this.sendHome(car); continue; }
+      if (r === 'stuck' || r === 'lost') { this.dropCars([car]); continue; }
       if (r === 'arrived') this.score++;
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
@@ -424,18 +424,15 @@ export class Game {
     this.inventory.tunnels += e.refund.tunnels;
   }
 
+  // Takes the cars off the road and puts their trips back in their origin's queue,
+  // so demolishing or retyping a busy road is not a free way to clear traffic
   private dropCars(cars: Car[]): void {
     for (const car of cars) {
       this.graph.detachCar(car);
       const i = this.cars.indexOf(car);
       if (i >= 0) this.cars.splice(i, 1);
+      car.origin.pending.push(car.dest);
     }
-  }
-
-  // Takes the car off the road and puts its trip back in its origin's queue
-  sendHome(car: Car): void {
-    this.dropCars([car]);
-    car.origin.pending.push(car.dest);
   }
 
   // ---- Edit tool ----
