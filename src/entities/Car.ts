@@ -16,6 +16,8 @@ export class Car {
   prev: Node | null = null;
   // Lateral offset of the previous lane, to blend the lane change at the node
   prevOffset = 0;
+  // Index hint into lane.cars; verified before use since other cars shift it
+  idx = 0;
 
   constructor(public lane: Lane, public dest: City) {}
 
@@ -46,7 +48,10 @@ export class Car {
 
     // Free distance to the car ahead
     let gap = Infinity;
-    const idx = lane.cars.indexOf(this);
+    // ponytail: unshift/splice move us by at most 1 per event, so check the neighbours before the O(n) scan
+    let idx = this.idx;
+    if (lane.cars[idx] !== this) idx = lane.cars[idx + 1] === this ? idx + 1 : lane.cars[idx - 1] === this ? idx - 1 : lane.cars.indexOf(this);
+    this.idx = idx;
     const ahead = lane.cars[idx + 1];
     if (ahead) gap = ahead.s - this.s - CAR_LEN;
     else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - CAR_LEN;
@@ -78,6 +83,7 @@ export class Car {
     if (first) ns = Math.min(ns, Math.max(0, first.s - CAR_LEN - GAP));
     lane.cars.splice(idx, 1);
     nextLane.cars.unshift(this);
+    this.idx = 0;
     this.prev = lane.from;
     this.prevOffset = lane.offset;
     this.lane = nextLane;
