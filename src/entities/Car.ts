@@ -90,7 +90,9 @@ export class Car {
     if (!isDest && this.path) {
       const next = this.path[1];
       const e = next ? graph.edgeBetween(node, next) : null;
-      nextLane = e ? graph.pickLane(e, node, graph.turn(this.path, 1)) : null;
+      // Keep the exit once granted or inside the turn arc, so fits()'s lane is the one entered and the drawn arc doesn't jump
+      const x = this.exit, keep = x && x.edge === e && x.from === node && e.lanes.includes(x) && (this.granted === node || remaining < 2 * NODE_R);
+      nextLane = keep ? x : e ? graph.pickLane(e, node, graph.turn(this.path, 1)) : null;
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
     }

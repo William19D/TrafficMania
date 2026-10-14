@@ -2,8 +2,8 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game } from '../src/core/Game.ts';
-import { RoadGraph, LIGHT_PERIOD, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
-import type { Node, RoadType } from '../src/network/RoadGraph.ts';
+import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { City } from '../src/entities/City.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 
@@ -62,12 +62,19 @@ if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not pla
 const DT = 1 / 60, STEPS = 300 * 60;
 let maxCars = 0, lo = Infinity, hi = 0;
 const kinds = new Set<string>();
+// Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
+const exits = new Map<Car, [Lane, Lane | null]>();
 for (let i = 0; i < STEPS; i++) {
   if (game.pendingReward) game.applyReward(0);
   try { game.update(DT); } catch (e) { fail(`exception at t=${game.time.toFixed(2)}: ${(e as Error).stack}`); }
   const live = new Set(game.cars);
   maxCars = Math.max(maxCars, live.size);
   for (const c of live) { const v = c.vmax / (MAX_SPEED * KINDS[c.kind].v); lo = Math.min(lo, v); hi = Math.max(hi, v); kinds.add(c.kind); }
+  for (const c of live) {
+    const [l, x] = exits.get(c) ?? [null, null];
+    if (l === c.lane && x && c.exit && x !== c.exit && x.edge === c.exit.edge && l.edge.length - c.s < 2 * NODE_R) fail(`exit lane switched inside the turn arc at t=${game.time.toFixed(2)}`);
+    exits.set(c, [c.lane, c.exit]);
+  }
   for (const e of g.edges) for (const l of e.lanes) {
     for (let k = 0; k < l.cars.length; k++) {
       const c = l.cars[k];
