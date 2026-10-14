@@ -147,7 +147,7 @@ export class Game {
       if (!path || path.length < 2) continue;
       const e = this.graph.edgeBetween(city.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.pickLane(e, city.node);
+      const lane = this.graph.pickLane(e, city.node, this.graph.turn(path, 1));
       if (!lane || (lane.cars[0]?.s ?? Infinity) < CAR_LEN + GAP * 2) continue;
       city.pending.splice(i, 1);
       const car = new Car(lane, dest, city);

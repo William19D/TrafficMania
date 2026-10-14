@@ -55,7 +55,7 @@ export class Car {
     if (!isDest && this.path) {
       const next = this.path[1];
       const e = next ? graph.edgeBetween(node, next) : null;
-      nextLane = e ? graph.pickLane(e, node) : null;
+      nextLane = e ? graph.pickLane(e, node, graph.turn(this.path, 1)) : null;
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
     }

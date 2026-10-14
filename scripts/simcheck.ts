@@ -147,5 +147,23 @@ if (game.score <= 0) fail('no car arrived');
   if (w.score !== 1 || !back) fail('u-turn: car did not turn back and arrive');
   if (jump > 3) fail(`u-turn: car jumped ${jump.toFixed(1)}px at the turn`);
 }
+// Lane by turn: on a 2-lane road (through the inner node M) a car turning right at J keeps right, one turning left keeps left
+{
+  const w = blank(), wg = w.graph, two: RoadType = { lanes: 2, oneWay: false }, flat: RoadType = { lanes: 1, oneWay: false };
+  const X = town(w, 'X', 100, 500), Y = town(w, 'Y', 900, 900), Z = town(w, 'Z', 900, 100);
+  const M = wg.addNode(300, 500), J = wg.addNode(500, 500);
+  for (const [a, b, t] of [[X, M, two], [M, J, two], [J, Y, flat], [J, Z, flat]] as const) w.commitPath(w.planPath([a, b], 0, t));
+  for (const c of w.cities) c.demandTimer = Infinity;
+  for (const [dest, side] of [[Y, 1], [Z, 0]] as const) {
+    X.city!.pending.push(dest.city!);
+    const seen = new Set<number>();
+    for (let t = 0; t < 10 * 60; t++) {
+      w.update(DT);
+      const c = w.cars.find(o => o.dest === dest.city);
+      if (c && c.lane.to !== Y && c.lane.to !== Z) seen.add(wg.lanesFrom(c.lane.edge, c.lane.from).indexOf(c.lane));
+    }
+    if (seen.size !== 1 || !seen.has(side)) fail(`lane by turn: car to ${dest.city!.name} used lanes ${[...seen]}`);
+  }
+}
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s score=${game.score} cars=${game.cars.length} maxCars=${maxCars} pending=${game.cities.reduce((n, c) => n + c.pending.length, 0)}`);
 process.exit(0);

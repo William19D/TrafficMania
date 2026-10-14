@@ -180,10 +180,25 @@ export class RoadGraph {
     return e.lanes.filter(l => l.from === from);
   }
 
-  // Lane with the most room at its start
-  pickLane(e: Edge, from: Node): Lane | null {
+  // Turn at the first junction from path[j] on (inner nodes of a bent road don't count): 1 right, -1 left or U-turn, 0 straight / none
+  turn(path: Node[], j: number): number {
+    for (; j < path.length - 1; j++) {
+      const n = path[j]!, p = path[j - 1]!, q = path[j + 1]!;
+      if (!n.city && n.edges.length === 2 && n.control === 'none') continue;
+      const ax = n.x - p.x, ay = n.y - p.y, bx = q.x - n.x, by = q.y - n.y;
+      // y points down, so a positive cross product is a right turn on screen
+      const a = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+      return Math.abs(a) > Math.PI * 0.95 ? -1 : a > Math.PI / 6 ? 1 : a < -Math.PI / 6 ? -1 : 0;
+    }
+    return 0;
+  }
+
+  // Lane for the turn after this edge: rightmost / leftmost (lanesFrom is ascending by offset), straight: the most room at its start
+  pickLane(e: Edge, from: Node, turn = 0): Lane | null {
+    const ls = this.lanesFrom(e, from);
+    if (turn) return ls[turn > 0 ? ls.length - 1 : 0] ?? null;
     let best: Lane | null = null, room = -1;
-    for (const l of this.lanesFrom(e, from)) {
+    for (const l of ls) {
       const r = l.cars[0]?.s ?? Infinity;
       if (r > room) { best = l; room = r; }
     }
@@ -214,8 +229,7 @@ export class RoadGraph {
     const B = 2 * NODE_R;
     let off = lane.offset;
     if (next && remaining < B && lane.to.control !== 'roundabout') {
-      const e = this.edgeBetween(lane.to, next);
-      const nl = e && this.pickLane(e, lane.to);
+      const nl = c.exit;
       if (nl) off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
     }
     if (c.prev && c.s < B && lane.from.control !== 'roundabout') off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
