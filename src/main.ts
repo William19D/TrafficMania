@@ -5,6 +5,7 @@ import { HUD } from './ui/HUD.ts';
 import { Tutorial } from './ui/Tutorial.ts';
 import { Menu } from './ui/Menu.ts';
 import { attachInput } from './ui/Input.ts';
+import { sound } from './ui/Sound.ts';
 import { GameLoop } from './core/GameLoop.ts';
 import { AUTO, load, store } from './core/Save.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
@@ -58,7 +59,7 @@ function start(g: Game, tour = false): void {
   hud.onPause = () => menu.show('pause');
   input = attachInput(canvas, g, renderer, ctl.signal);
   renderer.reset();
-  Object.assign(window, { game, tutorial, renderer, hud }); // debugging from the console
+  Object.assign(window, { game, tutorial, renderer, hud, sound }); // debugging from the console
   if (tour) tutorial.start();
 }
 
@@ -84,5 +85,6 @@ new GameLoop(
     renderer.render(game, input.preview, input.anchor, input.handle, input.hover);
     hud.update();
     tutorial.update();
+    sound.update(game, renderer, menu.open || game.speed === 0 || !!game.gameOver || !!game.pendingLevel);
   },
 ).start();

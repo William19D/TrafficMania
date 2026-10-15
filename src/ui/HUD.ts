@@ -15,6 +15,7 @@ import type { Move, Preset } from '../network/Junction.ts';
 import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
+import { sound } from './Sound.ts';
 
 // Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
 const TOOLS: Record<Tool, { label: string; tip: string }> = {
@@ -110,6 +111,7 @@ export const CONTROLS: [string, string][] = [
   ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
+  ['Mute / unmute sound', '<kbd>Shift</kbd> + <kbd>M</kbd>; volumes in the menu (<kbd>Esc</kbd>), Sound'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
@@ -224,7 +226,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
     views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -452,6 +454,9 @@ export class HUD {
       this.setHelp(!this.helpOpen);
     } else if (e.key === 'c' || e.key === 'C') {
       g.overlay = OVERLAYS[(OVERLAYS.indexOf(g.overlay) + 1) % OVERLAYS.length];
+    } else if ((e.key === 'm' || e.key === 'M') && e.shiftKey) {
+      sound.toggleMute();
+      g.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
     } else if (e.key === 'm' || e.key === 'M') {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
@@ -1075,6 +1080,10 @@ export class HUD {
     if (g.message !== L.msg) {
       L.msg = g.message;
       if (g.message) this.toast(g.message);
+    }
+    if (g.said !== L.said) {
+      if (L.said !== undefined && ERROR_RE.test(g.message)) sound.play('error');
+      L.said = g.said;
     }
 
     const mk = `${g.gameOver}|${g.pendingLevel}`;

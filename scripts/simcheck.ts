@@ -835,6 +835,20 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (!home()) fail('move: no commuter got home to the moved door');
   refs('move, hours on');
 }
+// Sound cues: a road raises 'build', a building 'place', a demolish 'demolish'; a refused build raises none but still counts a message
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false }, cues = (): string => { const c = [...w.sfx].join(); w.sfx.clear(); return c; };
+  w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 900, y: 500 }], 0, street));
+  const built = cues();
+  w.tray.home = 9;
+  w.startPlacing('home'); w.placeBuilding({ x: 400, y: 460 });
+  const placed = cues();
+  w.demolishAt({ x: 800, y: 500 });
+  const gone = cues(), said = w.said;
+  w.money = 0;
+  w.commitPath(w.planPath([{ x: 300, y: 700 }, { x: 900, y: 700 }], 0, street));
+  if (built !== 'build' || placed !== 'place' || gone !== 'demolish' || cues() || w.said !== said + 1) fail(`sound cues: '${built}' '${placed}' '${gone}'`);
+}
 // Outside connections: an exit no town road reaches trades nothing and its stub cannot be demolished; once a street links it,
 // factory trucks export through it (and leave the map), import trucks arrive at the factory from it, and trade is paid
 {

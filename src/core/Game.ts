@@ -26,6 +26,8 @@ export const TOOL_LOCK: Partial<Record<Tool, Feature>> = { roundabout: 'roundabo
 export type GameOver = '' | 'bankrupt' | 'unhappy';
 // Map overlays: congestion heat map, or road noise and factory pollution with each home's happiness
 export type Overlay = 'none' | 'heat' | 'noise';
+// Sound cues the sim raises (a set: one per kind per frame); the audio drains it, headless nobody does and it stays this small
+export type Sfx = 'build' | 'demolish' | 'place';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
@@ -139,6 +141,7 @@ export class Game {
   inspect: Node | null = null;
   // Edges created by the last commitPath, in build order (reused edges not included)
   lastBuilt: Edge[] = [];
+  sfx = new Set<Sfx>();
   gameOver: GameOver = '';
   // City happiness 0..100 (EMA of the residents-weighted home mean) and its weighted parts
   happiness = 60;
@@ -147,6 +150,8 @@ export class Game {
   debtDays = 0;
   sadDays = 0;
   message = '';
+  // Bumped on every say(), so a repeated message still counts (the error buzz)
+  said = 0;
   // Set while the tutorial runs: no fail checks
   tutorialActive = false;
   // No departures, shopping, freight or return trips (simcheck drives its own trips)
@@ -744,6 +749,7 @@ export class Game {
   // Pays (negative: gets back) construction money and refreshes the daily upkeep; toasts a newly linked highway exit
   private spend(cost: number): void {
     this.money -= cost;
+    if (cost) this.sfx.add(cost > 0 ? 'build' : 'demolish');
     this.ledger.today.build += cost;
     this.upkeepDay = this.upkeepPerDay();
     this.changed();
@@ -1076,6 +1082,7 @@ export class Game {
     if (this.picked === b) this.picked = null;
     if (this.armed === b) this.armed = null;
     if (b.kind !== 'gate') this.tray[b.kind]++;
+    this.sfx.add('demolish');
     this.spend(0);
   }
 
@@ -1175,6 +1182,7 @@ export class Game {
       this.connect();
       for (const c of this.cars) if (c.trip.to === mv) c.path = null;
       this.spend(this.moveCost);
+      this.sfx.add('place');
       this.setTool('edit');
       this.picked = mv;
       this.say(`${ZONES[mv.kind].label} moved${this.moveCost ? ` · ${fmtMoney(this.moveCost)}` : ''}`);
@@ -1184,6 +1192,7 @@ export class Game {
     if (z === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
     this.addBuilding(b);
     this.connect();
+    this.sfx.add('place');
     if (--this.tray[z] < 1) {
       const next = this.nextKind(z);
       if (next) { this.placing = next; this.say(`No ${ZONES[z].label} left in the tray: switched to ${ZONES[next].label}`); }
@@ -1546,6 +1555,7 @@ export class Game {
 
   say(text: string): void {
     this.message = text;
+    this.said++;
     clearTimeout(this.msgTimeout);
     // ponytail: real time (2.5 s), so the message clears even while the game is paused
     this.msgTimeout = setTimeout(() => { this.message = ''; }, 2500);

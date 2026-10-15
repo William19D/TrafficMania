@@ -235,7 +235,7 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 - `Edit [6]`, `Demolish [7]`
 - `Heat map [C]` (a toggle, `aria-pressed`)
 
-Other keys: `V` straight / curved roads, `Shift` one straight road, `Ctrl`/`Alt` 15° steps, `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
+Other keys: `V` straight / curved roads, `Shift` one straight road, `Ctrl`/`Alt` 15° steps, `R` rotates a building ghost, `M` metrics, `Shift+M` mutes or unmutes the sound, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
 
 **E toasts** and **F tutorial** as today. New error texts go into `FRIENDLY`:
 - `Not enough money` -> "Not enough money: wait for taxes or demolish a road built today for a full refund"
@@ -270,8 +270,14 @@ The tool stays in `place` until the count hits 0 or Esc.
 - Level up: `Level 4!`, unlock list, batch rows, grant, Enter.
 - Game over: `Bankrupt` / `The residents left`, with stats day, population, level, trips, smooth%, and buttons Play again / Main menu.
 - Victory.
-- Pause menu: Resume, Save, Load, Main menu, seed shown with a copy button.
-- Main menu (S11).
+- Pause menu: Resume, Save, Load, Sound, Main menu, seed shown with a copy button.
+- Main menu (S11), with the same Sound entry.
+
+**Sound** (`src/ui/Sound.ts`, P7: the game had no audio at all). Everything is synthesized with Web Audio, no files. The AudioContext is created on the first pointer or key press (autoplay policy) and suspended while muted or while the tab is hidden, so a muted game spends no CPU on audio.
+- Effects: a click on any button and a faint tick when the mouse comes onto one. The sim raises cues in `Game.sfx` (a set, so one per kind per frame): `build` on any spend (roads, controls, retypes, interchanges), `demolish` on a refund or a demolished building, `place` on a placed or moved building. The HUD plays an error buzz for every `say()` whose text matches `ERROR_RE` (`Game.said` counts repeats of the same text). It also plays an income blip at most every 1.5 s while business or trade income comes in, a fanfare on a level-up, and an alarm whenever the fail countdown (`Game.alarm`) starts or ticks down, and on game over.
+- City hum: looped brown noise through a lowpass. Its volume and brightness follow the cars on screen (up to 50) and the zoom, and it ducks to a quarter while paused, in a menu or behind a modal. A car on screen that has stood still for 8 game seconds may honk once, at most one horn every 5 s, panned to its side of the screen.
+- Music: a calm generative loop at 100 bpm. Triangle pads on Fmaj7, Em7, Dm7 and Cmaj9 change every two bars, with a sine bass on each bar and a sparse C-pentatonic melody into a feedback echo. A 250 ms timer schedules it 1 s ahead.
+- The Sound menu has Sound on/off, Master volume, Effects and city volume, Music on/off and Music volume. The mix is saved in `localStorage` (`tm_audio`), and the effects slider plays a sample when you let go of it. `M` was already Metrics, so mute is `Shift+M`.
 
 **Canvas:**
 - Buildings are flat rounded rects with a soft shadow, in zone colours: home `#F4A261`, shop `#4EA8DE`, office `#8E7CC3`, industry `#9E9E9A` with stripes and a chimney dot. A white door notch faces the road, and parked cars or pending trips show as dots by the door. An unconnected building has a dashed danger outline.
