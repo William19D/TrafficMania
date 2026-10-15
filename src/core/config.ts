@@ -96,10 +96,11 @@ export const LEVELS: { pop: number; batch: Record<Zone, number> }[] = [
   { pop: 2100, batch: batch(6, 1, 2, 1) },
 ];
 export const ENDLESS_POP = 300, ENDLESS_BATCH = batch(6, 1, 2, 1);
-export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high';
+export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 'junction';
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
   roundabout: { level: 2, label: 'Roundabouts' },
   oneway: { level: 2, label: 'One-way roads' },
+  junction: { level: 4, label: 'Light phases, protected lefts and turn bans' },
   viaduct: { level: 3, label: 'Viaducts L1-L5' },
   tunnel: { level: 5, label: 'Tunnels' },
   high: { level: 5, label: 'Viaducts L6-L10' },
@@ -108,7 +109,7 @@ export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
 // Gameplay tuning ($); later steps add theirs
 export const TUNING = {
   BRIDGE_X: 4, VIADUCT_X: 2.5, VIADUCT_LEVEL_X: 0.1, TUNNEL_X: 5, // price multipliers: water share, viaduct (+ per level), mountain share
-  LIGHT_COST: 600, LIGHT_UPKEEP: 4, ROUNDABOUT_COST: 1200, ROUNDABOUT_UPKEEP: 2,
+  LIGHT_COST: 600, LIGHT_UPKEEP: 4, ROUNDABOUT_COST: 1200, ROUNDABOUT_UPKEEP: 2, SIGN_COST: 150, SIGN_UPKEEP: 0.5, // yield / stop signs
   UPKEEP_RATE: 0.02,         // of a road's build price, per day
   REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
   ACCESS_R: 60,              // px from a door to the road its free driveway joins

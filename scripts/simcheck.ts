@@ -3,6 +3,7 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import { LEFT, applyPreset, approachOf, moveOf, planOf, toggleBan } from '../src/network/Junction.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
@@ -441,6 +442,77 @@ for (const kind of ['ambulance', 'car'] as const) {
   if (g.alarm?.kind !== 'unhappy' || g.alarm.days !== TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS - 2) fail(`fail: unhappy alarm ${JSON.stringify(g.alarm)} on day 1`);
   while (!g.gameOver && g.day < 10) midnight(g);
   if (g.gameOver !== 'unhappy' || g.day !== TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS - 1) fail(`fail: unhappy city gave '${g.gameOver}' on day ${g.day}`);
+}
+// Junctions. Turn ban: with the left X->J->P banned the Z trip never takes it and arrives round the block via K and Q.
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Z = town(w, 500, 60, 'home', true);
+  const J = wg.addNode(500, 500), K = wg.addNode(900, 500), Q = wg.addNode(900, 200), P = wg.addNode(500, 200);
+  for (const [a, b] of [[X, J], [J, K], [K, Q], [Q, P], [P, J], [P, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  w.demandOff = true;
+  const xj = wg.edgeBetween(X, J)!;
+  w.editPlan(J, p => toggleBan(p, approachOf(p, J, xj), LEFT));
+  const route = findPath(wg, X, Z);
+  if (route?.[1] !== J || route[2] !== K) fail(`turn ban: route ${route?.map(n => n.id)} still turns left at J`);
+  w.queueTrip(X.building!, Z.building!, 'commute');
+  for (let t = 0; t < 40 * 60 && !w.score; t++) {
+    w.update(DT);
+    for (const c of w.cars) if (c.prev === X && c.lane.from === J && c.lane.to === P) fail('turn ban: a car took the banned left');
+  }
+  if (w.score !== 1) fail(`turn ban: the trip did not arrive via the detour (score ${w.score})`);
+}
+// Protected lefts: under the preset a left-turner at the light is only granted in a phase that protects its left, and arrives
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), N = town(w, 500, 60, 'home', true), S = town(w, 500, 940);
+  const J = wg.addNode(500, 500);
+  for (const n of [X, Y, N, S]) w.commitPath(w.planPath([n, J], 0, flat));
+  w.demandOff = true;
+  w.placeControl(J, 'light');
+  w.editPlan(J, p => applyPreset(p, 'lefts'));
+  for (const [a, b] of [[X, N], [Y, S], [N, Y], [X, Y], [Y, X], [S, N], [X, N], [S, X]]) w.queueTrip(a!.building!, b!.building!, 'commute');
+  let lefts = 0;
+  const seen = new Set<Car>();
+  for (let t = 0; t < 60 * 60; t++) {
+    w.update(DT);
+    for (const c of w.cars) {
+      if (c.granted !== J || seen.has(c) || c.kind === 'ambulance') continue; // ambulances run reds
+      seen.add(c);
+      const p = planOf(J), m = moveOf(J, c.lane.edge, c.exit!.edge), sig = p.phases[J.phase].sig[approachOf(p, J, c.lane.edge)][m];
+      if (m === LEFT) lefts++;
+      if (sig === 0 || (m === LEFT && sig !== 2)) fail(`protected lefts: move ${m} granted on signal ${sig} in phase ${J.phase}`);
+    }
+  }
+  if (lefts < 3 || w.score !== 8) fail(`protected lefts: ${lefts} lefts granted, ${w.score} of 8 trips arrived`);
+}
+// Yield: at a junction of an avenue (main road) and a street, a street car at the line waits while an avenue car is queued;
+// at a stop junction a car is only granted from a standstill
+for (const kind of ['yield', 'stop'] as const) {
+  const w = blank(), wg = w.graph, ave: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 940), J = wg.addNode(500, 500);
+  w.commitPath(w.planPath([X, J], 0, ave));
+  w.commitPath(w.planPath([J, Y], 0, ave));
+  w.commitPath(w.planPath([Z, J], 0, street));
+  w.demandOff = true;
+  w.placeControl(J, kind);
+  const zj = wg.edgeBetween(Z, J)!, xj = wg.edgeBetween(X, J)!;
+  const side = new Car(wg.lanesFrom(zj, Z)[0]!, trip(Z, Y)), main = new Car(wg.lanesFrom(xj, X)[0]!, trip(X, Y));
+  side.s = zj.length - stopDist(J) - 6;
+  main.s = xj.length - 65;
+  main.speed = side.speed = kind === 'stop' ? TURN_SPEED : 0;
+  for (const c of [main, side]) { c.lane.cars.push(c); w.cars.push(c); } // cars update last first: the side car queues first
+  let first: Car | null = null;
+  for (let t = 0; t < 20 * 60; t++) {
+    const v = [side.speed, main.speed], was = [side.granted, main.granted];
+    w.update(DT);
+    [side, main].forEach((c, i) => {
+      if (c.granted !== J || was[i] === J) return;
+      first ??= c;
+      if (kind === 'stop' && v[i] >= 1) fail(`stop: car granted at ${v[i].toFixed(0)} px/s`);
+    });
+  }
+  if (kind === 'yield' && first !== main) fail('yield: the side road went before the main road');
+  if (w.score !== 2) fail(`${kind}: ${w.score} of 2 cars arrived`);
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

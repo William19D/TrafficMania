@@ -2,7 +2,9 @@ import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
-import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
+import type { Control, Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
+import type { JunctionPlan } from '../network/Junction.ts';
+import { clonePlan, planFits, planOf } from '../network/Junction.ts';
 import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
@@ -48,8 +50,8 @@ export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; lev
 export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
-const CONTROL_COST = { light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
-const CONTROL_UPKEEP = { light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
+const CONTROL_COST: Record<Control, number> = { none: 0, yield: T.SIGN_COST, stop: T.SIGN_COST, light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
+const CONTROL_UPKEEP: Record<Control, number> = { none: 0, yield: T.SIGN_UPKEEP, stop: T.SIGN_UPKEEP, light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
 const MAX_LEVEL = 10;
 const MOUNTAIN_LEVEL = 6; // viaducts at this level or higher clear mountains
 
@@ -82,8 +84,9 @@ export class Game {
   placeAngle = Math.PI / 2;
   // Type for new roads
   roadType: RoadType = { ...DEFAULT_TYPE };
-  // Run selected with the Edit tool (edges in run order)
+  // Run selected with the Edit tool (edges in run order), or the junction it inspects (never both)
   selected: Edge[] | null = null;
+  inspect: Node | null = null;
   // Edges created by the last commitPath, in build order (reused edges not included)
   lastBuilt: Edge[] = [];
   gameOver: GameOver = '';
@@ -612,6 +615,13 @@ export class Game {
     this.ledger.today.build += cost;
     this.upkeepDay = this.upkeepPerDay();
     this.changed();
+    this.syncPlans();
+  }
+
+  // An edited junction plan whose roads changed (an arm added, removed or turned past 15 degrees) goes back to the default
+  private syncPlans(): void {
+    for (const n of this.graph.nodes) if (n.plan && !planFits(n, n.plan)) { n.plan = null; this.say('Junction plan reset: its roads changed'); }
+    if (this.inspect && !this.graph.nodes.includes(this.inspect)) this.inspect = null;
   }
 
   // Build price of a road from a to b: per tile and lane at the tier's rate, x the viaduct factor, or x the bridge / tunnel factor on the
@@ -660,6 +670,7 @@ export class Game {
         break;
       }
     }
+    this.syncPlans();
   }
 
   // Roads a driveway may join: ground, not a bridge or tunnel, not a driveway, an access tier
@@ -675,18 +686,18 @@ export class Game {
     return this.edgePrice(e) * this.refundX(e.day);
   }
 
-  controlPrice(kind: 'light' | 'roundabout'): number {
+  controlPrice(kind: Control): number {
     return CONTROL_COST[kind];
   }
 
   controlRefund(n: Node): number {
-    return n.control === 'none' ? 0 : CONTROL_COST[n.control] * this.refundX(n.controlDay);
+    return CONTROL_COST[n.control] * this.refundX(n.controlDay);
   }
 
   upkeepPerDay(): number {
     let sum = 0;
     for (const e of this.graph.edges) sum += this.edgePrice(e) * T.UPKEEP_RATE;
-    for (const n of this.graph.nodes) if (n.control !== 'none') sum += CONTROL_UPKEEP[n.control];
+    for (const n of this.graph.nodes) sum += CONTROL_UPKEEP[n.control];
     return sum * DIFFICULTY[this.cfg.difficulty].upkeep;
   }
 
@@ -798,12 +809,7 @@ export class Game {
 
   demolishAt(p: Vec): void {
     const n = this.graph.nearestNode(p, NODE_R + 4);
-    if (n && n.control !== 'none') {
-      const back = this.controlRefund(n);
-      n.control = 'none';
-      this.spend(-back);
-      return;
-    }
+    if (n && n.control !== 'none') { this.setControl(n, 'none'); return; }
     // prefer a road on the current level where several are stacked
     const hit = this.graph.nearestEdge(p, ROAD_W, this.level) ?? this.graph.nearestEdge(p, ROAD_W);
     if (!hit) return;
@@ -833,8 +839,16 @@ export class Game {
     return hit ? this.graph.runOf(hit.edge).edges : null;
   }
 
+  // A junction (3+ roads, not a door) near p
+  junctionAt(p: Vec): Node | null {
+    const n = this.graph.nearestNode(p, NODE_R + 6);
+    return n && !n.building && n.edges.length >= 3 ? n : null;
+  }
+
+  // Edit click: a junction opens its panel, else the road run is selected
   select(p: Vec | null): void {
-    this.selected = p ? this.runAt(p) : null;
+    this.inspect = p ? this.junctionAt(p) : null;
+    this.selected = p && !this.inspect ? this.runAt(p) : null;
   }
 
   // Switching away from Edit drops the selection at once, so a click right after the switch cannot retype it
@@ -843,7 +857,7 @@ export class Game {
     if (locked) { this.say(locked); return; }
     if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
-    if (t !== 'edit') this.selected = null;
+    if (t !== 'edit') { this.selected = null; this.inspect = null; }
     if (t !== 'place') this.placing = null;
   }
 
@@ -1018,16 +1032,37 @@ export class Game {
     return true;
   }
 
-  placeControl(p: Vec, kind: 'light' | 'roundabout'): void {
+  placeControl(p: Vec, kind: Control): void {
     const n = this.graph.nearestNode(p, NODE_R + 6);
     if (!n || n.building || n.edges.length < 3) { this.say('Place on an intersection'); return; }
-    if (n.control === kind) return;
-    // switching sells the old control under the refund rule
+    this.setControl(n, kind);
+  }
+
+  // Switching sells the old control under the refund rule; 'none' just sells it
+  setControl(n: Node, kind: Control): boolean {
+    if (n.control === kind) return true;
+    const locked = kind === 'roundabout' ? this.lockOf('roundabout') : '';
+    if (locked) { this.say(locked); return false; }
     const cost = CONTROL_COST[kind] - this.controlRefund(n);
-    if (cost > this.money) { this.say('Not enough money'); return; }
+    if (cost > this.money) { this.say('Not enough money'); return false; }
     n.control = kind;
     n.controlDay = this.today;
+    n.phase = 0;
+    n.phaseTimer = 0;
     this.spend(cost);
+    return true;
+  }
+
+  // Edits a copy of the junction's plan (phases, protected lefts, turn bans); free. A ban change reroutes every car not already
+  // granted through the junction.
+  editPlan(n: Node, edit: (p: JunctionPlan) => void): void {
+    const locked = this.lockOf('junction');
+    if (locked) { this.say(locked); return; }
+    const old = planOf(n), p = clonePlan(old);
+    edit(p);
+    n.plan = p;
+    if (n.phase >= p.phases.length) { n.phase = 0; n.phaseTimer = 0; }
+    if (JSON.stringify(p.ban) !== JSON.stringify(old.ban)) for (const c of this.cars) if (c.granted !== n) c.path = null;
   }
 
   say(text: string): void {

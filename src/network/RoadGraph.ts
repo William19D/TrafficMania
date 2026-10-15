@@ -5,8 +5,11 @@ import { DOOR_R } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import { TIERS } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
+import type { JunctionPlan, Move } from './Junction.ts';
+import { LEFT, approachOf, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
+export { LIGHT_PERIOD, lightGroup } from './Junction.ts';
 
-export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5, LIGHT_PERIOD = 5;
+export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5;
 // Roundabout ring (centre line radius) and where an approach lane meets it
 export const RING_R = NODE_R + 5, RING_IN = Math.sqrt(RING_R * RING_R - LANE_OFFSET * LANE_OFFSET);
 // Where a car stops before a junction (distance from the node): outside the ring on roundabouts
@@ -32,12 +35,14 @@ export const fitType = (t: RoadType): RoadType => {
   return { tier: t.tier, lanes, oneWay: t.oneWay && T.oneWay };
 };
 
-export type Control = 'none' | 'light' | 'roundabout';
+// none: one car at a time in arrival order; yield: the main road (mainEdges) goes, side roads give way; stop: all-way stop
+export type Control = 'none' | 'yield' | 'stop' | 'light' | 'roundabout';
 
 export interface Node {
   id: number; x: number; y: number; edges: Edge[]; building: Building | null; control: Control;
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
   controlDay: number; // day the control was built (refund rule)
+  plan: JunctionPlan | null; // edited phases / turn bans; null = the default plan (Junction.planOf)
 }
 
 // INVARIANT: cars sorted ascending by s; the last one is the furthest ahead.
@@ -53,13 +58,6 @@ export interface Edge {
 
 export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean }
 
-// Traffic light phase group: opposite approaches share a group
-export function lightGroup(n: Node, e: Edge): number {
-  const o = e.a === n ? e.b : e.a;
-  const angle = Math.atan2(o.y - n.y, o.x - n.x);
-  return ((Math.round(angle / (Math.PI / 2)) % 2) + 2) % 2;
-}
-
 export class RoadGraph {
   nodes: Node[] = [];
   edges: Edge[] = [];
@@ -68,7 +66,7 @@ export class RoadGraph {
   private nextId = 1;
 
   addNode(x: number, y: number, building: Building | null = null): Node {
-    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0 };
+    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0, plan: null };
     if (building) building.node = n;
     this.nodes.push(n);
     return n;
@@ -200,12 +198,9 @@ export class RoadGraph {
   // from: the node before path[0], for j = 0
   turn(path: Node[], j: number, from?: Node): number {
     for (; j < path.length - 1; j++) {
-      const n = path[j]!, p = path[j - 1] ?? from!, q = path[j + 1]!;
+      const n = path[j]!;
       if (!n.building && n.edges.length === 2 && n.control === 'none') continue;
-      const ax = n.x - p.x, ay = n.y - p.y, bx = q.x - n.x, by = q.y - n.y;
-      // y points down, so a positive cross product is a right turn on screen
-      const a = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
-      return Math.abs(a) > Math.PI * 0.95 ? -1 : a > Math.PI / 6 ? 1 : a < -Math.PI / 6 ? -1 : 0;
+      return turnAt(path[j - 1] ?? from!, n, path[j + 1]!);
     }
     return 0;
   }
@@ -364,20 +359,53 @@ export class RoadGraph {
   update(dt: number): void {
     for (const n of this.nodes) {
       n.queue = n.queue.filter(c => c.lane.to === n);
+      const plan = n.control === 'light' || n.control === 'yield' || n.plan ? planOf(n) : null;
       if (n.control === 'light') {
+        const ph = plan!.phases;
         n.phaseTimer += dt;
-        if (n.phaseTimer >= LIGHT_PERIOD) { n.phaseTimer = 0; n.phase ^= 1; }
+        if (n.phase >= ph.length) n.phase = 0;
+        if (n.phaseTimer >= ph[n.phase].seconds) { n.phaseTimer = 0; n.phase = (n.phase + 1) % ph.length; }
       }
-      // Arrival order; lights admit their whole green group, the roundabout up to 3 cars, a plain junction 1.
-      // A car that can't go holds back the cars queued behind it in its lane.
-      const cap = n.control === 'light' ? Infinity : n.control === 'roundabout' ? 3 : 1;
+      if (!n.queue.length) continue;
+      // Arrival order; lights and the main road of a yield junction admit every car their signal lets go, the roundabout up to 3,
+      // the rest 1. A car that can't go holds back the cars queued behind it in its lane.
+      const cap = n.control === 'light' || n.control === 'yield' ? Infinity : n.control === 'roundabout' ? 3 : 1;
       // Ambulance: its whole lane goes first (stable sort keeps the cars ahead of it in order) and runs red into an empty box
       const amb = new Set(n.queue.filter(c => c.kind === 'ambulance').map(c => c.lane));
       if (amb.size) n.queue.sort((p, q) => +amb.has(q.lane) - +amb.has(p.lane));
+      // Approach and movement of every car queued at or granted into n (plan nodes only)
+      const mv = new Map<Car, [number, Move]>();
+      if (plan) for (const c of [...n.queue, ...n.occupants]) if (c.exit && c.lane.to === n) mv.set(c, [approachOf(plan, n, c.lane.edge), moveOf(n, c.lane.edge, c.exit.edge)]);
+      const busy = (cars: Iterable<Car>, a: number, ok: (m: Move) => boolean): boolean => {
+        for (const c of cars) { const x = mv.get(c); if (x && x[0] === a && ok(x[1])) return true; }
+        return false;
+      };
+      // A left that only yields waits while the opposite approach has a straight or right car queued or in the box
+      const opposed = (a: number): boolean => {
+        const o = oppositeOf(plan!, a);
+        return o >= 0 && (busy(n.queue, o, m => m !== LEFT) || busy(n.occupants, o, m => m !== LEFT));
+      };
+      const main = n.control === 'yield' ? mainEdges(n) : [];
+      const may = (c: Car): boolean => {
+        const x = mv.get(c);
+        if (plan && (!x || plan.ban[x[0]][x[1]])) return false;
+        if (n.control === 'light') {
+          if (amb.has(c.lane) && !n.occupants.size) return true;
+          const s = plan!.phases[n.phase].sig[x![0]][x![1]];
+          return s === 2 || (s === 1 && (x![1] !== LEFT || !opposed(x![0])));
+        }
+        if (n.control === 'yield') {
+          if (main.includes(c.lane.edge)) return x![1] !== LEFT || !opposed(x![0]);
+          // a side road goes into an empty box with no main-road car waiting
+          return !n.occupants.size && ![...n.queue].some(o => o !== c && main.includes(o.lane.edge));
+        }
+        // stop: only from a standstill at the line
+        if (n.control === 'stop') return c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3;
+        return true;
+      };
       const held = new Set<Lane>();
       n.queue = n.queue.filter(c => {
-        const red = n.control === 'light' && lightGroup(n, c.lane.edge) !== n.phase && !(amb.has(c.lane) && !n.occupants.size);
-        if (held.has(c.lane) || n.occupants.size >= cap || red || !this.fits(n, c)) {
+        if (held.has(c.lane) || n.occupants.size >= cap || !may(c) || !this.fits(n, c)) {
           held.add(c.lane);
           return true;
         }

@@ -88,11 +88,11 @@ export class Car {
 
     // Recompute route from the node we are heading to; U-turn back down our own edge only when nothing else leads there
     if (!isDest && (!this.path || this.path[0] !== node)) {
-      this.path = findPath(graph, node, this.dest.node, lane.edge) ?? findPath(graph, node, this.dest.node);
+      this.path = findPath(graph, node, this.dest.node, lane.edge, false, lane.edge) ?? findPath(graph, node, this.dest.node, null, false, lane.edge);
       if (!this.path) return 'lost';
     } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
       // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up
-      const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!));
+      const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!), false, lane.edge);
       if (p) this.path = p;
     }
 
