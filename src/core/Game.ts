@@ -1041,12 +1041,14 @@ export class Game {
     return r ? `${r} resident${r > 1 ? 's' : ''} move out` : w ? `${w} workers lose their jobs` : '';
   }
 
-  // Demolish click on a building: an empty one goes at once, an occupied one arms on the first click and goes on the second
+  // Demolish click on a building: an empty one goes at once, an occupied one arms on the first click and goes on the second.
+  // Back in the tray costs MOVE_COST (career), so demolish and re-place is never cheaper than a move
   tryDemolish(b: Building): boolean {
-    const who = this.occupants(b);
+    const who = this.occupants(b), broke = this.afford(this.moveCost);
+    if (broke) { this.armed = null; this.say(broke); return false; }
     if (who && this.armed !== b) { this.armed = b; this.say(`Click again to demolish: ${who}`); return false; }
     this.demolishBuilding(b);
-    this.say(`${ZONES[b.kind].label} demolished${this.creative ? '' : ': back in the tray'}`);
+    this.say(`${ZONES[b.kind].label} demolished${this.creative ? '' : `: back in the tray · ${fmtMoney(this.moveCost)}`}`);
     return true;
   }
 
@@ -1059,7 +1061,7 @@ export class Game {
     this.graph.dropIfOrphan(n);
   }
 
-  // Removes b and every reference to it, and puts it back in the tray (career). Its commuters move out, workers lose the job;
+  // Removes b and every reference to it, and puts it back in the tray for MOVE_COST (career). Its commuters move out, workers lose the job;
   // a car on its way to b (not a return leg) heads to another place of its purpose, any other trip from or to b ends and its
   // commuter is home again. Its reports go too, so a save never points at it.
   demolishBuilding(b: Building): void {
@@ -1085,7 +1087,7 @@ export class Game {
     if (this.armed === b) this.armed = null;
     if (b.kind !== 'gate') this.tray[b.kind]++;
     this.sfx.add('demolish');
-    this.spend(0);
+    this.spend(this.moveCost);
   }
 
   // Picks b up with the place tool: the ghost follows the cursor and a click sets it down (MOVE_COST in career); Esc puts it back

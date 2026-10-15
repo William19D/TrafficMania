@@ -836,7 +836,14 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (enRoute.length < 2) fail(`demolish: only ${enRoute.length} cars headed to the office`);
   const tray = w.tray.office;
   if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: an occupied office went on the first click');
+  const cash = w.money;
+  w.money = 0;
+  if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: went with no money for MOVE_COST');
+  w.money = cash;
+  w.tryDemolish(O1);
   if (!w.tryDemolish(O1) || w.buildings.includes(O1) || w.tray.office !== tray + 1) fail('demolish: the second click did not remove it into the tray');
+  // back in the tray costs a move, so demolish and re-place never beats Move
+  if (w.money !== cash - TUNING.MOVE_COST) fail(`demolish: cost $${cash - w.money}, not MOVE_COST`);
   refs('demolish');
   if (!enRoute.some(c => w.cars.includes(c) && c.trip.to !== O1 && c.trip.to.jobs > 0)) fail('demolish: no car on its way was sent to another workplace');
   const json = serialize(w);

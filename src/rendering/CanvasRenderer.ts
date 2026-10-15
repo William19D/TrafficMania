@@ -522,7 +522,7 @@ export class CanvasRenderer {
       if (b) {
         const who = game.occupants(b);
         this.outlineB(b, RED, 4);
-        below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ' · back to the tray'}`, b, RED);
+        below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ` · back to the tray · ${fmtMoney(game.moveCost)}`}`, b, RED);
         return;
       }
       const n = g.nearestNode(p, NODE_R + 4);

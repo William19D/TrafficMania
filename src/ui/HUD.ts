@@ -26,7 +26,7 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
   edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
-  demolish: { label: 'Demolish', tip: 'Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (an occupied one takes a second click).' },
+  demolish: { label: 'Demolish', tip: `Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (${fmtMoney(T.MOVE_COST)} in career; an occupied one takes a second click).` },
 };
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
@@ -850,7 +850,7 @@ export class HUD {
     if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
     const who = g.occupants(b);
     body += `<div class="jpre"><button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`
-      + `<button class="btn" data-b="demolish" data-tip="${g.creative ? 'Removes it' : 'Back to the tray, to place again'}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
+      + `<button class="btn" data-b="demolish" data-tip="${g.creative ? 'Removes it' : `Back to the tray, to place again · ${fmtMoney(g.moveCost)}`}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
     this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
     this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
   }
