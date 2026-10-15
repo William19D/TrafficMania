@@ -112,6 +112,10 @@ export class Game {
   tray: Record<Zone, number>;
   placing: Zone | null = null;
   placeAngle = Math.PI / 2;
+  // Building the place tool is moving (placing = its kind, no tray needed); the occupied building a Demolish click armed (a second click
+  // removes it)
+  moving: Building | null = null;
+  armed: Building | null = null;
   // Type for new roads
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Grid tool block size in tiles
@@ -902,6 +906,9 @@ export class Game {
   }
 
   demolishAt(p: Vec): void {
+    const b = this.buildingUnder(p);
+    if (b) { this.tryDemolish(b); return; }
+    this.armed = null;
     const n = this.graph.nearestNode(p, NODE_R + 4);
     if (n && n.control !== 'none') { this.setControl(n, 'none'); return; }
     // prefer a road on the current level where several are stacked
@@ -949,11 +956,75 @@ export class Game {
     return best;
   }
 
+  buildingUnder(p: Vec): Building | null {
+    return this.buildings.find(b => b.contains(p, 2)) ?? null;
+  }
+
+  // Residents or workers a demolish would turn out ('' for none): an occupied building takes a second click
+  occupants(b: Building): string {
+    const r = Math.round(b.residents), w = this.commuters.filter(c => c.work === b).length * T.PEOPLE_PER_CAR;
+    return r ? `${r} resident${r > 1 ? 's' : ''} move out` : w ? `${w} workers lose their jobs` : '';
+  }
+
+  // Demolish click on a building: an empty one goes at once, an occupied one arms on the first click and goes on the second
+  tryDemolish(b: Building): boolean {
+    const who = this.occupants(b);
+    if (who && this.armed !== b) { this.armed = b; this.say(`Click again to demolish: ${who}`); return false; }
+    this.demolishBuilding(b);
+    this.say(`${ZONES[b.kind].label} demolished${this.creative ? '' : ': back in the tray'}`);
+    return true;
+  }
+
+  // Lets go of b's door: its driveways go (their cars back to their origin's door), the door node stays as a plain joint
+  // only when a road runs through it
+  private unhook(b: Building): void {
+    const n = b.node;
+    for (const e of n.edges.filter(e => e.drive)) this.dropCars(this.graph.removeEdge(e));
+    n.building = null;
+    this.graph.dropIfOrphan(n);
+  }
+
+  // Removes b and every reference to it, and puts it back in the tray (career). Its commuters move out, workers lose the job;
+  // a car on its way to b (not a return leg) heads to another place of its purpose, any other trip from or to b ends and its
+  // commuter is home again. Its reports go too, so a save never points at it.
+  demolishBuilding(b: Building): void {
+    this.unhook(b);
+    this.buildings = this.buildings.filter(x => x !== b);
+    this.commuters = this.commuters.filter(c => c.home !== b);
+    for (const c of this.commuters) if (c.work === b) c.work = null;
+    const gone = (t: Trip): boolean => t.from === b || t.to === b;
+    const home = (t: Trip): void => { if (t.who) t.who.at = 'home'; };
+    const comp = this.components();
+    for (const car of this.cars.filter(c => gone(c.trip))) {
+      const t = car.trip, to = t.to === b && !t.back ? this.pick(t.from, comp, x => t.purpose === 'commute' || x.kind === 'shop' ? x.jobs : 0) : null;
+      if (to) { t.to = to; if (t.who) t.who.work = to; car.path = null; continue; }
+      this.graph.detachCar(car);
+      this.cars.splice(this.cars.indexOf(car), 1);
+      home(t);
+    }
+    for (const o of [b, ...this.buildings]) for (const list of [o.pending, o.parked]) {
+      for (let i = 0; i < list.length; i++) if (o === b || gone(list[i])) home(list.splice(i--, 1)[0]);
+    }
+    this.reports = this.reports.filter(r => r.from !== b && r.to !== b);
+    if (this.picked === b) this.picked = null;
+    if (this.armed === b) this.armed = null;
+    this.tray[b.kind]++;
+    this.spend(0);
+  }
+
+  // Picks b up with the place tool: the ghost follows the cursor and a click sets it down (MOVE_COST in career); Esc puts it back
+  startMove(b: Building): void {
+    this.placing = b.kind;
+    this.setTool('place');
+    this.moving = b;
+  }
+
   // Edit click, first hit wins: a car (followed, with its card), a junction (its panel), a building (its card), a road run (selected)
   select(p: Vec | null): void {
+    this.armed = null;
     this.follow = p ? this.carAt(p) : null;
     this.inspect = p && !this.follow ? this.junctionAt(p) : null;
-    this.picked = p && !this.follow && !this.inspect ? this.buildings.find(b => b.contains(p, 2)) ?? null : null;
+    this.picked = p && !this.follow && !this.inspect ? this.buildingUnder(p) : null;
     this.selected = p && !this.follow && !this.inspect && !this.picked ? this.runAt(p) : null;
   }
 
@@ -964,7 +1035,8 @@ export class Game {
     if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
     if (t !== 'edit') { this.selected = null; this.inspect = null; this.follow = null; this.picked = null; }
-    if (t !== 'place') this.placing = null;
+    if (t !== 'place') this.placing = this.moving = null;
+    if (t !== 'demolish') this.armed = null;
     if (t !== 'interchange') this.ichg = null;
   }
 
@@ -979,13 +1051,15 @@ export class Game {
   // Picks up a building of the zone (or of the first zone with one left) from the tray
   startPlacing(kind = this.nextKind()): void {
     if (!kind || this.tray[kind] < 1) { this.say('No buildings to place: the next level brings more'); return; }
+    this.moving = null;
     this.placing = kind;
     this.setTool('place');
   }
 
   // Ghost of the held building at p. Near an access road (SNAP_R) it faces the road with its door DRIVE_GAP past the road's edge;
   // elsewhere it stands free, turned by placeAngle. It must lie inside the map on dry land, clear of roads (by a 4px margin) and
-  // of other buildings, with one left in the tray. Free: buildings cost nothing.
+  // of other buildings, with one left in the tray. Free: buildings cost nothing. Moving one: no tray needed, MOVE_COST in career,
+  // and its own footprint and driveways are out of the way.
   planPlace(p: Vec, kind = this.placing): PlacePlan | null {
     if (!kind) return null;
     const hit = this.accessEdges().map(e => ({ e, ...distToSegment(p, e.a, e.b) })).filter(h => h.d <= T.SNAP_R).sort((x, y) => x.d - y.d)[0];
@@ -998,14 +1072,14 @@ export class Game {
       b = buildingAt(kind, { x: q.x + nx * d, y: q.y + ny * d }, Math.atan2(-ny, -nx));
       road = q;
     } else b = new Building(kind, p.x, p.y, this.placeAngle);
-    const pts = b.outline(), m = 4;
+    const pts = b.outline(), m = 4, mv = this.moving;
     // ponytail: overlap by sampled outline points both ways; fine for near-square footprints, SAT if long thin ones arrive
-    const reason = this.tray[kind] < 1 ? 'None left in the tray'
-      : pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
+    const reason = (mv ? this.afford(this.moveCost) : this.tray[kind] < 1 ? 'None left in the tray' : '')
+      || (pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
       : pts.some(q => inWater(this.terrain, q, m) || inMountain(this.terrain, q, m)) ? 'Blocked by water or a mountain'
-      : this.graph.edges.some(e => this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
-      : this.buildings.some(o => pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m))) ? 'Overlaps a building'
-      : '';
+      : this.graph.edges.some(e => !(mv && e.drive && (e.a === mv.node || e.b === mv.node)) && this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
+      : this.buildings.some(o => o !== mv && (pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m)))) ? 'Overlaps a building'
+      : '');
     const near = (z: Zone): number => this.buildings.filter(o => o.kind === z && dist(o, b) < T.POLLUTION_R).length;
     const noisy = () => this.graph.edges.some(e => !e.tunnel && TIERS[e.type.tier].noise >= T.NOISY && distToSegment(b, e.a, e.b).d < T.NOISE_R);
     const warn = !road ? 'No road yet: connect its door'
@@ -1016,11 +1090,28 @@ export class Game {
     return { b, ok: !reason, reason, warn, road };
   }
 
-  // Places the held building at p with its free driveway; once that zone runs out the tool takes the next one left, or lets go
+  get moveCost(): number { return this.creative ? 0 : T.MOVE_COST; }
+
+  // Places the held building at p with its free driveway; once that zone runs out the tool takes the next one left, or lets go.
+  // A moved building keeps its households, jobs and trips: cars on their way to it find the new door.
   placeBuilding(p: Vec): boolean {
     const plan = this.planPlace(p);
     if (!plan) return false;
     if (!plan.ok) { this.say(plan.reason); return false; }
+    const mv = this.moving;
+    if (mv) {
+      this.unhook(mv);
+      Object.assign(mv, { x: plan.b.x, y: plan.b.y, angle: plan.b.angle });
+      const d = mv.door();
+      this.graph.addNode(d.x, d.y, mv);
+      this.connect();
+      for (const c of this.cars) if (c.trip.to === mv) c.path = null;
+      this.spend(this.moveCost);
+      this.setTool('edit');
+      this.picked = mv;
+      this.say(`${ZONES[mv.kind].label} moved${this.moveCost ? ` · ${fmtMoney(this.moveCost)}` : ''}`);
+      return true;
+    }
     const b = plan.b;
     if (b.kind === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
     this.addBuilding(b);

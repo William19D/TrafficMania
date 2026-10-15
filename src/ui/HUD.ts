@@ -23,8 +23,8 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
-  edit: { label: 'Edit', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it.' },
-  demolish: { label: 'Demolish', tip: 'Click a road, sign, light or roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
+  edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
+  demolish: { label: 'Demolish', tip: 'Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (an occupied one takes a second click).' },
 };
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
@@ -98,6 +98,7 @@ export const CONTROLS: [string, string][] = [
   ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
   ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, turn bans`],
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
+  ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
@@ -384,6 +385,9 @@ export class HUD {
       const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
       if (v === 'car') game.follow = null;
       else if (v === 'building') game.picked = null;
+      const bb = t.closest<HTMLElement>('[data-b]')?.dataset.b, pb = game.picked;
+      if (pb && bb === 'move') game.startMove(pb);
+      else if (pb && bb === 'demolish') game.tryDemolish(pb);
       else if (v === 'metrics' || v === 'feed') this.show[v] = false;
       if (j) {
         const [x, y] = j.split(',').map(Number);
@@ -793,7 +797,7 @@ export class HUD {
   private updateBuilding(): void {
     const g = this.game, b = g.picked, panel = this.q('.bpanel');
     const mine = b ? g.reports.filter(r => r.from === b || r.to === b).slice(-5).reverse() : [];
-    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${mine.map(r => r.seconds).join()}` : '';
+    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${g.armed === b}|${mine.map(r => r.seconds).join()}` : '';
     if (key === this.last.bld) return;
     this.last.bld = key;
     panel.hidden = !b;
@@ -810,6 +814,9 @@ export class HUD {
       body = `<p class="jnote">${z.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
     }
     if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
+    const who = g.occupants(b);
+    body += `<div class="jpre"><button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`
+      + `<button class="btn" data-b="demolish" data-tip="${g.creative ? 'Removes it' : 'Back to the tray, to place again'}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
     this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
     this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
   }

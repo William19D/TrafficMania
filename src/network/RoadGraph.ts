@@ -106,7 +106,7 @@ export class RoadGraph {
     e.b.edges = e.b.edges.filter(x => x !== e);
   }
 
-  private dropIfOrphan(n: Node): void {
+  dropIfOrphan(n: Node): void {
     if (n.edges.length === 0 && !n.building) this.nodes = this.nodes.filter(x => x !== n);
   }
 

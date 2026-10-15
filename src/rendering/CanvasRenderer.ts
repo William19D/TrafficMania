@@ -299,6 +299,9 @@ export class CanvasRenderer {
     // Junction open in the Edit panel
     if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
+    // the building being moved still stands where it was until it is set down; the one a Demolish click armed
+    if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
+    if (game.armed) this.outlineB(game.armed, RED, 6);
 
     // Followed car: its route ahead as a dashed accent line, and a ring around it
     if (fc) {
@@ -521,7 +524,19 @@ export class CanvasRenderer {
       ctx.textBaseline = 'bottom';
       this.text(s, x + 14, y - 10, 'bold 12px system-ui', color);
     };
+    // under a building's footprint, clear of its own residents label above it
+    const below = (s: string, b: Building, color: string) => {
+      ctx.font = 'bold 12px system-ui';
+      label(s, b.x - 14 - ctx.measureText(s).width / 2, b.y + Math.max(b.w, b.h) / 2 + 26, color);
+    };
     if (game.tool === 'demolish') {
+      const b = game.buildingUnder(p);
+      if (b) {
+        const who = game.occupants(b);
+        this.outlineB(b, RED, 4);
+        below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ' · back to the tray'}`, b, RED);
+        return;
+      }
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
         this.ring(n.x, n.y, NODE_R + 6, RED, 3);
@@ -583,7 +598,7 @@ export class CanvasRenderer {
       const b = game.buildings.find(x => x.contains(p, 2));
       if (b) {
         this.outlineB(b, ACCENT, 4);
-        label(`${ZONES[b.kind].label}: click for details`, p.x, p.y, ACCENT);
+        below(`${ZONES[b.kind].label}: click for details · drag to move`, b, ACCENT);
         return;
       }
       const run = game.runAt(p);
@@ -691,7 +706,7 @@ export class CanvasRenderer {
     const y = b.y - Math.max(b.w, b.h) / 2 - 10;
     if (!plan.ok) this.text(plan.reason, b.x, y, 'bold 12px system-ui', RED);
     else if (plan.warn) this.text(plan.warn, b.x, y, 'bold 12px system-ui', '#A86A00');
-    else this.text(ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
+    else this.text(game.moving ? `Move here${game.moveCost ? ` · ${fmtMoney(game.moveCost)}` : ''}` : ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
   }
 
   // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between

@@ -724,6 +724,51 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   // granted through each driveway junction it keeps its speed: well under the free-flow time's per-junction allowance
   if (w.reports[0]?.outcome !== 'smooth' || w.reports[0].ratio > 0.9) fail(`free flow: ${w.reports[0]?.outcome} at ${w.reports[0]?.ratio.toFixed(2)}x the free-flow time`);
 }
+// Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
+// (cars, trips, commuters, reports, nodes), its cars on the way head to another workplace, it goes back to the tray, saves and loads, and the sim runs on; a home moved down the street
+// keeps its residents and commuters, costs MOVE_COST, and its commuters get home to the new door
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.office = w.tray.shop = 99;
+  for (let x = 150; x < 700; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  for (const [k, x] of [['office', 300], ['shop', 700], ['office', 1100]] as const) { w.startPlacing(k); w.placeBuilding({ x, y: 540 }); }
+  const refs = (what: string): void => {
+    const B = new Set(w.buildings), N = new Set(w.graph.nodes), C = new Set(w.commuters);
+    const bad = (t: Trip): boolean => !B.has(t.from) || !B.has(t.to) || (!!t.who && !C.has(t.who));
+    if (w.cars.some(c => bad(c.trip)) || w.buildings.some(b => [...b.pending, ...b.parked].some(bad))) fail(`${what}: a trip points at a removed building`);
+    if (w.commuters.some(c => !B.has(c.home) || (c.work && !B.has(c.work)))) fail(`${what}: a commuter points at a removed building`);
+    if (w.reports.some(r => !B.has(r.from) || !B.has(r.to))) fail(`${what}: a report points at a removed building`);
+    if (w.graph.nodes.some(n => n.building && !B.has(n.building)) || w.buildings.some(b => !N.has(b.node) || b.node.building !== b)) fail(`${what}: door nodes out of sync`);
+  };
+  const O1 = w.buildings.find(b => b.kind === 'office')!;
+  for (let t = 0; t < 6 * HOUR * 60 && (w.cars.filter(c => c.trip.to === O1).length < 2 || !w.reports.some(r => r.to === O1)); t++) w.update(DT);
+  const enRoute = w.cars.filter(c => c.trip.to === O1 && !c.trip.back);
+  if (enRoute.length < 2) fail(`demolish: only ${enRoute.length} cars headed to the office`);
+  const tray = w.tray.office;
+  if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: an occupied office went on the first click');
+  if (!w.tryDemolish(O1) || w.buildings.includes(O1) || w.tray.office !== tray + 1) fail('demolish: the second click did not remove it into the tray');
+  refs('demolish');
+  if (!enRoute.some(c => w.cars.includes(c) && c.trip.to !== O1 && c.trip.to.jobs > 0)) fail('demolish: no car on its way was sent to another workplace');
+  const json = serialize(w);
+  if (serialize(deserialize(json)) !== json) fail('demolish: the save does not round-trip');
+  const score = w.score;
+  for (let t = 0; t < HOUR * 60; t++) { w.update(DT); invariants(w); }
+  refs('demolish, an hour on');
+  if (w.score <= score) fail('demolish: nothing arrived after it');
+  const H = w.buildings.find(b => b.kind === 'home' && w.commuters.some(c => c.home === b && c.at === 'away'))!;
+  if (!H) fail('move: no home with a commuter at work');
+  const res = H.residents, mine = w.commuters.filter(c => c.home === H).length, money = w.money, before = new Set(w.reports);
+  w.startMove(H);
+  if (!w.placeBuilding({ x: 1300, y: 460 })) fail(`move: refused, ${w.message}`);
+  refs('move');
+  if (H.x < 1200 || !H.connected || H.residents !== res || w.commuters.filter(c => c.home === H).length !== mine) fail('move: the home did not keep its place, residents or commuters');
+  if (w.money !== money - TUNING.MOVE_COST || w.moving) fail(`move: cost $${money - w.money}`);
+  const home = (): boolean => w.reports.some(r => !before.has(r) && r.to === H && r.back && r.purpose === 'commute' && r.outcome !== 'gaveup' && r.outcome !== 'noroute');
+  for (let t = 0; t < 12 * HOUR * 60 && !home(); t++) { w.update(DT); invariants(w); }
+  if (!home()) fail('move: no commuter got home to the moved door');
+  refs('move, hours on');
+}
 // No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0)
 {
   const w = new Game({ ...SIM, difficulty: 'normal' });

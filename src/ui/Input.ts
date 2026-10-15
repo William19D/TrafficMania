@@ -1,6 +1,7 @@
 import type { Game, Tool, PathPlan } from '../core/Game.ts';
 import { ZONE_KEYS } from '../core/Game.ts';
 import type { Edge } from '../network/RoadGraph.ts';
+import type { Building } from '../entities/Building.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
 import { dist } from '../util/geom.ts';
@@ -29,6 +30,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let handle: Vec | null = null;
   let plan: PathPlan | null = null;
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
+  let grab: Building | null = null; // Edit tool: the building pressed on (dragging it moves it); then the move being dragged
   let grid: Vec[] = []; // Grid tool: the corner, then the end of the first side
 
   const blocked = () => game.gameOver || game.pendingLevel > 0;
@@ -39,6 +41,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     anchor = end = handle = null;
     plan = null;
     run = null;
+    grab = null;
     grid = [];
   };
 
@@ -67,7 +70,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       }
     } else if (game.tool === 'edit') {
       press = { x: e.clientX, y: e.clientY };
-      run = game.runAt(w);
+      grab = game.carAt(w) || game.junctionAt(w) ? null : game.buildingUnder(w);
+      run = grab ? null : game.runAt(w);
     } else if (game.tool === 'grid') press = { x: e.clientX, y: e.clientY };
     else if (game.tool === 'interchange') game.pickInterchange(w);
     else if (game.tool === 'demolish') game.demolishAt(w);
@@ -85,6 +89,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       return;
     }
     const w = renderer.screenToWorld(e.clientX, e.clientY);
+    if (game.tool === 'edit' && grab && press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) { game.startMove(grab); return; }
     if (game.tool === 'edit' && run && press && !blocked()) {
       if (mode === 'idle' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';
       if (mode === 'bending') {
@@ -113,6 +118,12 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       return;
     }
     if (e.button !== 0) return;
+    // a building dragged with Edit drops where it is let go; a refused spot leaves it held, a click places it then
+    if (game.tool === 'place' && grab && game.moving === grab) {
+      if (!blocked()) game.placeBuilding(renderer.screenToWorld(e.clientX, e.clientY));
+      grab = press = null;
+      return;
+    }
     if (game.tool === 'edit') {
       if (mode === 'bending' && run) {
         // replan at the release point, like the road bend
@@ -179,7 +190,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       else if (k && ZONE_KEYS.indexOf(k) > ZONE_KEYS.indexOf(game.placing!)) game.startPlacing(k);
       else game.setTool('road');
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
-    else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool('road'); }
+    else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool(game.moving ? 'edit' : 'road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
   }, { signal });
