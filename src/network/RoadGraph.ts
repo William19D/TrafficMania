@@ -58,10 +58,11 @@ export interface Edge {
   bridge: boolean; tunnel: boolean; level: number;
   day: number; // build day (refund rule); a split keeps it
   drive: boolean; // auto driveway to a building: free, no upkeep, no refund
+  exit: boolean; // a piece of a highway exit's stub (a split keeps it): free, no upkeep, no refund, never demolished
   heat: number; // congestion EMA 0..1: the larger of density and slowness (1 - speed / top speed) of its cars
 }
 
-export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean }
+export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean; exit?: boolean }
 
 export class RoadGraph {
   nodes: Node[] = [];
@@ -80,7 +81,7 @@ export class RoadGraph {
   addEdge(a: Node, b: Node, flags: EdgeFlags, day = 0): Edge {
     const e = {
       id: this.nextId++, a, b, length: dist(a, b),
-      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive, heat: 0,
+      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive, exit: !!flags.exit, heat: 0,
     } as Edge;
     this.buildLanes(e, flags.type);
     a.edges.push(e);
@@ -122,7 +123,7 @@ export class RoadGraph {
 
   splitEdge(e: Edge, p: Vec): Node {
     const { a, b } = e;
-    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type, drive: e.drive };
+    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type, drive: e.drive, exit: e.exit };
     const n = this.addNode(p.x, p.y);
     this.unlink(e);
     const e1 = this.addEdge(a, n, flags, e.day);

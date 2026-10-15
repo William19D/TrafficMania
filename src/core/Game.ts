@@ -71,8 +71,9 @@ type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 // A building's door, a node a driveway joins, or a driveway: a road without access may not touch it
 // (a highway exit's gate is no doorway: its own stub is a highway)
 const doorway = (n: Node | null, e?: Edge | null): boolean => !!n && (!!n.building && n.building.kind !== 'gate' || n.edges.some(x => x.drive)) || !!e?.drive;
-// The highway stub of an outside connection (the edge at its gate): free, and it cannot be demolished
-export const exitEdge = (e: Edge): boolean => e.a.building?.kind === 'gate' || e.b.building?.kind === 'gate';
+// The highway stub of an outside connection: free, and it cannot be demolished. Every piece of a split stub keeps Edge.exit;
+// the gate test covers a bent stub's end and older saves
+export const exitEdge = (e: Edge): boolean => e.exit || e.a.building?.kind === 'gate' || e.b.building?.kind === 'gate';
 const EXIT_TYPE: RoadType = { tier: 'highway', lanes: 2, oneWay: false };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
 // A crossing road's arm from the junction to the cut point 'at' (edges[i] leaves nodes[i])
@@ -185,7 +186,7 @@ export class Game {
   addExits(): void {
     for (const x of this.terrain.exits) {
       const b = this.addBuilding(buildingAt('gate', x.door, x.angle));
-      this.graph.addEdge(b.node, this.graph.addNode(x.end.x, x.end.y), { bridge: false, tunnel: false, level: 0, type: EXIT_TYPE }, -1);
+      this.graph.addEdge(b.node, this.graph.addNode(x.end.x, x.end.y), { bridge: false, tunnel: false, level: 0, type: EXIT_TYPE, exit: true }, -1);
     }
   }
 

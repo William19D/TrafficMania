@@ -26,7 +26,7 @@ export interface SaveData {
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number }[];
-  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; heat: number }[];
+  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -58,7 +58,7 @@ export function serialize(g: Game): string {
       phaseTimer: n.phaseTimer, plan: n.plan, delay: n.delay,
     })),
     edges: g.graph.edges.map(e => ({
-      a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, heat: e.heat,
+      a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
     })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,

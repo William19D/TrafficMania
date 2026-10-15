@@ -881,6 +881,11 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const gate = w.buildings.find(b => b.kind === 'gate')!, edges = w.graph.edges.length;
   w.demolishAt({ x: 80, y: 500 });
   if (w.graph.edges.length !== edges || !gate.connected) fail('exits: the stub was demolished');
+  // a road onto the stub's middle splits it: both halves stay free and cannot be demolished
+  w.commitPath(w.planPath([{ x: 80, y: 640 }, { x: 80, y: 500 }], 0, street));
+  const stub = w.graph.edges.filter(e => e.type.tier === 'highway'), up = w.upkeepPerDay(), cash = w.money;
+  for (const x of [40, 120]) w.demolishAt({ x, y: 500 });
+  if (stub.length !== 2 || stub.some(e => !e.exit || !w.graph.edges.includes(e)) || w.money !== cash || w.upkeepPerDay() !== up) fail('exits: a split stub piece lost its exit flag');
   w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 1500, y: 500 }], 0, street));
   w.tray.home = w.tray.industry = w.tray.shop = 99;
   for (let x = 340; x < 760; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
