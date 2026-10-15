@@ -567,13 +567,14 @@ kbd {
 .legend i { width: .9em; height: .6em; border-radius: 2px; border: 1px solid var(--ink); }
 
 /* ---------- responsive ---------- */
-/* the tier picker widened the dock: the elevation hint goes first (the stepper's tooltip still says it) */
-@media (max-width: 1339px) {
+/* the tier picker widened the dock: the elevation hint goes first (the stepper's tooltip still says it); below 1800px the full dock
+   (1677px at 16px) would push Edit and Demolish off the right edge */
+@media (max-width: 1799px) {
   .eh { display: none; }
   .elev { width: auto; min-width: 3.5em; }
 }
 /* Grid and Interchange widened the dock again: the tier caption goes (the swatch tooltips name the tier) and the tools pack tighter */
-@media (max-width: 1439px) {
+@media (max-width: 1799px) {
   .plabel { display: none; }
   .dock { gap: 6px; }
   #hud .tool { min-width: 3.75em; padding-inline: .375em; }
@@ -596,6 +597,17 @@ kbd {
   }
   .topl > * { position: static; transform: none; pointer-events: auto; }
   .res { max-width: calc(100vw - 88px); }
+}
+/* under 1280px the dock no longer fits one row (Buildings, Edit and Demolish fell off the right edge): it wraps to two */
+@media (min-width: 769px) and (max-width: 1279px) {
+  #hud { --dock-h: 9em; }
+  /* both edges set (not left 50% + translate, which caps the shrink-to-fit width at half the screen), centred by its auto margins */
+  .dock { left: var(--edge-l); right: var(--edge-r); transform: none; width: fit-content; max-width: none; margin-inline: auto; flex-wrap: wrap; justify-content: center; row-gap: .375em; }
+  .dock > .brk { flex-basis: 100%; height: 0; margin: 0; } /* the road options on the first row, the other tools on the second */
+}
+/* under 1024px the first row needs room too: the elevation picture and the one-way caption go (their tooltips stay) */
+@media (min-width: 769px) and (max-width: 1023px) {
+  .stepper .pic, .lanes .lane.wide small { display: none; }
 }
 @media (max-width: 768px) {
   #hud { --dock-h: 84px; } /* 74px of buttons and room for a desktop scrollbar under them */
@@ -747,7 +759,7 @@ kbd {
 .legend i.dot { width: .7em; height: .7em; border-radius: 50%; }
 /* narrower: the resources row keeps clear of the analysis buttons; phones: the buttons stack under help, panels beside them */
 @media (max-width: 1279px) {
-  .res { max-width: calc(100vw - 21em); }
+  .res { max-width: calc(100vw - 24em); }
 }
 @media (max-width: 768px) {
   .res { max-width: calc(100vw - 88px); }

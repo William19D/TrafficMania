@@ -344,7 +344,7 @@ export class HUD {
           <span class="elev"><b class="lv num"></b><small class="eh"></small></span>
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
-        <span class="sep"></span>
+        <span class="sep brk"></span>
         ${toolBtn('light')}
         ${toolBtn('roundabout')}
         ${toolBtn('interchange')}
