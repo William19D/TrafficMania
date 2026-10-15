@@ -6,7 +6,7 @@ import type { Car } from '../entities/Car.ts';
 import { TIERS, TUNING } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
 import type { JunctionPlan, Move } from './Junction.ts';
-import { LEFT, approachOf, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
+import { LEFT, approachOf, edgeAngle, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
 export { LIGHT_PERIOD, lightGroup } from './Junction.ts';
 
 export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5;
@@ -17,6 +17,9 @@ export const stopDist = (n: Node): number => n.control === 'roundabout' ? RING_R
 // Mid-edge lane change: slide seconds, and how far from both nodes it may start (past the node blends, the slide done
 // before the end, room left for cars granted into the lane)
 export const LC_S = 0.6, LC_M = 110;
+// Max braking px/s/s. Merge: a driveway car takes a gap of MERGE_GAP s before road traffic reaches the junction; a car at the front
+// of its lane for MERGE_S (a driveway, a yield side road, a permissive left) makes the traffic it gives way to let it in
+export const BRAKE = 180, MERGE_GAP = 1, MERGE_S = 1;
 
 // Road types: tier (config TIERS), lanes PER DIRECTION; a one-way road only has lanes a->b
 export const LANE_W = 9;
@@ -202,8 +205,10 @@ export class RoadGraph {
   turn(path: Node[], j: number, from?: Node): number {
     for (; j < path.length - 1; j++) {
       const n = path[j]!;
+      const p = path[j - 1] ?? from!, q = path[j + 1]!;
       if (!n.building && n.edges.length === 2 && n.control === 'none') continue;
-      return turnAt(path[j - 1] ?? from!, n, path[j + 1]!);
+      if (this.drivewayJunction(n) && !this.edgeBetween(p, n)?.drive && !this.edgeBetween(n, q)?.drive) continue;
+      return turnAt(p, n, q);
     }
     return 0;
   }
@@ -347,8 +352,69 @@ export class RoadGraph {
     return out.sort((p, q) => p.t - q.t);
   }
 
-  needsControl(n: Node): boolean {
-    return n.edges.length >= 3 || n.control !== 'none';
+  // via: the edge a car arrives by; the road's own traffic passes a driveway junction like a bend (only held for a merge)
+  needsControl(n: Node, via?: Edge | null): boolean {
+    return (n.edges.length >= 3 || n.control !== 'none') && !(via && !via.drive && this.drivewayJunction(n));
+  }
+
+  // A plain node where driveways meet one road (two road arms): driveway cars merge (update), the road does not stop for it
+  drivewayJunction(n: Node): boolean {
+    return n.control === 'none' && !n.building && n.edges.length >= 3 && n.edges.filter(e => !e.drive).length === 2;
+  }
+
+  // The merge of driveway car m at n meets road edge e's lanes into n (into) or out of it: a right turn only meets the traffic
+  // coming toward its exit lane (that lane's own room is fits()'s). A car clearing the box has entered its exit lane already.
+  private meets(m: Car, n: Node, e: Edge, into: boolean): boolean {
+    const cl = m.clearing === n, from = cl ? m.prev : m.lane.from, exit = cl ? m.lane : m.exit;
+    const right = !!from && !!exit && turnAt(from, n, exit.to) > 0;
+    return into ? !(right && e === exit!.edge) : !right;
+  }
+
+  // Road traffic arriving by 'via' keeps clear of driveway junction n: a merging car in its way is in the box, or has waited MERGE_S.
+  // The traffic heading into its exit lane always (a slow queue never leaves it a gap otherwise), the oncoming traffic a left turn
+  // crosses only once that lane has room.
+  held(n: Node, via: Edge): boolean {
+    for (const m of n.occupants) if (this.meets(m, n, via, true)) return true;
+    return n.queue.some(m => m.wait > MERGE_S && this.meets(m, n, via, true) && (via !== m.exit?.edge || this.fits(n, m)));
+  }
+
+  // A road car in m's way at driveway junction n: in the box, or reaching it before it could stop plus 'margin' px (the merge gap).
+  // Looks back over driveway junctions and bends up to 150px, since a home-lined road is cut into ~40px links.
+  private roadNear(n: Node, m: Car, margin: (c: Car) => number): boolean {
+    const near = (l: Lane, d: number): boolean => {
+      const c = l.cars[l.cars.length - 1];
+      if (c) return d + l.edge.length - c.s < stopDist(n) + c.speed * c.speed / (2 * BRAKE) + margin(c);
+      const p = l.from, back = p.edges.filter(x => !x.drive && x !== l.edge);
+      d += l.edge.length;
+      return d < 150 && !p.building && p.control === 'none' && back.length === 1 && back[0].lanes.some(x => x.to === p && near(x, d));
+    };
+    for (const e of n.edges) {
+      if (e.drive) continue;
+      for (const l of e.lanes) {
+        if (!this.meets(m, n, e, l.to === n)) continue;
+        // the rear of a road car just past the node
+        if (l.from === n && l.cars[0] && l.cars[0].s - l.cars[0].len / 2 < NODE_R) return true;
+        if (l.to === n && near(l, 0)) return true;
+      }
+    }
+    return false;
+  }
+
+  // The paths of two cars across plain junction n cross, or end on one road. Each arm takes cars in just right of its centre line and
+  // out just left of it, so two paths cross when their ends interleave around the node; a U-turn sweeps the whole box.
+  private crosses(n: Node, a: Car, b: Car): boolean {
+    const ma = this.moveAt(n, a), mb = this.moveAt(n, b);
+    if (!ma || !mb || ma[0] === ma[1] || mb[0] === mb[1] || ma[1] === mb[1]) return true;
+    if (ma[0] === mb[0]) return false;
+    const T = 2 * Math.PI, at = (e: Edge, d: number) => edgeAngle(n, e) + d, p = at(ma[0], -0.01), span = (at(ma[1], 0.01) - p + 2 * T) % T;
+    const inside = (x: number) => (x - p + 2 * T) % T < span;
+    return inside(at(mb[0], -0.01)) !== inside(at(mb[1], 0.01));
+  }
+
+  // In and out edge of a car queued at, granted into or clearing n
+  private moveAt(n: Node, c: Car): [Edge, Edge] | null {
+    if (c.clearing === n) { const e = c.prev && this.edgeBetween(c.prev, n); return e ? [e, c.lane.edge] : null; }
+    return c.exit ? [c.lane.edge, c.exit.edge] : null;
   }
 
   private grant(n: Node, c: Car): void {
@@ -356,12 +422,13 @@ export class RoadGraph {
     n.occupants.add(c);
   }
 
-  // Don't block the box: the exit lane needs the car's length of room past the junction, after the cars already granted into it
+  // Don't block the box: the exit lane needs the car's length of room past the junction, after the cars already granted into it.
+  // A driveway car only needs room past the node: the road does not keep a driveway junction's box clear.
   private fits(n: Node, c: Car): boolean {
     const l = c.exit;
     if (!l) return false;
     const f = l.cars[0];
-    let room = (f ? f.s - f.len / 2 : Infinity) - CAR_LEN / 2 - stopDist(n);
+    let room = (f ? f.s - f.len / 2 : Infinity) - (this.drivewayJunction(n) ? 0 : CAR_LEN / 2 + stopDist(n));
     for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= o.len + GAP;
     return room >= c.len + GAP;
   }
@@ -385,9 +452,11 @@ export class RoadGraph {
         if (n.phaseTimer >= ph[n.phase].seconds) { n.phaseTimer = 0; n.phase = (n.phase + 1) % ph.length; }
       }
       if (!n.queue.length) continue;
-      // Arrival order; lights and the main road of a yield junction admit every car their signal lets go, the roundabout up to 3,
-      // the rest 1. A car that can't go holds back the cars queued behind it in its lane.
-      const cap = n.control === 'light' || n.control === 'yield' ? Infinity : n.control === 'roundabout' ? 3 : 1;
+      // Arrival order; lights and the main road of a yield junction admit every car their signal lets go, a plain junction every car
+      // whose path crosses none in the box, the roundabout up to 3, the rest 1. A car that can't go holds back the cars queued behind
+      // it in its lane.
+      const dj = this.drivewayJunction(n), plain = n.control === 'none' && !dj;
+      const cap = n.control === 'light' || n.control === 'yield' || plain ? Infinity : n.control === 'roundabout' ? 3 : 1;
       // Ambulance: its whole lane goes first (stable sort keeps the cars ahead of it in order) and runs red into an empty box
       const amb = new Set(n.queue.filter(c => c.kind === 'ambulance').map(c => c.lane));
       if (amb.size) n.queue.sort((p, q) => +amb.has(q.lane) - +amb.has(p.lane));
@@ -403,27 +472,42 @@ export class RoadGraph {
         const o = oppositeOf(plan!, a);
         return o >= 0 && (busy(n.queue, o, m => m !== LEFT) || busy(n.occupants, o, m => m !== LEFT));
       };
+      // Starved: at the front of its lane for MERGE_S with room to go. A starved side road (yield) or permissive left (yield's main road,
+      // or a light showing it yield) stops the traffic it gives way to, so it never waits until it gives up.
       const main = n.control === 'yield' ? mainEdges(n) : [];
+      const starving = (c: Car): boolean => c.wait > MERGE_S && c.lane.cars[c.lane.cars.length - 1] === c && this.fits(n, c);
+      const side = n.queue.some(c => !main.includes(c.lane.edge) && starving(c));
+      const lefty = (a: number): boolean => a >= 0 && n.queue.some(c => {
+        const y = mv.get(c);
+        return !!y && y[0] === a && y[1] === LEFT && (n.control !== 'light' || plan!.phases[n.phase].sig[a][LEFT] === 1) && starving(c);
+      });
+      const left = (c: Car, a: number): boolean => !opposed(a) || (starving(c) && !busy(n.occupants, oppositeOf(plan!, a), m => m !== LEFT));
       const may = (c: Car): boolean => {
         const x = mv.get(c);
         if (plan && (!x || plan.ban[x[0]][x[1]])) return false;
         if (n.control === 'light') {
           if (amb.has(c.lane) && !n.occupants.size) return true;
           const s = plan!.phases[n.phase].sig[x![0]][x![1]];
-          return s === 2 || (s === 1 && (x![1] !== LEFT || !opposed(x![0])));
+          return x![1] === LEFT ? s === 2 || (s === 1 && left(c, x![0])) : s > 0 && !lefty(oppositeOf(plan!, x![0]));
         }
         if (n.control === 'yield') {
-          if (main.includes(c.lane.edge)) return x![1] !== LEFT || !opposed(x![0]);
           // a side road goes into an empty box with no main-road car waiting
-          return !n.occupants.size && ![...n.queue].some(o => o !== c && main.includes(o.lane.edge));
+          if (main.includes(c.lane.edge)) return !side && (x![1] === LEFT ? left(c, x![0]) : !lefty(oppositeOf(plan!, x![0])));
+          return !n.occupants.size && (starving(c) || !n.queue.some(o => o !== c && main.includes(o.lane.edge)));
         }
         // stop: only from a standstill at the line
         if (n.control === 'stop') return c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3;
+        // driveway: into a gap in the road's traffic; after MERGE_S the road keeps clear (held) and only cars that can't stop count
+        if (dj) return !this.roadNear(n, c, o => c.wait < MERGE_S ? o.speed * MERGE_GAP + CAR_LEN : 0);
+        // plain: never past an earlier car it crosses that only waits for the box (first come, first served)
+        if (plain) return ![...n.occupants, ...ready].some(o => this.crosses(n, c, o));
         return true;
       };
-      const held = new Set<Lane>();
+      const held = new Set<Lane>(), ready: Car[] = [];
       n.queue = n.queue.filter(c => {
-        if (held.has(c.lane) || n.occupants.size >= cap || !may(c) || !this.fits(n, c)) {
+        const free = !held.has(c.lane) && this.fits(n, c);
+        if (!free || n.occupants.size >= cap || !may(c)) {
+          if (free) ready.push(c);
           held.add(c.lane);
           return true;
         }

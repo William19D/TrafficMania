@@ -1,4 +1,4 @@
-import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
+import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
 import { PURPOSES, TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
@@ -6,7 +6,7 @@ import type { Building } from './Building.ts';
 import type { Trip } from './Trip.ts';
 import { random } from '../util/rng.ts';
 
-export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
+export const MAX_SPEED = 110, ACCEL = 80, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
@@ -92,9 +92,10 @@ export class Car {
       this.path = findPath(graph, node, this.dest.node, lane.edge, false, lane.edge) ?? findPath(graph, node, this.dest.node, null, false, lane.edge);
       if (!this.path) return 'lost';
     } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
-      // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up
+      // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up.
+      // Never a U-turn: two cars turning back into each other's lane on a short link wait for each other forever
       const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!), false, lane.edge);
-      if (p) this.path = p;
+      if (p && p[1] !== lane.from) this.path = p;
     }
 
     let nextLane: Lane | null = null;
@@ -122,21 +123,26 @@ export class Car {
     if (ahead) gap = ahead.s - this.s - sep(this, ahead);
     else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - sep(this, nextLane.cars[0]!);
 
-    // Intersection control: request a turn and wait before the node
-    const needs = !isDest && graph.needsControl(node);
+    // Intersection control: request a turn and wait before the node. Road traffic only stops at a driveway junction to keep it
+    // clear for a merging car (RoadGraph.held), and only when it still can.
+    const needs = !isDest && graph.needsControl(node, lane.edge);
+    const keep = (n: Node, d: number, via: Edge | null): boolean => !!via && !via.drive && graph.drivewayJunction(n) && graph.held(n, via)
+      && d - stopDist(n) >= this.speed * this.speed / (2 * BRAKE);
     if (needs && this.granted !== node) {
       if (remaining < 70 && !this.queued) { node.queue.push(this); this.queued = true; }
       gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);
+    } else if (!isDest && keep(node, remaining, lane.edge)) {
+      gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && this.path) {
       // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
       // ponytail: 150px horizon covers the fastest driver's braking + reaction headway on a highway (~145px); widen it if KINDS or TIERS get faster
       for (let j = 0, d = remaining; j + 1 < this.path.length && d < 150; j++) {
-        const n = this.path[j + 1]!;
-        d += graph.edgeBetween(this.path[j]!, n)?.length ?? Infinity;
+        const n = this.path[j + 1]!, x = graph.edgeBetween(this.path[j]!, n);
+        d += x?.length ?? Infinity;
         if (n === this.dest.node) break;
-        if (graph.needsControl(n)) { gap = Math.min(gap, d - stopDist(n)); break; }
+        if (graph.needsControl(n, x) || keep(n, d, x)) { gap = Math.min(gap, d - stopDist(n)); break; }
       }
     }
 
@@ -158,10 +164,11 @@ export class Car {
     this.trip.driven += this.speed * dt;
     if (this.speed < 1) this.trip.stopped += dt;
 
-    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that), or once we wait at the
-    // next junction: on a link shorter than ~NODE_R + stopDist + the car, holding the box there gridlocks the two junctions.
+    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that), or once we stop past it
+    // (at the next line, or in a queue through a driveway junction): on a link shorter than ~NODE_R + stopDist + the car, holding
+    // the box there gridlocks the two junctions.
     // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
-    if (this.clearing && (this.s - this.len / 2 > NODE_R || (this.queued && this.speed < 1))) { this.clearing.occupants.delete(this); this.clearing = null; }
+    if (this.clearing && (this.s - this.len / 2 > NODE_R || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';

@@ -2,20 +2,21 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
 import type { Trip } from '../src/entities/Trip.ts';
-import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
+import { Car, GIVE_UP_S, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
+import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 
 declare const process: { exit(code: number): never };
@@ -734,6 +735,58 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 30 * 60 && !w.reports.length; t++) w.update(DT);
   // granted through each driveway junction it keeps its speed: well under the free-flow time's per-junction allowance
   if (w.reports[0]?.outcome !== 'smooth' || w.reports[0].ratio > 0.9) fail(`free flow: ${w.reports[0]?.outcome} at ${w.reports[0]?.ratio.toFixed(2)}x the free-flow time`);
+}
+// Driveway merge: with a steady stream both ways down a street, the road never queues at a driveway junction, and a car leaving a
+// driveway on each side gets in within MERGE_S plus a little (the road keeps clear for it once it has waited MERGE_S)
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.office = 99;
+  for (const x of [60, 1480]) { w.startPlacing('office'); w.placeBuilding({ x, y: 540 }); }
+  for (const x of [740, 780]) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  const [o1, o2] = w.buildings.filter(b => b.kind === 'office'), [h1, h2] = w.buildings.filter(b => b.kind === 'home');
+  for (let i = 0; i < 30; i++) { w.queueTrip(o1, o2, 'commute'); w.queueTrip(o2, o1, 'commute'); }
+  let t = 0;
+  for (; t < 8 * 60; t++) w.update(DT);
+  const out = [w.queueTrip(h1, o2, 'commute'), w.queueTrip(h2, o1, 'commute')];
+  for (; t < 120 * 60 && w.score < 62; t++) {
+    w.update(DT);
+    invariants(w);
+    if (w.graph.nodes.some(n => w.graph.drivewayJunction(n) && n.queue.some(c => !c.lane.edge.drive))) fail('merge: a road car queued at a driveway junction');
+  }
+  if (w.score !== 62 || out.some(r => r.jamS > MERGE_S + 1)) fail(`merge: ${w.score} of 62 arrived, driveway waits ${out.map(r => r.jamS.toFixed(1))}s`);
+}
+// Rush hour: a city of ~100 homes lining a street grid (a driveway junction every ~80px, plain 4-way junctions, three lights on the
+// avenue, a roundabout, a yield T, a one-way piece and a viaduct whose ramps land on two junctions) through two rush hours. Nothing
+// deadlocks (driveway merges, U-turn reroutes, plain junctions taking non-crossing cars together, starved side roads and lefts):
+// no car comes near giving up, no trip fails, and most trips run smooth.
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  const road = (a: number[], b: number[], type = street, level = 0): void => w.commitPath(w.planPath([{ x: a[0], y: a[1] }, { x: b[0], y: b[1] }], level, type));
+  const xs = [200, 520, 840, 1160, 1480], ys = [200, 450, 700, 950];
+  for (const x of xs) road([x, 200], [x, 950], x === 840 ? { tier: 'avenue', lanes: 1, oneWay: false } : street);
+  for (const y of ys) {
+    if (y === 950) { road([200, y], [520, y]); road([520, y], [840, y], { tier: 'street', lanes: 1, oneWay: true }); road([840, y], [1480, y]); }
+    else road([200, y], [1480, y], y === 450 ? { tier: 'avenue', lanes: 2, oneWay: false } : street);
+  }
+  road([200, 700], [1160, 450], { tier: 'avenue', lanes: 1, oneWay: false }, 2);
+  w.tray = { home: 999, shop: 999, office: 999, industry: 999 };
+  let k = 0;
+  const place = (p: Vec): void => { k++; w.startPlacing(k % 11 === 0 ? 'shop' : k % 5 === 0 ? 'office' : k % 37 === 0 ? 'industry' : 'home'); w.placeBuilding(p); };
+  for (const y of ys) for (let x = 220; x < 1470; x += 40) for (const d of [-40, 40]) if ((x + y + d) % 120 < 60) place({ x, y: y + d });
+  for (const x of xs) for (let y = 220; y < 940; y += 40) for (const d of [-40, 40]) if ((x + y + d) % 120 < 60) place({ x: x + d, y });
+  w.setTool('road');
+  for (const b of w.buildings) if (b.kind === 'home') b.residents = 15;
+  for (const [x, y, c] of [[520, 450, 'light'], [840, 450, 'light'], [1160, 450, 'light'], [520, 700, 'roundabout'], [1480, 450, 'yield']] as const) w.placeControl({ x, y }, c);
+  if (w.buildings.filter(b => b.kind === 'home').length < 90 || w.buildings.some(b => !b.connected)) fail('rush hour: town not built');
+  let maxWait = 0;
+  while (w.clock < 34) {
+    w.update(DT);
+    for (const c of w.cars) maxWait = Math.max(maxWait, c.wait);
+  }
+  const smooth = w.stats.smooth / w.stats.arrived;
+  if (maxWait > GIVE_UP_S - 2 || w.stats.failed || smooth < 0.75) fail(`rush hour: longest stop ${maxWait.toFixed(1)}s, ${w.stats.failed} failed, ${(smooth * 100).toFixed(0)}% smooth of ${w.stats.arrived}`);
 }
 // Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
 // (cars, trips, commuters, reports, nodes), its cars on the way head to another workplace, it goes back to the tray, saves and loads, and the sim runs on; a home moved down the street
