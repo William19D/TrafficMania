@@ -727,14 +727,18 @@ export class Game {
       if (b.connected) continue;
       const door = b.node;
       const hits = this.accessEdges().map(e => ({ e, ...distToSegment(door, e.a, e.b) })).filter(h => h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
-      for (const h of hits) {
-        const end = dist(h.point, h.e.a) <= NODE_R ? h.e.a : dist(h.point, h.e.b) <= NODE_R ? h.e.b : null;
-        if (end?.building) continue;
-        const p = end ?? h.point, terr = segmentCrosses(this.terrain, door, p);
-        if (terr.water || terr.mountain || this.hitsBuilding(door, p, DEFAULT_TYPE)) continue;
-        if (g.crossings(door, p, new Set(end ? [end] : []), new Set([h.e]), 0).length) continue;
-        g.addEdge(door, end ?? g.splitEdge(h.e, h.point), { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE, drive: true }, this.today);
-        break;
+      hit: for (const h of hits) {
+        // a road node within DRIVE_SNAP is joined rather than split beside: a stretch shorter than a truck between two junctions
+        // locks both (don't block the box). ponytail: that stub runs at an angle, the place ghost still previews it square to the road
+        const snap = [h.e.a, h.e.b].filter(n => !n.building && dist(h.point, n) <= T.DRIVE_SNAP).sort((p, q) => dist(h.point, p) - dist(h.point, q))[0];
+        if (!snap && [h.e.a, h.e.b].some(n => n.building && dist(h.point, n) <= NODE_R)) continue;
+        for (const end of snap ? [snap, null] : [null]) {
+          const p = end ?? h.point, terr = segmentCrosses(this.terrain, door, p);
+          if (terr.water || terr.mountain || this.hitsBuilding(door, p, DEFAULT_TYPE)) continue;
+          if (g.crossings(door, p, new Set(end ? [end] : []), new Set([h.e]), 0).length) continue;
+          g.addEdge(door, end ?? g.splitEdge(h.e, h.point), { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE, drive: true }, this.today);
+          break hit;
+        }
       }
     }
     this.syncPlans();

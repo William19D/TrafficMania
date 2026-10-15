@@ -421,6 +421,21 @@ for (const kind of ['ambulance', 'car'] as const) {
   if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
   if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
 }
+// Driveways: homes placed facing each other across a street, doors 13px apart along it, share one junction instead of leaving a
+// stretch of road shorter than a truck between two (which locked both), and both commutes arrive
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, street));
+  for (const [k, x, y] of [['home', 400, 470], ['home', 413, 530], ['office', 700, 530]] as const) { w.startPlacing(k); if (!w.placeBuilding({ x, y })) fail(`driveways: ${k} not placed`); }
+  const short = w.graph.edges.filter(e => !e.drive && e.length < TUNING.DRIVE_SNAP);
+  if (short.length || !w.buildings.every(b => b.connected)) fail(`driveways: ${short.length} road stretches under ${TUNING.DRIVE_SNAP}px`);
+  const [H1, H2, O] = w.buildings;
+  w.queueTrip(H1, O, 'commute');
+  w.queueTrip(H2, O, 'commute');
+  for (let t = 0; t < 30 * 60; t++) w.update(DT);
+  if (w.score !== 2) fail(`driveways: ${w.score} of 2 commutes from facing homes arrived`);
+}
 // Happiness: an identical home 60px from a staffed factory scores 25+ points under one 600px away.
 // Fails: career money below 0 at DEBT_DAYS midnights in a row is bankrupt (the countdown says 1 day before it), city happiness
 // under failHappy from day FAIL_FROM_DAY at FAIL_DAYS midnights is 'unhappy'; creative and the tutorial never fail

@@ -115,6 +115,7 @@ export const TUNING = {
   UPKEEP_RATE: 0.02,         // of a road's build price, per day
   REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
   ACCESS_R: 60,              // px from a door to the road its free driveway joins
+  DRIVE_SNAP: 30,            // px: a driveway joins a road node this close instead of splitting (a truck plus its gap fits between junctions)
   // Day clock: game seconds per in-game day (1x = 4 real minutes, 10 s per hour); Day 1 starts at 06:00
   DAY_SECONDS: 240, START_HOUR: 6,
   // Trips: one commuter (car) = PEOPLE_PER_CAR workers; homes start START_OCC full; departures ~ N(MEAN, SD) hours clamped to MIN..MAX
