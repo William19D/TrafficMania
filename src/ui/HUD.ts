@@ -116,8 +116,6 @@ const PRESETS: [Preset, string, string][] = [
 ];
 const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
 const compass = (a: number): string => COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8];
-// Rush hours tinted on the clock bar
-const RUSH = new Set([7, 8, 9, 16, 17, 18, 19]);
 const pad = (n: number) => String(n).padStart(2, '0');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
@@ -192,7 +190,7 @@ interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<ty
 export class HUD {
   private toolBtns: HTMLButtonElement[];
   private speedBtns: HTMLButtonElement[];
-  private cells: HTMLElement[];
+  private dayBar: HTMLElement;
   private tip: HTMLElement;
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
@@ -244,7 +242,7 @@ export class HUD {
         <span class="sep"></span>
         <div class="clock" tabindex="0" data-tip="">
           <span class="ck num"></span>
-          <span class="hours">${Array.from({ length: 24 }, (_, h) => `<i${RUSH.has(h) ? ' class="rush"' : ''}></i>`).join('')}</span>
+          <span class="day" aria-hidden="true"><i></i></span>
         </div>
       </div>
       </div>
@@ -339,7 +337,7 @@ export class HUD {
       <div class="tip" role="tooltip" hidden></div>`;
     this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
-    this.cells = Array.from(root.querySelectorAll<HTMLElement>('.hours i'));
+    this.dayBar = this.q('.day');
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
@@ -983,14 +981,13 @@ export class HUD {
       if (up) flash(s, 'bump');
     }
 
-    // Clock in 10-minute steps: Day 4 · 08:20, past hours filled, the current one filling up
+    // Clock in 10-minute steps: Day 4 · 08:20; the day bar fills by the same steps (144 a day, under a pixel each)
     const tick = Math.floor(g.clock * 6);
     if (tick !== L.clock) {
       L.clock = tick;
       const h = Math.floor(g.hour), m = Math.floor((g.hour - h) * 6) * 10, time = `${pad(h)}:${pad(m)}`;
       this.q('.ck').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Day </span><span class="short">D</span>${g.day} · ${time}`;
-      this.cells.forEach((c, i) => { c.classList.toggle('past', i < h); c.classList.toggle('now', i === h); });
-      this.cells[h].style.setProperty('--p', String(m / 60));
+      this.dayBar.style.setProperty('--p', String((h + m / 60) / 24));
       this.q('.clock').dataset.tip = `Day ${g.day}, ${time}. Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift;`
         + ' shoppers go out from mid-morning to the evening. Taxes and upkeep are paid by the hour.';
     }

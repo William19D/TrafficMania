@@ -50,9 +50,9 @@ Scaling: `#hud { font-size: clamp(13px, .75vw + 4px, 16px) }`. Everything is siz
 ### B. Status
 - **Speed**: a segmented control, `Pause [Space]`, `1x`, `2x`, `4x`. Each button has an icon and a text label, and the active one is `aria-pressed`. While paused the panel gets a dashed outline and the clock reads "Paused".
 - **Trips** `[car] 312 · 86% smooth`: today's arrivals and their smooth share. Tooltip: every outcome and the all-time arrivals.
-- **Clock** `Day 4 · 08:20` in 10-minute steps, with a 24-cell bar.
-  - Rush-hour cells (7-9, 16-19) are tinted.
-  - Past hours are filled, and the current hour fills by the minute.
+- **Clock** `Day 4 · 08:20` in 10-minute steps, with one compact day bar (4.5em, 3.5em on phones).
+  - Rush hours (7-10, 16-20) are tinted bands on the track.
+  - The elapsed day fills from the left in the same 10-minute steps, and an accent tick marks now.
 
 ### C. Views, Menu, Help
 - **Views**:
@@ -189,7 +189,7 @@ Tokens (`:root`):
 - **Below 1280px**: A and B stack in one top-left column (`.topl`), so a wrapped resources row pushes the status bar down instead of under it.
 - **Phones (768px and below)**:
   - Chips are icons and numbers only. The milestone and the legend hide.
-  - The clock shows `D4 · 08:20`.
+  - The clock shows `D4 · 08:20` and its day bar shrinks to 3.5em; on narrow phones the clock wraps under the speed buttons.
   - The views stack under Help, and the panel column sits beside them.
   - The dock spans the width and scrolls sideways with scroll-snap. Buttons are 56px and the key badges hide.
   - Toasts span the width.

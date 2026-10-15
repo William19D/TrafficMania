@@ -217,7 +217,7 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 
 **B, status:**
 - The speed segmented control as today.
-- Clock: `Day 4 · 08:20` with a 24-cell bar. Cells 7-9 and 16-19 are tinted `--accent-soft` (rush hours), past cells are filled ink, and the current cell fills by minute. "Paused" replaces the text while paused.
+- Clock: `Day 4 · 08:20` with one day bar (P1: was 24 cells, too wide for the panel). Rush hours 7-10 and 16-20 are tinted bands on the track, the elapsed day fills in ink, and an accent tick marks now. "Paused" replaces the text while paused.
 - Trips: `[car] 312 · 86% smooth` (today's arrivals and smooth share).
 
 **C:** Help `?` plus Menu `≡` (pause menu).
