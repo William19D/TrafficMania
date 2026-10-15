@@ -435,3 +435,21 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - **Docs.** The README and `docs/hud-design.md` are rewritten for this game. The old screenshots went, and new ones are in `docs/screenshots` (overview, junction, analysis, tutorial).
   - **simcheck.** It checks that every `done` predicate leaves `serialize(game)` unchanged and plays the tasks through on a scripted level-1 town. It also checks facing homes: no road stretch under `DRIVE_SNAP`, and both commutes arrive.
   - **Known gap.** Short trips on empty roads often grade `wait`: the free-flow `ideal` leaves out pulling away from the door and the turns, so `SMOOTH_X` 1.5 is tight under about 10 s.
+
+**S13 Playtest and balance.**
+- Browser pass (Vite dev server, career normal and creative): menu, new game, every road tier, Grid, Light, Roundabout, the junction panel (control picker, phase seconds, presets, turn bans), Interchange (a blocked pick with its reason, then a diamond built), Edit (retype, lanes, bend), Demolish, place a batch, the level-up modal, heat map, follow a car, trip reports, metrics, save and load through the pause menu, the tutorial replay and the game-over modal. No console errors.
+- Balance bot (a scratch script outside the repo): builds the starter town's street, links every workplace, places each batch beside a road, extends the network when there is no room, widens hot roads and lights busy junctions. Seeds over temperate, alpine and archipelago, on every difficulty, 10 to 20 days.
+  - Normal reaches level 3 on day 3 and level 10 around day 10, with no bankruptcy. Hard and easy are the same, but slower or faster.
+  - A player who builds nothing loses the residents on day 5 on every difficulty.
+  - Cars peak at about 400 with 3,200 residents on day 18, under `MAX_CARS` (450).
+- As built (fixes the bot found):
+  - **Short links.** A car granted onto a link too short to clear the box before the next junction's line kept both junctions locked. It now lets go of the box behind it once it waits at the next line (`Car.update`), and its rear may overhang that box by a few pixels.
+  - **Granted cars keep their speed.** The `TURN_SPEED` approach cap now applies only until the grant (roundabouts always). The corner speed still applies. A street lined with driveways no longer crawls.
+  - **Free-flow time.** `Trip.ideal` adds `START_S` (0.6 s) for leaving the door and `JUNCTION_S` (0.4 s) for each junction on the free-flow route. Short trips on empty roads now grade `smooth`, which closes S12's known gap.
+  - **Zero-length driveways.** `connect()` could split a road at a door that road ends on. That made a 0px edge, whose noise density was NaN, and then money and happiness turned NaN. A road point within `NODE_R` of a door now only takes the snap node.
+  - **Balance: nowhere to go.** A home's `trips` part defaults to 0.6 only when the home has a job or a reachable shop, and to 0 otherwise. A home without a road scores 0 in every part, so a do-nothing city fails. Before this, a home without a road scored 33, which is above every `failHappy`.
+- simcheck: the short-link gridlock (24 crossing trips arrive), free flow along a home-lined street (smooth, under 0.9 of the ideal), the no-roads career game fails by day `FAIL_FROM_DAY + FAIL_DAYS`, and no edge under 1px in the car invariants. The factory-penalty homes now reach a shop.
+- Known gaps:
+  - Trip times read long in game time (`HOUR` = 10 game s), so a smooth cross-map commute shows as "3.1 h". Shrinking it means a longer `DAY_SECONDS` or a time scale for display only.
+  - The economy stays generous on normal: taxes outrun upkeep by about 3x through level 10.
+  - A permissive left at a light can starve behind steady oncoming traffic until it gives up (`GIVE_UP_S`). Protected lefts are the player's fix.
