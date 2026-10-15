@@ -317,7 +317,7 @@ export class HUD {
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${toolBtn('road')}
         ${toolBtn('grid')}
-        <button class="lane rmode" data-action="curve" data-key="V"></button>
+        <button class="lane wide rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
@@ -1019,7 +1019,7 @@ export class HUD {
       this.q('.stepper').hidden = g.tool === 'grid';
       const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
       rm.hidden = g.tool !== 'road';
-      rm.innerHTML = icon(m);
+      rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;
       rm.setAttribute('aria-label', `Road shape: ${m}. Switch [V]`);
       rm.dataset.tip = RMODE_TIP[m];
       this.root.querySelectorAll<HTMLElement>('[data-grid]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.grid) === g.gridSize)));

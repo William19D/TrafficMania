@@ -410,6 +410,7 @@ kbd {
   min-width: 40px; min-height: 40px;
 }
 #hud .lane.wide { width: auto; padding: 0 .5em; }
+#hud .lane.rmode { width: 5.25em; } /* fixed: 'Curve' and 'Straight' must not resize the dock under the cursor */
 .lane .ico { width: 1.1em; height: 1.1em; }
 .lane small { font-size: var(--label); font-weight: 700; line-height: 1.1; white-space: nowrap; }
 #hud .lane[aria-pressed="true"] { background: var(--accent); color: #fff; }
@@ -598,8 +599,8 @@ kbd {
   .topl > * { position: static; transform: none; pointer-events: auto; }
   .res { max-width: calc(100vw - 88px); }
 }
-/* under 1280px the dock no longer fits one row (Buildings, Edit and Demolish fell off the right edge): it wraps to two */
-@media (min-width: 769px) and (max-width: 1279px) {
+/* under 1320px the dock no longer fits one row (Buildings, Edit and Demolish fell off the right edge): it wraps to two */
+@media (min-width: 769px) and (max-width: 1319px) {
   #hud { --dock-h: 9em; }
   /* both edges set (not left 50% + translate, which caps the shrink-to-fit width at half the screen), centred by its auto margins */
   .dock { left: var(--edge-l); right: var(--edge-r); transform: none; width: fit-content; max-width: none; margin-inline: auto; flex-wrap: wrap; justify-content: center; row-gap: .375em; }
