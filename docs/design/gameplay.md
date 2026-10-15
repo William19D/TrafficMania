@@ -1,7 +1,7 @@
 # TrafficMania gameplay design: the traffic-management pivot
 
 Target: a traffic-management city game. The gameplay logic follows *Traffic Architect* (buildings generate trips, the player designs the network, every car is simulated and routes around traffic, analysis tools show the bottleneck). The presentation and city layer follow *Trafficity* (flat 2D top-down, a simple zoned economy, level-ups hand you a batch of buildings to place). The art stays our own flat style.
-Out of scope: public transport and rail, map editor, Workshop, multiplayer, outside (map-edge) connections.
+Out of scope: public transport and rail, map editor, Workshop, multiplayer. Outside (map-edge) connections came in with P6.
 Rule for later steps: where this spec and the code disagree, the code wins for what exists and the spec wins for what is new. Deviations are written back into this file by the step that makes them.
 
 Kept as-is: the pen-tool road placement (auto tangents, bend by drag), elevation 0..10 (viaducts, tunnels, L6+ clears mountains), lanes 1/2/3 per direction plus one-way, the Edit tool (select a run, retype, flip, bend), and all the car physics in `Car.ts`/`RoadGraph.ts` (lane by turn, lane changes, don't block the box, deadlock breaker, vehicle kinds, turn arcs, brake lights, roundabout ring). The flat look also stays: white roads with a gray outline and a thin yellow centre line, periwinkle water, layered gray mountains, soft shadows, small outlined cars.
@@ -142,6 +142,7 @@ HEAT_TAU: 10, ACCESS_R: 60,
 ### Trip generation
 - **Commuters.** Each home has `floor(residents * EMPLOY_RATE / PEOPLE_PER_CAR)` commuters. Assignment (at 03:00 daily, and one in-game hour after any building or network change) gives each unassigned commuter a reachable workplace (shop/office/industry) that has free slots (`jobs / PEOPLE_PER_CAR`). The pick is gravity-weighted: `w = freeSlots * exp(-dist / GRAVITY_D)` (Euclidean). A commuter whose workplace became unreachable loses it. Its `depart` hour is drawn once from N(8:00, 0.75h), clamped to 6..10. At `depart` a `commute` trip is queued. When it arrives, the trip moves to `work.parked` and the commuter is `away`. At `depart + WORK_HOURS` a `return` trip is queued from work.
 - **Shopping.** Per home per hour: `shopAcc += residents / PEOPLE_PER_CAR * SHOP_RATE * SHOP_CURVE[h] * tripsMult`. Each whole unit queues a `shop` trip to a gravity-chosen reachable shop (capacity = jobs). The car stays parked `SHOP_STAY` hours, then a `return` trip goes home. Each arrival is one customer: `stock -= 1` and the shop is paid.
+- **Outside connections (P6).** See section 5, P6: once a highway exit is linked, factories export and import, short shops import goods, visitors come to shops and offices, and commuters from outside fill free job slots.
 - **Freight.** Per industry per hour within `TRUCK_HOURS`: `truckAcc += TRUCKS_PER_DAY * staffed * tripsMult / 12`. Each unit queues a `freight` truck to a reachable shop. The pick is gravity-weighted by `(1 + max(0, 20 - stock))`, so empty shops pull goods. Arrival: `stock += STOCK_PER_TRUCK`, then an immediate empty `return` truck. `staffed = commuters parked at it now * PEOPLE_PER_CAR / jobs`. No workers means no trucks and no pollution, so a factory only pollutes during work hours.
 - **Spawning** reuses `trySpawnCar`: the first pending trip whose route exists and whose first lane has room goes out. Above `MAX_CARS`, trips wait.
 - **Reachability**: undirected component ids, recomputed on graph change. `findPath` returning null at departure is the final judge. A trip with no route is reported `noroute` and no car spawns.
@@ -168,7 +169,7 @@ ponytail: Euclidean gravity and undirected components. Use network distance and 
 - **Growth**, per hour, as 1/24 of the daily rate: `happy >= GROW_HI`: +`GROW_FAST` of capacity. `GROW_LO..GROW_HI`: +`GROW_SLOW`, but only with a door edge. `< GROW_LO`: -`SHRINK`. Residents are clamped to 0..capacity. Population = Σ residents.
 
 ### Economy
-- **Road price** = `len / TILE * laneFactor(type) * TIERS[tier].cost * m` (no rounding: money is a float and the HUD rounds, so splits and same-day refunds add up exactly). `m` = `VIADUCT_X + VIADUCT_LEVEL_X * level` for level >= 1; on the ground `m = 1 + (BRIDGE_X - 1) * water + (TUNNEL_X - 1) * mountain`, where `water`/`mountain` are the shares of the edge over water / through a mountain (`segmentCrosses` samples every 6px). So a long road over a narrow river only pays the bridge rate for the wet stretch.
+- **Road price** = `len / TILE * laneFactor(type) * TIERS[tier].cost * m` (no rounding: money is a float and the HUD rounds, so splits and same-day refunds add up exactly). `m` = `VIADUCT_X + VIADUCT_LEVEL_X * level` for level >= 1; on the ground `m = 1 + (BRIDGE_X - 1) * water + (TUNNEL_X - 1) * mountain`, where `water`/`mountain` are the shares of the edge over water / through a mountain (`segmentCrosses` samples every 6px). So a long road over a narrow river only pays the bridge rate for the wet stretch. A ground road is also split where it goes onto or off water or a mountain (`shoreSplits`, dry points at least TILE/2 apart), so only the crossing is a bridge or tunnel edge and the land either side keeps building access and junctions (polish playtest: a straight road over a river used to be one bridge edge end to end, and no building could join it).
 - **Tiers** (cost is $/tile at `laneFactor` 1; `limit` is in px/s, and `MAX_SPEED` = 110 = avenue):
 
 | Tier | Lvl | Limit | km/h (UI) | Lanes | One-way | Cost | Upkeep/tile/day | Noise | Building access |
@@ -184,6 +185,7 @@ ponytail: Euclidean gravity and undirected components. Use network distance and 
 - **Controls**: light `LIGHT_COST` + `LIGHT_UPKEEP`/day, roundabout `ROUNDABOUT_COST` + `ROUNDABOUT_UPKEEP`/day. Demolishing a control refunds it under the road rule.
 - **Refund** = price x (`edge.day === today` ? `REFUND_SAME_DAY` : `REFUND_LATER`). The price is recomputed from the geometry, so splits need no bookkeeping. Retype and bend: a price rise is paid in full, a drop (a downgrade, a shorter bend) comes back under the old road's refund rule, so editing never refunds more than demolishing.
 - **Driveways** (`drive: true`): free, street tier, 1 lane, no refund.
+- **Buildings**: placing one is free. Demolishing one puts it back in the tray (career) for `MOVE_COST`, so it can go somewhere better; there is no refund because it cost nothing. It costs a move because a home placed from the tray moves in at `PLACED_OCC`: a free demolish and re-place was a free move and refilled an abandoned home (review). Moving one costs `MOVE_COST` ($300) in career (free in creative): cheap enough to fix a bad spot, dear enough that shuffling buildings is not a free way to steer traffic.
 - **Upkeep**, accrued hourly: `Σ price * UPKEEP_RATE / 24 * upkeepMult` plus control upkeep.
 - **Taxes**, accrued hourly: `TAX_RES / 24 * residents * (0.5 + 0.5 * Q_city) * taxMult`. `Q_city` = mean outcome score of today's trips (0.6 before any trip).
 - **Business**, paid on arrival x `taxMult`: commute `TAX_COMMUTE`; shopping `TAX_SHOP` (x0.5 when the shop has `stock <= 0`); freight `TAX_FREIGHT`.
@@ -217,13 +219,14 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 
 **B, status:**
 - The speed segmented control as today.
-- Clock: `Day 4 · 08:20` with a 24-cell bar. Cells 7-9 and 16-19 are tinted `--accent-soft` (rush hours), past cells are filled ink, and the current cell fills by minute. "Paused" replaces the text while paused.
+- Clock: `Day 4 · 08:20` with one day bar (P1: was 24 cells, too wide for the panel). Rush hours 7-10 and 16-20 are tinted bands on the track, the elapsed day fills in ink, and an accent tick marks now. "Paused" replaces the text while paused.
 - Trips: `[car] 312 · 86% smooth` (today's arrivals and smooth share).
 
 **C:** Help `?` plus Menu `≡` (pause menu).
 
 **D, dock**, left to right. Locked tools show a `lock` icon, are `aria-disabled`, and a click toasts `Unlocks at level N`:
 - `Road [1]`, `Grid [2]`
+- road shape (Road tool only, where Grid shows its block size): one toggle whose icon and caption (`Curve` / `Straight`, fixed width) are the active mode, `V` switches. **Curve** (default, `Game.roadCurve`): a new road bends to meet the roads at its ends (`tangentAt`). **Straight**: always one straight segment. Holding `Shift` while placing makes the road straight in Curve mode; holding `Ctrl` or `Alt` turns its end around the start in 15° steps (`snapAngle`). Pressing on the end point and dragging bends the road in both modes. The preview label leads with `Curve`, `Straight` or `Bend` (P4: the player could not choose between a curve and a straight road). A two-button segment did not fit the dock at 1280px, hence the single toggle. Polish playtest: the dock did not fit between 1340px and 1800px nor under 1280px (Buildings, Edit and Demolish fell off the right edge, so a player on a 1366 or 1440px screen could not demolish, move or pick buildings with the mouse). Now the elevation hint and the tier caption hide and the tools pack tighter below 1800px, and from 769px to 1319px (the toggle's caption needs the extra 40px) the dock spans the screen and wraps in two rows (road options, then the other tools; `.brk`), with `--dock-h` two rows tall so the bottom-left column clears it; under 1024px the elevation picture and the one-way caption hide too.
 - tier picker: 5 small swatch buttons (dirt beige, street, avenue, boulevard with a green median, highway gray), tooltip `Avenue · 50 km/h · 1-2 lanes · $90/tile`
 - lanes 1/2/3 (disabled outside the tier's range) | One-way | Flip
 - elevation stepper (as today)
@@ -232,7 +235,7 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 - `Edit [6]`, `Demolish [7]`
 - `Heat map [C]` (a toggle, `aria-pressed`)
 
-Other keys: `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
+Other keys: `V` straight / curved roads, `Shift` one straight road, `Ctrl`/`Alt` 15° steps, `R` rotates a building ghost, `M` metrics, `Shift+M` mutes or unmutes the sound, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
 
 **E toasts** and **F tutorial** as today. New error texts go into `FRIENDLY`:
 - `Not enough money` -> "Not enough money: wait for taxes or demolish a road built today for a full refund"
@@ -250,19 +253,31 @@ Other keys: `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follow
 - **Metrics** `[M]`: 6 small-multiple SVG sparklines (queued cars, average trip time, throughput/h, money, population, happiness) over the last 7 days, each with the current value. Redrawn once per hourly sample only.
 - **Trip feed** `[T]`: the last 30 reports as one-liners in the resident's voice ("Smooth ride to work, 2 min", "Waited ages on the way to the shop", "Took a long detour to work", "Gave up driving to the factory", "No road to work"), each with an outcome icon. Above the list, today's counts per outcome. A click centres the camera on the origin.
 
-**H, batch tray** (bottom-left above the dock, vertical): one card per zone with a count (`[home] Home ×8`). A click enters `place` with a ghost footprint: green/red validity with a reason label, the door marker, and a dashed `POLLUTION_R` ring for industry. Placement rules:
+**H, batch tray** (bottom-left above the dock, vertical, headed "Pick a building [B]"): the building picker, one card per zone with buildings left, each with a small front-view picture in the zone's map colours and its count (`[home] Home ×8`; `∞` in creative). The held zone's card is highlighted. B picks the first zone with buildings left; B again steps to the next one, and past the last it puts the tool away. When the held zone runs out, the tool takes the next zone left (in tray order, wrapping) with a toast, or goes back to Road when the tray is empty. While the tray holds buildings, the dock's Buildings button shows the count as a badge and its icon turns accent. A click on a card enters `place` with a ghost footprint: green/red validity with a reason label, the door marker, and a dashed `POLLUTION_R` ring for industry. Placement rules:
 - no overlap with water, mountains, roads or buildings (4px margin), and fully inside the map;
 - the ghost auto-aligns to the nearest road within 80px, and `R` rotates it 90°;
 - a non-highway ground road within `ACCESS_R` of the door gets an auto driveway, otherwise the building gets a "No road" badge.
 
 The tool stays in `place` until the count hits 0 or Esc.
 
+**Moving and demolishing buildings.**
+- **Demolish** `[7]` takes buildings too: hovering one outlines it red with `Demolish home · back to the tray · $300` (career; `Not enough money` refuses the click). An empty building goes on the click. An occupied one (residents, or commuters working there) takes two clicks: the first arms it (red outline, toast `Click again to demolish: 18 residents move out` / `N workers lose their jobs`), the second removes it; clicking anything else disarms it. The building card has the same `Demolish` button.
+- **Move**: drag a building with **Edit** `[6]` (hover: `Home: click for details · drag to move`), or press `Move · $300` on its card. The place tool then holds that building: the ghost follows the cursor with the usual rules (no tray needed, `Not enough money` below `MOVE_COST`, its own footprint and driveway do not block it), its old spot keeps a dashed accent outline, and the label reads `Move here · $300`. Letting go of the drag, or a click, sets it down; a refused spot keeps it held. Esc puts it back and returns to Edit. After a move, Edit opens its card.
+- What a demolish does (`Game.demolishBuilding`): the driveways go (cars on them back to their origin's door), and the door node stays as a plain joint only if a road runs through it. Its commuters move out, and workers there lose the job (reassigned within the hour). A car on its way to it (not a return leg) heads to another place of its purpose (gravity pick: any workplace for a commute, a shop for shopping and freight); with none, and for every other trip from or to it (waiting, parked, or a return leg), the trip ends without a report and its commuter is home again. Its trip reports go too, so nothing (cars, trips, commuters, reports, nodes, saves) points at a removed building.
+- What a move does: the building keeps its object, so residents, jobs, commuters, waiting and parked trips stay. Its driveways go, it gets a new door node and `connect()` lays the new driveway; cars on their way to it reroute to the new door.
+
 **Modals:**
 - Level up: `Level 4!`, unlock list, batch rows, grant, Enter.
 - Game over: `Bankrupt` / `The residents left`, with stats day, population, level, trips, smooth%, and buttons Play again / Main menu.
 - Victory.
-- Pause menu: Resume, Save, Load, Main menu, seed shown with a copy button.
-- Main menu (S11).
+- Pause menu: Resume, Save, Load, Sound, Main menu, seed shown with a copy button.
+- Main menu (S11), with the same Sound entry.
+
+**Sound** (`src/ui/Sound.ts`, P7: the game had no audio at all). Everything is synthesized with Web Audio, no files. The AudioContext is created on the first pointer or key press (autoplay policy) and suspended while muted or while the tab is hidden, so a muted game spends no CPU on audio.
+- Effects: a click on any button and a faint tick when the mouse comes onto one. The sim raises cues in `Game.sfx` (a set, so one per kind per frame): `build` on any spend (roads, controls, retypes, interchanges), `demolish` on a refund or a demolished building, `place` on a placed or moved building. The HUD plays an error buzz for every `say()` whose text matches `ERROR_RE` (`Game.said` counts repeats of the same text). It also plays an income blip at most every 1.5 s while business or trade income comes in, a fanfare on a level-up, and an alarm whenever the fail countdown (`Game.alarm`) starts or ticks down, and on game over.
+- City hum: looped brown noise through a lowpass. Its volume and brightness follow the cars on screen (up to 50) and the zoom, and it ducks to a quarter while paused, in a menu or behind a modal. A car on screen that has stood still for 8 game seconds may honk once, at most one horn every 5 s, panned to its side of the screen.
+- Music: a calm generative loop at 100 bpm. Triangle pads on Fmaj7, Em7, Dm7 and Cmaj9 change every two bars, with a sine bass on each bar and a sparse C-pentatonic melody into a feedback echo. A 250 ms timer schedules it 1 s ahead.
+- The Sound menu has Sound on/off, Master volume, Effects and city volume, Music on/off and Music volume. The mix is saved in `localStorage` (`tm_audio`), and the effects slider plays a sample when you let go of it. `M` was already Metrics, so mute is `Shift+M`. Polish playtest: the noise overlay's button was a speaker, so a player looking for the sound got a map overlay and no sound control on screen. The overlay now has a waves icon, and a speaker button (muted: crossed out) next to the menu button mutes or unmutes, mirroring the mix whichever way it changes.
 
 **Canvas:**
 - Buildings are flat rounded rects with a soft shadow, in zone colours: home `#F4A261`, shop `#4EA8DE`, office `#8E7CC3`, industry `#9E9E9A` with stripes and a chimney dot. A white door notch faces the road, and parked cars or pending trips show as dots by the door. An unconnected building has a dashed danger outline.
@@ -453,3 +468,91 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - Trip times read long in game time (`HOUR` = 10 game s), so a smooth cross-map commute shows as "3.1 h". Shrinking it means a longer `DAY_SECONDS` or a time scale for display only.
   - The economy stays generous on normal: taxes outrun upkeep by about 3x through level 10.
   - A permissive left at a light can starve behind steady oncoming traffic until it gives up (`GIVE_UP_S`). Protected lefts are the player's fix.
+
+**P5 Cars stuck without a way out.**
+- Report: cars stuck for good in a city of homes lining streets, with driveways close to junctions and a ramp landing near a 4-way junction (41% smooth trips at rush hour).
+- Reproduced headlessly: generated street grids with a home every ~40px on both sides, plain 4- and 5-way junctions, lights, a roundabout, a yield, a stop, a one-way piece and a viaduct whose ramps land on two junctions, soaked 3 days with growth on, logging every car stopped over 10 s and the wait-for chain behind it (scratch script, not in the repo).
+- Root causes and fixes:
+  - **U-turn reroutes deadlock.** After `REROUTE_S` a car could reroute into a U-turn at the junction ahead. Two of them on a short link waited for room in each other's lane forever, and the jam behind them gave up. The reroute now never takes a U-turn (`Car.update`). A U-turn is still taken when it is the only route (dead ends, a one-way ahead).
+  - **Driveway junctions were full junctions.** A node where driveways meet one road (two road arms, `RoadGraph.drivewayJunction`) queued every car one at a time with don't-block-the-box, so a home-lined street was a stop line every 40px. Now the road's traffic passes it like a bend (`needsControl(n, via)`, `turn` skips it). A driveway car merges into a gap of `MERGE_GAP` (1 s) in the traffic it meets (a right turn meets only the traffic heading into its lane), and needs only room past the node. After `MERGE_S` (1 s) at its line the road keeps clear for it (`held`): road cars that can still stop wait at the line, and the merge waits only for cars in the box or too close to stop. The oncoming traffic a left turn crosses is held only once the left turn's lane has room.
+  - **Plain junctions took one car at a time.** A plain junction (control None, not a driveway junction) now grants every car whose path across the box crosses none in it (`crosses`: the ends of two paths interleave around the node; same exit road or a U-turn always conflict), first come first served: a car never passes an earlier car it crosses that only waits for the box. Opposite straights, rights, and opposite lefts go together.
+  - **Starved side roads and lefts.** A yield side road and a permissive left (yield's main road, or a light showing it yield) that have been at the front of their lane for `MERGE_S` with room to go stop the traffic they give way to, so they never wait until they give up. This closes S13's known gap.
+  - **Box held from a queue.** A car clearing a junction let go of the box only when it waited at the next line; at a driveway junction it never queues, so a queue backed up through the box held it and gridlocked the block. It now lets go once it stops past the box.
+  - **Stop line behind a joint** (polish playtest). A car only queues at the node its lane leads to, but it stopped for the line of the next junction wherever that line lay. Where a road crosses a curve 12-20px past one of the curve's plain joints, the line falls before the joint: the car stopped short of the joint, never queued, and every car behind it gave up after `GIVE_UP_S`, even on an empty road. Now a car whose next junction's line lies short of its lane's end rolls across the joint onto the short link and stops there (`Car.update`).
+- Before / after (3 days, seed 2, about 180 homes, 12 residents each at the start; after on the right):
+  - Plain junctions only: 55% / 85% smooth, 148 / 6 stops over 10 s, 8 / 0 failed trips, 13 / 0 deadlock samples.
+  - Lights on the grid crossings: 60% / 86% smooth, 308 / 0 stops over 10 s (longest 20 s / 9.7 s), 19 / 0 failed, 25 / 0 deadlock samples.
+  - Twice the homes (overloaded): 20% / 49% smooth, 3,363 / 153 stops over 10 s, 1,230 / 432 failed. The failures left are trips waiting at a door while the city is at `MAX_CARS`; 560 / 1 gave up on the road.
+- simcheck: a driveway merge (a stream both ways down a street never queues at a driveway junction, and a car out of a driveway on each side waits at most `MERGE_S` + 1 s) and a rush-hour town (about 100 homes on a street grid with lights, a roundabout, a yield, a one-way piece and a viaduct ramping onto two junctions, through two rush hours: no car stopped over `GIVE_UP_S` - 2 s, no failed trip, at least 75% smooth; the old sim fails it at 20 s, 1 failed, 70%).
+- Known gaps:
+  - Lane changes need `LC_M` (110px) clear of both nodes, so on a road lined with driveway junctions (40px links) a car never changes lane mid-edge; it picks its lane for the next real junction at the node instead.
+  - A car turning left into a driveway does not yield to oncoming traffic.
+  - The smooth grade still counts `JUNCTION_S` for every driveway junction on the free-flow route, though the road no longer slows down there.
+
+**P6 Outside connections: export, import, visitors.**
+- Report: no roads leave the city; factories should export and import, and visitors should arrive.
+- Map: `generateTerrain` rolls 2-4 exits last (`Terrain.exits`, so the rest of a seed's map is unchanged). Each is an `EXIT_STUB` (160px) stub square to an edge, from the middle 60% of it, over dry land, at least (w + h) / 6 from the others. A map with wet edges (archipelago) can get fewer than 2. The starter town keeps 90px clear of the stubs.
+- Model: an exit is a `Building` of kind `'gate'` (`Site = Zone | 'gate'`; `ZONES.gate` is labelled "Highway exit", has no residents or jobs and is never in the tray or `ZONE_KEYS`). Its door is on the map edge and its footprint lies off the map. `Game.addExits()` (constructor) adds each gate with a free two-way 2-lane highway stub (`exitEdge`: no price, upkeep or refund; Demolish refuses it with a toast and a red hover label). The stub's edges carry `Edge.exit` (saved, kept by `splitEdge` and retype), so a road joining or crossing the stub's middle leaves both halves free and undemolishable (review: the inner half used to become a paid highway that charged upkeep and refunded ~$440 the player never paid). Retype and bend still work on it: a gate is not a doorway, so its stub may stay a highway. `buildingUnder` skips gates, so they cannot be picked, moved or demolished. Trips use the gate like any door: they spawn at it, and a trip to it never parks (the car leaves the map).
+- Flows (hourly, only for buildings whose road component holds a gate; `linkedExits()` is the set of gates a town building reaches). Each trip uses a gravity-picked linked gate.
+  - **Exports**: `EXPORT_SHARE` (0.4) of a factory's trucks go to the exit instead of a shop. All of them go when no shop is reachable.
+  - **Imports**: a factory imports `IMPORTS_PER_DAY` (3) x staffed trucks of raw materials in `TRUCK_HOURS`. They unload and go back empty. A shop at or under `IMPORT_STOCK` (5) goods orders `IMPORT_SHOP` (0.5) trucks per hour from outside.
+  - **Visitors**: new purpose `visit` (teal, "Visitors" in the legend). `VISITS` per day, shop 4 and office 2, along `SHOP_CURVE`. They stay `SHOP_STAY` and buy one good at a shop.
+  - **Commuters from outside**: in hours `COMMUTE_MIN`..`COMMUTE_MAX`, `OUTSIDE_JOBS` (0.5) of a workplace's job slots that no resident holds get a commute from the exit. It stays `WORK_HOURS` and drives back. These commuters count toward `staffed`, which now counts parked commute trips instead of parked commuters.
+  - New building accumulators `importAcc` and `visitAcc`.
+- Money: an export reaching the exit pays `TAX_EXPORT` $40, an import arriving pays `TAX_IMPORT` $15 and a visitor arriving pays `TAX_VISIT` $8, each x taxMult. They go to the new `Ledger.trade`, which is in the money chip's net/day and in its tooltip. A commuter from outside pays `TAX_COMMUTE` as business. Balance: a town of 330 residents with a staffed factory, a shop and an office earns about $280/day in trade against about $1,500 in taxes. That is about 10 trade trips a day per factory, well under `MAX_CARS`.
+- Metrics: `Sample.trade` counts exports, imports and visitors per hour, shown as the "Trade and visitors per hour" chart (older samples read 0).
+- HUD and map: past the gate, the highway runs on off the map under a fade, with an arrow in and an arrow out and a green "WEST EXIT" style sign. An unlinked exit pulses a dashed ring at its stub's end with "Connect a road here: exports, imports and visitors". The money tooltip says when no exit is linked. Linking one toasts "Highway exit linked". Trip names: Export, Import, Visitor, Commute from outside, Leaving town; a report going out reads "to the highway".
+- Save: building accumulators are saved. A save from before P6 (its buildings have no `importAcc`) gets its exits added on load, and its ledger gets `trade: 0`.
+- simcheck: the starter town has 2-4 exits, each with a free stub, none linked. Exit scenario: an unlinked exit trades nothing and its stub survives Demolish while the factory runs. A street then links it, and over 2 days at least 2 exports leave and 2 imports arrive at the factory, and trade is paid.
+- Known gaps:
+  - An exit added to an older save is laid over whatever the player built there.
+  - If a road crossing splits the stub, the inner piece becomes an ordinary road with upkeep and refund. Only the piece at the gate stays free.
+  - Imports do not change a factory's output, and visitors do not count toward a shop's customers for happiness. They only bring money and traffic.
+  - `linkedExits()` walks the graph every frame (renderer) and on every spend.
+
+**P8a Richer graphics: buildings, terrain, props.**
+- Report: the graphics were too simple. Keep the flat Trafficity look, but add detail, colour and life.
+- Buildings (`src/rendering/BuildingArt.ts`): every building is a small model drawn in its local frame and cached as a sprite per kind, variant and scale bucket (`artS`: 1/2/4/8 px per world px from zoom x dpr). The renderer then draws it with one rotated `drawImage`. There are `VARIANTS` (32) looks per kind. `variant(x, y)` hashes the position in 16px cells, so a street is not copy-pasted, a reload shows the same street, and a moved building takes the look of its new spot. The variant's bits set the shape and its rng sets the colours.
+  - **Home**: a lawn lot with a hedge or a white picket fence, a front path with a bush or flower bed on each side, and a pitched roof in one of 8 colours: back slope darker, front lighter, a ridge line and faint tile rows. Some variants have a hip roof, a chimney or solar panels.
+  - **Shop**: a paved lot, a flat blue roof with AC units and a skylight, a coloured sign board with white lettering, and a striped awning with a scalloped edge. Planters sit at the front corners.
+  - **Office**: a paved plaza with corner trees, and a tower whose glass curtain wall (a mullion grid) peeks out around the roof. It has 2-5 floors. The tallest has a helipad, the others a water tank and AC units.
+  - **Factory**: a saw-tooth roof (lit slope, shaded slope, glazed edge), a round chimney, and a yard with a shipping container, a tank or crates on each side of the drive.
+  - `look(kind, v)` gives the body (the part that stands up) and its height. The shadow is the convex hull of the body and its copy offset down-right by that height, so offices cast long shadows and homes short ones. Smoke puffs drift downwind off a staffed factory's chimney, drawn live.
+- Terrain (`src/rendering/Scenery.ts`): `paintTerrain` draws the static ground once per map and ground scale onto a world-sized canvas. The renderer blits it every frame. The ground scale is ceil(zoom x dpr), capped at 12M px (ponytail: soft past about 2.5x zoom on a small map, tile it if close-ups matter).
+  - **Patches and lakes** are smooth blobs (quadratic curves through the midpoints) instead of 12-gons. Patches get a lighter or darker inner blob.
+  - **Shores** are drawn layer by layer over every lake and river: a sandy bank, a line of foam, the water, a lighter shallow band and a deeper middle.
+  - **Ground detail**: grass tufts, flower clusters and pebbles, with density per biome, plus scree at the foot of each mountain.
+  - **Trees**: each map tree gets one or two decorative neighbours, so clusters read as groves. Roads and buildings draw over trees, so the extras need no sim change. Species by biome: round (three lobes and a highlight), conifer (layered star), snowy conifer, palm, blossom and autumn. Desert is mostly palms, alpine is conifers and snowy conifers, and archipelago mixes palms in. Trees have soft shadows and are drawn top to bottom.
+  - **Water glints**: `shimmer` draws dashed light lines that drift around each lake and down each river. It is the only animated terrain, a few strokes a frame.
+  - **Biome palettes** are livelier: temperate land `#E6ECD8`, desert `#F2E6CB`, alpine `#E3EBE1`, archipelago `#E7EDD6`, plus greener grass patches. `BIOMES.treeOut` is gone.
+- Exits: each exit has a highway sign beside its inbound lane: a green board on two legs with a white border, a blue `H` shield, the direction and "HIGHWAY EXIT".
+- Cost: a frame renders in about 0.5-0.7 ms of script on a 30-building street (1280x720). A ground rebuild (new map or new zoom bucket) takes about 25 ms.
+- simcheck: every variant's body and chimney stand inside the footprint, offices come in at least 3 heights, and a street of 10 buildings 50px apart shows at least 5 looks.
+- Known gaps:
+  - Zooming back and forth across a whole-number zoom x dpr step repaints the ground each time, about 25 ms of hitch.
+  - Shadows fall the same way at every hour (P8b added day/night lighting, not moving shadows).
+  - Building looks do not change as a home fills up or a business grows.
+
+**P8b Richer graphics: roads, vehicles, day/night.**
+- Roads (`CanvasRenderer.ts`):
+  - **Sidewalks**: street, avenue and boulevard get a paved sidewalk with a kerb under the road, 5px a side, joints and roundabout rings included. Dirt, highways, bridges and driveways get none.
+  - **Driveways** are a concrete strip 4px narrower than a street, with no markings. Where one crosses a sidewalk it covers it.
+  - **Junction paint** goes on a junction with 3+ roads, or with a sign or light. A driveway junction gets none, since it is a bend for the road's traffic. The stop line covers only the incoming lanes (the right half of a two-way road, all of a one-way road into the node). It is solid at a light or a stop sign and dashed elsewhere. At a light, a zebra crossing sits on every arm, starting past the widest road crossing that arm, and the stop line sits just behind it. ponytail: cars still stop at `stopDist`, so on a street meeting an avenue they halt a few px past the line.
+  - **Lane arrows**: each incoming lane gets an arrow `NODE_R` + 22px out from the junction. It shows the turns the junction's roads allow: left, straight, right, by angle, with one-way roads that cannot be entered skipped. Turn bans are not shown. Roads shorter than `NODE_R` + 40px get no arrows.
+  - **Other details**: a manhole on every third road of 50px or more. Street lamps stand on the verge of every town road and highway: one per link of 34px or more (a home-lined road is cut into ~40px links), one per 70px on longer links, alternating sides.
+  - **Bridges and viaducts**: a bridge deck casts a shadow on the water. A viaduct's shadow falls `level` x (3, 4.5) px down-right, as a faint wide band and a core, so higher decks throw longer, softer shadows. Each pillar has its own shadow down to the ground and a highlight.
+- Vehicles (`src/rendering/VehicleArt.ts`): every vehicle is a cached sprite per kind, purpose, tone and scale bucket (`artS`), drawn with one rotated `drawImage` on a blurred drop-shadow sprite. The shadow is offset (1.2, 1.8) in world space, so it always falls down-right. The live lights are drawn on top: tail lights (bright while braking), indicators and the ambulance's bar. Each car takes one of 5 tones of its purpose colour (`TONES`, from a per-car counter in a `WeakMap`), so a stream of commuters is not one flat blue, but the hue still says the purpose. Nothing is allocated per car per frame beyond `carPos`.
+  - **Car**: hood highlight, glazed cabin (rear window, side glass, windshield), a lighter roof panel, side mirrors and headlights.
+  - **Truck**: a purpose-coloured box trailer with ribs, a coupling, and a darker cab with its windshield and mirrors.
+  - **Bus**: glazed flanks, a pale roof with skylights and an AC unit, and a wide windshield.
+  - **Ambulance**: white, with a boxy rear, a purpose stripe and a red cross.
+  - **Motorbike**: two wheels, handlebars, and a rider with a helmet in a shade of the purpose colour.
+  - `shade` now also takes `rgb()` strings, so a tone can be shaded again.
+- Day/night (`src/rendering/Lighting.ts`): `daylight(hour)` interpolates keyframes into a multiply tint and a `night` factor 0..1. Night (20:12-04:30) is blue, dawn (06:00) and dusk (18:36) are warm, and 07:30-17:00 is untinted. The game starts at 06:00, so the first view is a soft dawn (polish playtest: lightened to (255, 238, 220) with lamps at 0.25, since the old (250, 226, 204) made every new map look like a desert). A render at a 0x0 viewport (a page loaded hidden) draws nothing: its 0 zoom made a 0px ground canvas whose `drawImage` threw and ended the game loop. The tint covers the world after the elevated layers. Labels, tool hints, previews and the off-screen markers stay untinted. Under an overlay (heat, noise) there is no tint, so the colours read true. Then, scaled by `night`, these are added with `lighter`: a warm pool under each street lamp, lit windows on every building (an empty home stays dark), a headlight beam ahead of each vehicle (narrower on a motorbike) and a red glow behind braking ones. Traffic-light heads are redrawn over the tint. Windows come from a night sprite per building variant (`sprite(kind, v, s, true)`): light spilling from a home's windows and its porch lamp, a shop's glowing front and sign, an office's curtain wall lit in patches, a factory's skylights and yard lamps.
+- Cost: on a 62-road, 30-building street at 1280x720, a frame renders in about 1.9 ms of script by day and 2.1 ms at night. Junction paint, arrows, manholes and lamps together take under 0.15 ms.
+- simcheck: `daylight` has no tint at noon, a full blue night at midnight, and a warm dusk part way to night. The tint never jumps between two readings 3 in-game minutes apart. A shade of a shade still parses.
+- Known gaps:
+  - Roads are still stroked every frame. A cached road layer would need invalidating on every graph change.
+  - The night glows draw over viaducts when a lamp, window or headlight lies underneath.
+  - Lane arrows ignore turn bans and lane-by-turn rules: every incoming lane shows every turn the junction allows.
+  - Signs and the roundabout island are tinted at night like everything else. Only light heads are redrawn.

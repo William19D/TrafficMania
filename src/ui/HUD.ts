@@ -5,7 +5,8 @@ import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
-import type { Purpose, Tier, Zone } from '../core/config.ts';
+import type { Purpose, Site, Tier, Zone } from '../core/config.ts';
+import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
 import type { Vec } from '../util/geom.ts';
@@ -14,21 +15,32 @@ import type { Move, Preset } from '../network/Junction.ts';
 import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
+import { sound } from './Sound.ts';
 
 // Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
 const TOOLS: Record<Tool, { label: string; tip: string }> = {
-  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. Esc cancels.' },
+  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
   roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
-  edit: { label: 'Edit', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it.' },
-  demolish: { label: 'Demolish', tip: 'Click a road, sign, light or roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
+  edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
+  demolish: { label: 'Demolish', tip: `Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (${fmtMoney(T.MOVE_COST)} in career; an occupied one takes a second click).` },
 };
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
-// Zone swatch for the tray: the footprint in its colours
-const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
+// Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
+const ZONE_PIC: Record<Site, (f: string, o: string, r: string) => string> = {
+  home: (f, o, r) => `<path d="M5 11h14v10H5z" fill="${f}"/><path d="M2.5 12 12 4l9.5 8z" fill="${r}"/><path d="M10 15h4v6h-4z" fill="${o}"/>`,
+  shop: (f, o, r) => `<path d="M3 10h18v11H3z" fill="${f}"/><path d="M2 6h20v4H2z" fill="${r}"/><path d="M7 6v4M12 6v4M17 6v4" stroke="${o}"/><path d="M6 13h7v4H6zM15 13h3v8h-3z" fill="#fff"/>`,
+  office: (f, o, r) => `<path d="M6 3h12v18H6z" fill="${f}"/><path d="M6 3h12v3H6z" fill="${r}"/><path d="M9 9h2M13 9h2M9 12.5h2M13 12.5h2M9 16h2M13 16h2" stroke="#fff" stroke-width="2"/>`,
+  industry: (f, o, r) => `<path d="M16 3h3v18h-3z" fill="${o}"/><path d="M2 21V11l5-4v4l5-4v4l4-3v13z" fill="${f}"/><path d="M5 14h2M9.5 14h2" stroke="${r}" stroke-width="2"/>`,
+  gate: (f, o) => `<path d="M11 13h2v8h-2z" fill="${o}"/><path d="M3 4h18v9H3z" fill="${f}"/><path d="M7 8.5h8M12.5 6l2.5 2.5-2.5 2.5" stroke="#fff"/>`,
+};
+const zonePic = (z: Site): string => {
+  const { fill, out, roof } = ZONES[z];
+  return `<svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="${out}" stroke-width="1.5" stroke-linejoin="round">${ZONE_PIC[z](fill, out, roof)}</svg>`;
+};
 const count = (n: number): string => n === Infinity ? '∞' : String(n);
 
 const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
@@ -50,6 +62,11 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
+// Road tool shape, one toggle showing the active mode (a two-button segment did not fit the dock at 1280px)
+const RMODE_TIP = {
+  straight: 'Straight roads: they run straight from click to click. Click for curves',
+  curve: 'Curved roads: they bend to meet the roads they join smoothly; hold Shift for a straight one. Click for straight',
+};
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -77,9 +94,11 @@ const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highwa
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
   [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
-  ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
+  ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
+  ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
+  ['Road angle in 15° steps', 'hold <kbd>Ctrl</kbd> or <kbd>Alt</kbd> while placing'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
@@ -89,8 +108,10 @@ export const CONTROLS: [string, string][] = [
   ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
   ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, turn bans`],
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
+  ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
+  ['Mute / unmute sound', '<kbd>Shift</kbd> + <kbd>M</kbd>; volumes in the menu (<kbd>Esc</kbd>), Sound'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
@@ -116,29 +137,33 @@ const PRESETS: [Preset, string, string][] = [
 ];
 const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
 const compass = (a: number): string => COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8];
-// Rush hours tinted on the clock bar
-const RUSH = new Set([7, 8, 9, 16, 17, 18, 19]);
 const pad = (n: number) => String(n).padStart(2, '0');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
 // ---------- analysis: trip reports, the car card, metrics ----------
-// Where a trip goes, out and back
-const DEST: Record<Purpose, [string, string]> = { commute: ['work', 'home'], shop: ['the shop', 'home'], freight: ['the shop', 'the factory'] };
-const tripName = (p: Purpose, back: boolean): string =>
-  back ? (p === 'freight' ? 'Empty truck back' : 'Trip home') : { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery' }[p];
+// A trip or its report: where it goes (a commute out goes to work, a highway exit is out of town) and what it is called
+interface Leg { purpose: Purpose; back: boolean; from: Building; to: Building }
+const PLACE: Record<Site, string> = { home: 'home', shop: 'the shop', office: 'the office', industry: 'the factory', gate: 'the highway' };
+const destOf = (t: Leg): string => t.purpose === 'commute' && !t.back && t.to.kind !== 'gate' ? 'work' : PLACE[t.to.kind];
+const NAME: Record<Purpose, string> = { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery', visit: 'Visitor' };
+const tripName = (t: Leg): string => {
+  const out = t.to.kind === 'gate', inn = t.from.kind === 'gate';
+  if (t.back) return t.purpose === 'freight' ? 'Empty truck back' : out ? 'Leaving town' : 'Trip home';
+  return out ? 'Export' : inn && t.purpose === 'freight' ? 'Import' : inn && t.purpose === 'commute' ? 'Commute from outside' : NAME[t.purpose];
+};
 const JAM_AT: Record<Control | 'road', string> = {
   light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
 const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
 function tripLine(r: TripReport): string {
-  const to = DEST[r.purpose][+r.back], x = (n: number) => `${n.toFixed(1)}x`;
+  const to = destOf(r), x = (n: number) => `${n.toFixed(1)}x`;
   const jam = r.jam && r.jamS >= HOUR / 4 ? `, stuck ${fmtMin(r.jamS)} ${JAM_AT[r.jamAt]}` : '';
   switch (r.outcome) {
     case 'smooth': return `Smooth run to ${to}, ${fmtMin(r.seconds)}`;
     case 'wait': return r.door > HOUR ? `Waited ${fmtMin(r.door)} at the door to get on the road`
-      : `${tripName(r.purpose, r.back)} took ${x(r.ratio)} as long as on empty roads${jam}`;
+      : `${tripName(r)} took ${x(r.ratio)} as long as on empty roads${jam}`;
     case 'detour': return `Detour to ${to}: drove ${x(r.stretch)} the shortest route`;
     case 'gaveup': return `Gave up driving to ${to}${jam || ': waited too long at the door'}`;
     case 'noroute': return `No road to ${to}`;
@@ -155,6 +180,7 @@ const CHARTS: { k: keyof Sample; label: string; fmt: (v: number) => string; zero
   { k: 'trip', label: 'Average trip', fmt: n => fmtMin(n / 60 * HOUR), zero: true },
   { k: 'through', label: 'Trips per hour', fmt: n => String(Math.round(n)), zero: true },
   { k: 'failed', label: 'Failed trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'trade', label: 'Trade and visitors per hour', fmt: n => String(Math.round(n)), zero: true },
   { k: 'money', label: 'Money', fmt: fmtMoney },
   { k: 'pop', label: 'Population', fmt: n => Math.round(n).toLocaleString('en-US'), zero: true },
   { k: 'happy', label: 'Happiness', fmt: n => `${Math.round(n)}%`, zero: true, max: 100 },
@@ -192,7 +218,7 @@ interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<ty
 export class HUD {
   private toolBtns: HTMLButtonElement[];
   private speedBtns: HTMLButtonElement[];
-  private cells: HTMLElement[];
+  private dayBar: HTMLElement;
   private tip: HTMLElement;
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
@@ -200,7 +226,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
     views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -244,7 +270,7 @@ export class HUD {
         <span class="sep"></span>
         <div class="clock" tabindex="0" data-tip="">
           <span class="ck num"></span>
-          <span class="hours">${Array.from({ length: 24 }, (_, h) => `<i${RUSH.has(h) ? ' class="rush"' : ''}></i>`).join('')}</span>
+          <span class="day" aria-hidden="true"><i></i></span>
         </div>
       </div>
       </div>
@@ -259,6 +285,7 @@ export class HUD {
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
+        <button class="iconbtn snd" data-view="sound" data-key="Shift+M"></button>
         <button class="iconbtn" data-view="menu" aria-label="Menu" data-tip="Menu: save, load, quit" data-key="Esc">${icon('menu')}</button>
       </div>
       <div class="rcol">
@@ -290,6 +317,7 @@ export class HUD {
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${toolBtn('road')}
         ${toolBtn('grid')}
+        <button class="lane wide rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
@@ -317,7 +345,7 @@ export class HUD {
           <span class="elev"><b class="lv num"></b><small class="eh"></small></span>
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
-        <span class="sep"></span>
+        <span class="sep brk"></span>
         ${toolBtn('light')}
         ${toolBtn('roundabout')}
         ${toolBtn('interchange')}
@@ -329,8 +357,8 @@ export class HUD {
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Buildings to place">
-          <small class="tray-h">To place</small>
-          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: click, then click the map near a road">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+          <small class="tray-h">Pick a building <kbd>B</kbd></small>
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
         </div>
         <div class="panel legend" role="group" aria-label="Map legend">${LEGEND.none}</div>
       </div>
@@ -339,7 +367,7 @@ export class HUD {
       <div class="tip" role="tooltip" hidden></div>`;
     this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
-    this.cells = Array.from(root.querySelectorAll<HTMLElement>('.hours i'));
+    this.dayBar = this.q('.day');
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
@@ -372,11 +400,15 @@ export class HUD {
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
       else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
       else if (v === 'menu') this.onPause?.();
+      else if (v === 'sound') this.toggleSound();
     };
     this.q('.rcol').addEventListener('click', e => {
       const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
       if (v === 'car') game.follow = null;
       else if (v === 'building') game.picked = null;
+      const bb = t.closest<HTMLElement>('[data-b]')?.dataset.b, pb = game.picked;
+      if (pb && bb === 'move') game.startMove(pb);
+      else if (pb && bb === 'demolish') game.tryDemolish(pb);
       else if (v === 'metrics' || v === 'feed') this.show[v] = false;
       if (j) {
         const [x, y] = j.split(',').map(Number);
@@ -385,6 +417,7 @@ export class HUD {
       }
     });
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
+    this.q('[data-action="curve"]').onclick = () => { game.roadCurve = !game.roadCurve; };
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
@@ -423,11 +456,18 @@ export class HUD {
       this.setHelp(!this.helpOpen);
     } else if (e.key === 'c' || e.key === 'C') {
       g.overlay = OVERLAYS[(OVERLAYS.indexOf(g.overlay) + 1) % OVERLAYS.length];
+    } else if ((e.key === 'm' || e.key === 'M') && e.shiftKey) {
+      this.toggleSound();
     } else if (e.key === 'm' || e.key === 'M') {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
       this.show.feed = !this.show.feed;
     }
+  }
+
+  private toggleSound(): void {
+    sound.toggleMute();
+    this.game.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
   }
 
   private setHelp(open: boolean, refocus = true): void {
@@ -750,9 +790,14 @@ export class HUD {
 
   // ---------- analysis panels ----------
   private updateViews(): void {
-    const g = this.game, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}`;
+    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}|${m}`;
     if (key === this.last.views) return;
     this.last.views = key;
+    // the speaker shows the sound's state (the menu's Sound page can change it too)
+    const snd = this.q('.snd');
+    snd.innerHTML = icon(m ? 'mute' : 'sound');
+    snd.setAttribute('aria-label', m ? 'Sound off' : 'Sound on');
+    snd.dataset.tip = `Sound ${m ? 'off' : 'on'}: click to ${m ? 'turn it on' : 'mute'}. Volumes are in the menu`;
     const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
     this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
     this.q('.legend').innerHTML = LEGEND[g.overlay];
@@ -771,7 +816,7 @@ export class HUD {
     this.carFor = c;
     this.last.car = key;
     panel.hidden = false;
-    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t.purpose, t.back)}`;
+    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t)}`;
     const slow = t.ideal && el > T.SMOOTH_X * t.ideal;
     const jam = t.jamS >= HOUR / 4 ? `longest ${fmtMin(t.jamS)} ${JAM_AT[jamAt(t.jam)]}` : '';
     this.q('.cbody').innerHTML = `
@@ -786,7 +831,7 @@ export class HUD {
   private updateBuilding(): void {
     const g = this.game, b = g.picked, panel = this.q('.bpanel');
     const mine = b ? g.reports.filter(r => r.from === b || r.to === b).slice(-5).reverse() : [];
-    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${mine.map(r => r.seconds).join()}` : '';
+    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${g.armed === b}|${mine.map(r => r.seconds).join()}` : '';
     if (key === this.last.bld) return;
     this.last.bld = key;
     panel.hidden = !b;
@@ -803,6 +848,9 @@ export class HUD {
       body = `<p class="jnote">${z.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
     }
     if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
+    const who = g.occupants(b);
+    body += `<div class="jpre"><button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`
+      + `<button class="btn" data-b="demolish" data-tip="${g.creative ? 'Removes it' : `Back to the tray, to place again · ${fmtMoney(g.moveCost)}`}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
     this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
     this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
   }
@@ -827,7 +875,7 @@ export class HUD {
     this.last.metrics = key;
     if (s.length < 2) { this.q('.mbody').innerHTML = '<p class="jnote">Collecting: a point is added every in-game hour.</p>'; return; }
     const rows = CHARTS.filter(c => c.k !== 'money' || !g.creative).map(c => {
-      const v = s.map(x => x[c.k]), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
+      const v = s.map(x => x[c.k] ?? 0), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
       return `<div class="mrow" role="img" aria-label="${c.label}: now ${now}, from ${c.fmt(lo)} to ${c.fmt(hi)}">`
         + `<span>${c.label}</span><b class="num">${now}</b><small class="num">${c.fmt(lo)} – ${c.fmt(hi)}</small>${svg}</div>`;
     }).join('');
@@ -838,10 +886,10 @@ export class HUD {
   update(): void {
     const g = this.game, L = this.last;
 
-    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business income (yesterday's,
-    // or today's so far on the first day) - the network's upkeep; grants are one-off
+    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business and trade income
+    // (yesterday's, or today's so far on the first day) - the network's upkeep; grants are one-off
     const money = Math.round(g.money);
-    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business - g.upkeepDay);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay);
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -852,10 +900,12 @@ export class HUD {
       n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
       c.classList.toggle('debt', money < 0);
       const y = g.ledger.yesterday, t = g.ledger.today;
-      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
+      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, trade ${fmtMoney(x.trade)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
         + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '');
       c.dataset.tip = `Money. Residents pay ${fmtMoney(g.taxPerDay())}/day in taxes (more when they are happy); workers, shoppers and goods`
-        + ` arriving pay business income. Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
+        + ` arriving pay business income. Exports, imports and visitors through the highway exits pay trade income`
+        + (g.linkedExits().length ? '.' : ': none is linked yet, build a road to one at the map edge.')
+        + ` Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
         + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
         + (g.creative ? '' : ` In debt at ${DIFFICULTY[g.cfg.difficulty].debtDays} midnights in a row = bankrupt.`);
       if (prev !== undefined && Number.isFinite(d) && d !== 0) {
@@ -921,6 +971,7 @@ export class HUD {
       this.q('.tray').hidden = total < 1;
       const badge = this.q('.badge');
       badge.hidden = total < 1;
+      this.q('[data-tool="place"]').classList.toggle('ready', total >= 1);
       badge.textContent = count(total);
       L.trayN = total;
       if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
@@ -960,12 +1011,17 @@ export class HUD {
     this.updateBuilding();
     this.updateFeed();
     this.updateMetrics();
-    const gk = `${g.tool}|${g.gridSize}`;
+    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}`;
     if (gk !== L.gsz) {
       L.gsz = gk;
       // the grid is built on the ground: its block size takes the elevation stepper's place
       this.q('.gsz').hidden = g.tool !== 'grid';
       this.q('.stepper').hidden = g.tool === 'grid';
+      const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
+      rm.hidden = g.tool !== 'road';
+      rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;
+      rm.setAttribute('aria-label', `Road shape: ${m}. Switch [V]`);
+      rm.dataset.tip = RMODE_TIP[m];
       this.root.querySelectorAll<HTMLElement>('[data-grid]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.grid) === g.gridSize)));
     }
 
@@ -983,14 +1039,13 @@ export class HUD {
       if (up) flash(s, 'bump');
     }
 
-    // Clock in 10-minute steps: Day 4 · 08:20, past hours filled, the current one filling up
+    // Clock in 10-minute steps: Day 4 · 08:20; the day bar fills by the same steps (144 a day, under a pixel each)
     const tick = Math.floor(g.clock * 6);
     if (tick !== L.clock) {
       L.clock = tick;
       const h = Math.floor(g.hour), m = Math.floor((g.hour - h) * 6) * 10, time = `${pad(h)}:${pad(m)}`;
       this.q('.ck').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Day </span><span class="short">D</span>${g.day} · ${time}`;
-      this.cells.forEach((c, i) => { c.classList.toggle('past', i < h); c.classList.toggle('now', i === h); });
-      this.cells[h].style.setProperty('--p', String(m / 60));
+      this.dayBar.style.setProperty('--p', String((h + m / 60) / 24));
       this.q('.clock').dataset.tip = `Day ${g.day}, ${time}. Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift;`
         + ' shoppers go out from mid-morning to the evening. Taxes and upkeep are paid by the hour.';
     }
@@ -1036,6 +1091,10 @@ export class HUD {
     if (g.message !== L.msg) {
       L.msg = g.message;
       if (g.message) this.toast(g.message);
+    }
+    if (g.said !== L.said) {
+      if (L.said !== undefined && ERROR_RE.test(g.message)) sound.play('error');
+      L.said = g.said;
     }
 
     const mk = `${g.gameOver}|${g.pendingLevel}`;

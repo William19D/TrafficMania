@@ -1,9 +1,9 @@
 // Save games: versioned JSON in localStorage. Terrain comes back from cfg.seed; cars are not saved, their trips wait at the
 // origin's door again (as when a road is demolished). Buildings, commuters and nodes are referenced by index (-1 = none).
-import { Game, HOUR } from './Game.ts';
+import { Game, HOUR, ledger0 } from './Game.ts';
 import type { Ledger } from './Game.ts';
 import { BIOMES, DIFFICULTY, SIZES, TUNING as T } from './config.ts';
-import type { GameConfig, Zone } from './config.ts';
+import type { GameConfig, Site, Zone } from './config.ts';
 import type { Metrics } from './Metrics.ts';
 import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
@@ -15,7 +15,8 @@ import type { JunctionPlan } from '../network/Junction.ts';
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
 interface BuildingData {
-  kind: Zone; x: number; y: number; angle: number; residents: number; stock: number; staffed: number; shopAcc: number; truckAcc: number;
+  kind: Site; x: number; y: number; angle: number; residents: number; stock: number; staffed: number; shopAcc: number; truckAcc: number;
+  importAcc?: number; visitAcc?: number; // absent before outside connections
   happy: number; parts: Parts; recent: Building['recent']; pending: TripData[]; parked: TripData[];
 }
 export interface SaveData {
@@ -25,7 +26,7 @@ export interface SaveData {
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number }[];
-  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; heat: number }[];
+  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -47,7 +48,7 @@ export function serialize(g: Game): string {
     stats: g.stats, ledger: g.ledger, roadType: g.roadType,
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
-      truckAcc: b.truckAcc, happy: b.happy, parts: b.parts, recent: b.recent, parked: b.parked.map(t => trip(t)),
+      truckAcc: b.truckAcc, importAcc: b.importAcc, visitAcc: b.visitAcc, happy: b.happy, parts: b.parts, recent: b.recent, parked: b.parked.map(t => trip(t)),
       // a car on the road waits at its origin's door again
       pending: [...b.pending.map(t => trip(t)), ...g.cars.filter(c => c.trip.from === b).map(c => trip(c.trip, g.time))],
     })),
@@ -57,7 +58,7 @@ export function serialize(g: Game): string {
       phaseTimer: n.phaseTimer, plan: n.plan, delay: n.delay,
     })),
     edges: g.graph.edges.map(e => ({
-      a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, heat: e.heat,
+      a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
     })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,
@@ -73,6 +74,8 @@ export function deserialize(json: string): Game {
   const B = g.buildings = d.buildings.map(x => {
     const b = new Building(x.kind, x.x, x.y, x.angle);
     Object.assign(b, { residents: x.residents, stock: x.stock, staffed: x.staffed, shopAcc: x.shopAcc, truckAcc: x.truckAcc, happy: x.happy, parts: x.parts, recent: x.recent });
+    b.importAcc = x.importAcc ?? 0;
+    b.visitAcc = x.visitAcc ?? 0;
     return b;
   });
   const C = g.commuters = d.commuters.map(c => ({ ...c, home: B[c.home], work: c.work < 0 ? null : B[c.work] }));
@@ -83,7 +86,10 @@ export function deserialize(json: string): Game {
   g.reports = d.reports.map(r => ({ ...r, from: B[r.from], to: B[r.to] }));
   Object.assign(g.metrics, d.metrics);
   const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
-  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType });
+  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, roadType });
+  g.ledger = { today: { ...ledger0(), ...ledger.today }, yesterday: { ...ledger0(), ...ledger.yesterday } };
+  // ponytail: the exits of an older save go down over whatever the player built there
+  if (d.buildings.some(x => x.importAcc === undefined)) g.addExits();
   return g;
 }
 

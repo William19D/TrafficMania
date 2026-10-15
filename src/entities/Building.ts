@@ -1,7 +1,7 @@
 import type { Node } from '../network/RoadGraph.ts';
 import type { Vec } from '../util/geom.ts';
 import { TUNING as T, ZONES } from '../core/config.ts';
-import type { Zone } from '../core/config.ts';
+import type { Site } from '../core/config.ts';
 import type { Trip } from './Trip.ts';
 
 // Door: DOOR_D px out from the middle of the front face; roads snap to it within DOOR_R
@@ -24,13 +24,15 @@ export class Building {
   staffed = 0;           // 0..1 share of jobs with a commuter parked here
   shopAcc = 0;           // fractional shopping / freight trips accrued hourly
   truckAcc = 0;
+  importAcc = 0;         // trucks from outside (factory raw materials, a short shop's goods) and visitors, accrued hourly
+  visitAcc = 0;
   retryTimer = 0;
   happy = 60;            // 0..100, homes only, hourly
   parts: Parts = { job: 0, shop: 0, trips: 0.6, pollution: 0, noise: 0 };
   // home: SCORE of each trip from or to it in the last 24h; shop = an outbound shopping trip
   recent: { at: number; score: number; shop: boolean }[] = [];
 
-  constructor(public kind: Zone, public x: number, public y: number, public angle: number) {}
+  constructor(public kind: Site, public x: number, public y: number, public angle: number) {}
 
   get w(): number { return ZONES[this.kind].w; }
   get h(): number { return ZONES[this.kind].h; }
@@ -58,7 +60,7 @@ export class Building {
 }
 
 // Footprint facing angle with its door at p
-export const buildingAt = (kind: Zone, p: Vec, angle: number): Building => {
+export const buildingAt = (kind: Site, p: Vec, angle: number): Building => {
   const d = ZONES[kind].h / 2 + DOOR_D;
   return new Building(kind, p.x - Math.cos(angle) * d, p.y - Math.sin(angle) * d, angle);
 };

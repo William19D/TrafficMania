@@ -25,24 +25,24 @@ export const DIFFICULTY: Record<Difficulty, {
 // Terrain mix and palette per biome. rivers: null = the difficulty's count. Water is the same everywhere.
 // patch: [sand, grass] colours; bands: mountain contour fills, outer to inner.
 export const BIOMES: Record<Biome, {
-  label: string; land: string; patch: [string, string]; tree: string; treeOut: string; bands: [string, string, string];
+  label: string; land: string; patch: [string, string]; tree: string; bands: [string, string, string];
   trees: Range; lakes: Range; lakeR: Range; rivers: Range | null; mountains: number;
 }> = {
   temperate: {
-    label: 'Temperate', land: '#ECEAE4', patch: ['#E6DCC0', '#D7E3B5'], tree: '#7FAE5A', treeOut: '#5E8A42',
+    label: 'Temperate', land: '#E6ECD8', patch: ['#EEE1C0', '#CFE3A8'], tree: '#79B257',
     bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [120, 200], lakes: [0, 2], lakeR: [70, 130], rivers: null, mountains: 0,
   },
   desert: {
-    label: 'Desert', land: '#EFE6D2', patch: ['#E6D3A8', '#EADBB6'], tree: '#A7B36A', treeOut: '#7F8A4C',
+    label: 'Desert', land: '#F2E6CB', patch: ['#EBD2A0', '#E0DDAE'], tree: '#A3B266',
     bands: ['#C9A882', '#B08D68', '#94735A'], trees: [20, 40], lakes: [1, 2], lakeR: [45, 80], rivers: [0, 1], mountains: 0,
   },
   alpine: {
-    label: 'Alpine', land: '#E8EBE6', patch: ['#F2F3F1', '#DCE5D6'], tree: '#5E8F5A', treeOut: '#456D42',
+    label: 'Alpine', land: '#E3EBE1', patch: ['#F5F7F7', '#D3E3C8'], tree: '#5E8F5A',
     bands: ['#8E9296', '#6F7377', '#F4F5F6'], trees: [200, 280], lakes: [1, 3], lakeR: [60, 110], rivers: null, mountains: 3,
   },
   // ponytail: islands are the land left between many large lakes and wide channels; a real sea mask if coastlines matter
   archipelago: {
-    label: 'Archipelago', land: '#EDEBE1', patch: ['#EFE3C4', '#D2E2B0'], tree: '#79AE5E', treeOut: '#58884A',
+    label: 'Archipelago', land: '#E7EDD6', patch: ['#F0E2BC', '#CDE3A6'], tree: '#74B25A',
     bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [90, 150], lakes: [6, 9], lakeR: [130, 230], rivers: [2, 3], mountains: -2,
   },
 };
@@ -63,20 +63,25 @@ export const TIERS: Record<Tier, {
   highway: { label: 'Highway', limit: 150, kmh: 90, lanes: [2, 3], oneWay: true, cost: 220, noise: 0.9, access: false, level: 6, fill: '#F7F7F5', out: '#8A99AD', shoulder: 3, median: 0, line: 'double' },
 };
 
-// Building zones: footprint w (along the front) x h (depth) px; residents / jobs: capacity; look: fill, outline, roof inset
+// Building zones: footprint w (along the front) x h (depth) px; residents / jobs: capacity; look: fill, outline, roof inset.
+// A Site is a zone or a highway exit ('gate': the map-edge end of an outside connection, never in the tray)
 export type Zone = 'home' | 'shop' | 'office' | 'industry';
-export const ZONES: Record<Zone, { label: string; w: number; h: number; residents: number; jobs: number; fill: string; out: string; roof: string }> = {
+export type Site = Zone | 'gate';
+export const ZONES: Record<Site, { label: string; w: number; h: number; residents: number; jobs: number; fill: string; out: string; roof: string }> = {
   home: { label: 'Home', w: 28, h: 24, residents: 30, jobs: 0, fill: '#FFFFFF', out: '#8DB17A', roof: '#BCDCA8' },
   shop: { label: 'Shop', w: 44, h: 30, residents: 0, jobs: 10, fill: '#8EC3EE', out: '#4F8CC6', roof: '#BBDAF5' },
   office: { label: 'Office', w: 38, h: 38, residents: 0, jobs: 30, fill: '#ABA3CF', out: '#7468A8', roof: '#CBC5E4' },
   industry: { label: 'Factory', w: 56, h: 40, residents: 0, jobs: 25, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
+  gate: { label: 'Highway exit', w: 30, h: 16, residents: 0, jobs: 0, fill: '#2F8F5B', out: '#1F6B42', roof: '#3FA36B' },
 };
 // Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
-export type Purpose = 'commute' | 'shop' | 'freight';
+// visit: a visitor from outside the map to a shop or office
+export type Purpose = 'commute' | 'shop' | 'freight' | 'visit';
 export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   commute: { label: 'Commute', color: '#5A6FD8' },
   shop: { label: 'Shopping', color: '#E8608E' },
   freight: { label: 'Freight', color: '#E39B2D' },
+  visit: { label: 'Visitors', color: '#1FA39A' },
 };
 
 // City levels (career): population to reach each one and the batch of buildings it puts in the tray. LEVELS[0] is the start
@@ -140,7 +145,15 @@ export const TUNING = {
   FAIL_DAYS: 2, FAIL_FROM_DAY: 4, // career: happiness under DIFFICULTY.failHappy at FAIL_DAYS midnights in a row, from day FAIL_FROM_DAY
   LEVEL_GRANT: 2000,         // $ x level x taxMult on each level-up
   PLACED_OCC: 0.4,           // a home placed from the tray moves in 40% full
+  MOVE_COST: 300,            // $ to move a building (career), or to demolish one back into the tray
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
   POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // factory pollution reach, road noise reach, a tier the place tool warns about
   HEAT_TAU: 10,              // game seconds: congestion (edge heat, junction delay) EMA time constant
+  // Outside connections (highway exits), only once linked to the town's roads: EXPORT_SHARE of a factory's trucks leave the map
+  // (all of them with no shop to reach); a factory imports IMPORTS_PER_DAY trucks x staffed of raw materials; a shop at or under
+  // IMPORT_STOCK goods orders IMPORT_SHOP trucks per hour from outside (TRUCK_HOURS); visitors per day along SHOP_CURVE;
+  // OUTSIDE_JOBS of the job slots no resident holds fill with commuters from outside (arriving COMMUTE_MIN..MAX).
+  // $ per export leaving, import arriving, visitor arriving (x taxMult): the ledger's trade
+  EXIT_STUB: 160, EXPORT_SHARE: 0.4, IMPORTS_PER_DAY: 3, IMPORT_STOCK: 5, IMPORT_SHOP: 0.5, VISITS: { shop: 4, office: 2 }, OUTSIDE_JOBS: 0.5,
+  TAX_EXPORT: 40, TAX_IMPORT: 15, TAX_VISIT: 8,
 } as const;

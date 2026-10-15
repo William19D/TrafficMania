@@ -1,12 +1,12 @@
 import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
-import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
+import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, shoreSplits, findStarterTown } from '../world/MapGenerator.ts';
 import type { Control, Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { clonePlan, planFits, planOf } from '../network/Junction.ts';
 import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
-import { cubicPoints, bendControls } from '../util/curve.ts';
+import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
@@ -14,7 +14,7 @@ import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
 import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_BATCH, ENDLESS_POP, LEVELS, TIERS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
-import type { Feature, GameConfig, Purpose, Tier, Zone } from './config.ts';
+import type { Feature, GameConfig, Purpose, Site, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 import { ICHG, ICHG_KEYS } from './Templates.ts';
 import { Metrics } from './Metrics.ts';
@@ -26,14 +26,17 @@ export const TOOL_LOCK: Partial<Record<Tool, Feature>> = { roundabout: 'roundabo
 export type GameOver = '' | 'bankrupt' | 'unhappy';
 // Map overlays: congestion heat map, or road noise and factory pollution with each home's happiness
 export type Overlay = 'none' | 'heat' | 'noise';
+// Sound cues the sim raises (a set: one per kind per frame); the audio drains it, headless nobody does and it stays this small
+export type Sfx = 'build' | 'demolish' | 'place';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
 export const OUTCOME_LABEL: Record<Outcome, string> = { smooth: 'smooth run', wait: 'long wait', detour: 'detour', gaveup: 'gave up', noroute: 'no route' };
 const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map(o => [o, 0])) as Record<Outcome, number>;
 // $ per day by category; build is the net spent on construction (refunds count negative)
-export interface Ledger { taxes: number; business: number; upkeep: number; build: number; grants: number }
-const ledger0 = (): Ledger => ({ taxes: 0, business: 0, upkeep: 0, build: 0, grants: 0 });
+// trade: exports, imports and visitors through the highway exits
+export interface Ledger { taxes: number; business: number; trade: number; upkeep: number; build: number; grants: number }
+export const ledger0 = (): Ledger => ({ taxes: 0, business: 0, trade: 0, upkeep: 0, build: 0, grants: 0 });
 // $24,310 · $1.2M · −$1,200 · ∞
 export const fmtMoney = (n: number): string => {
   if (n === Infinity) return '∞';
@@ -50,7 +53,7 @@ export const jamAt = (n: Node | null): Control | 'road' => !n || (n.control === 
 export interface Snap { node: Node | null; edge: Edge | null; point: Vec }
 // Place tool ghost: road = where its driveway would join (null: no access road in reach); warn = what its residents will dislike
 export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null }
-export const ZONE_KEYS = Object.keys(ZONES) as Zone[];
+export const ZONE_KEYS = (Object.keys(ZONES) as Site[]).filter((z): z is Zone => z !== 'gate');
 // Population to reach city level n (level 1 = the start)
 export const levelPop = (n: number): number =>
   n <= LEVELS.length ? LEVELS[Math.max(0, n - 1)].pop : LEVELS[LEVELS.length - 1].pop + (n - LEVELS.length) * ENDLESS_POP;
@@ -66,7 +69,12 @@ export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; lev
 export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number; note?: string }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 // A building's door, a node a driveway joins, or a driveway: a road without access may not touch it
-const doorway = (n: Node | null, e?: Edge | null): boolean => !!n && (!!n.building || n.edges.some(x => x.drive)) || !!e?.drive;
+// (a highway exit's gate is no doorway: its own stub is a highway)
+const doorway = (n: Node | null, e?: Edge | null): boolean => !!n && (!!n.building && n.building.kind !== 'gate' || n.edges.some(x => x.drive)) || !!e?.drive;
+// The highway stub of an outside connection: free, and it cannot be demolished. Every piece of a split stub keeps Edge.exit;
+// the gate test covers a bent stub's end and older saves
+export const exitEdge = (e: Edge): boolean => e.exit || e.a.building?.kind === 'gate' || e.b.building?.kind === 'gate';
+const EXIT_TYPE: RoadType = { tier: 'highway', lanes: 2, oneWay: false };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
 // A crossing road's arm from the junction to the cut point 'at' (edges[i] leaves nodes[i])
 interface Arm { edges: Edge[]; nodes: Node[]; at: Vec }
@@ -112,12 +120,20 @@ export class Game {
   tray: Record<Zone, number>;
   placing: Zone | null = null;
   placeAngle = Math.PI / 2;
+  // Building the place tool is moving (placing = its kind, no tray needed); the occupied building a Demolish click armed (a second click
+  // removes it)
+  moving: Building | null = null;
+  armed: Building | null = null;
   // Type for new roads
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Grid tool block size in tiles
   gridSize: 3 | 4 | 6 = 4;
+  // Road tool: true = new roads curve to meet the roads they join (tangentAt), false = always straight; a drag bends either
+  roadCurve = true;
   // Interchange tool: the junction picked and the template shown on it
   ichg: { node: Node; kind: Ichg } | null = null;
+  // Highway exits linked at the last spend (the toast when one more links)
+  private exitsLinked = 0;
   // Bumped on every build, demolish and driveway: interchange previews are cached against it
   private version = 0;
   private ichgCache = new Map<string, PathPlan>();
@@ -126,6 +142,7 @@ export class Game {
   inspect: Node | null = null;
   // Edges created by the last commitPath, in build order (reused edges not included)
   lastBuilt: Edge[] = [];
+  sfx = new Set<Sfx>();
   gameOver: GameOver = '';
   // City happiness 0..100 (EMA of the residents-weighted home mean) and its weighted parts
   happiness = 60;
@@ -134,6 +151,8 @@ export class Game {
   debtDays = 0;
   sadDays = 0;
   message = '';
+  // Bumped on every say(), so a repeated message still counts (the error buzz)
+  said = 0;
   // Set while the tutorial runs: no fail checks
   tutorialActive = false;
   // No departures, shopping, freight or return trips (simcheck drives its own trips)
@@ -159,6 +178,15 @@ export class Game {
       g.addEdge(g.addNode(a.x, a.y), g.addNode(b.x, b.y), { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE }, -1);
       this.connect();
       this.upkeepDay = this.upkeepPerDay();
+    }
+    this.addExits();
+  }
+
+  // The map's outside connections (terrain.exits): a gate at the map edge with a free highway stub into the map
+  addExits(): void {
+    for (const x of this.terrain.exits) {
+      const b = this.addBuilding(buildingAt('gate', x.door, x.angle));
+      this.graph.addEdge(b.node, this.graph.addNode(x.end.x, x.end.y), { bridge: false, tunnel: false, level: 0, type: EXIT_TYPE, exit: true }, -1);
     }
   }
 
@@ -247,7 +275,7 @@ export class Game {
         this.report(t, o, secs);
         if (car === this.follow) this.say(`Arrived: ${OUTCOME_LABEL[o]}, ${fmtMin(secs)}`);
         if (t.back) { if (t.who) t.who.at = 'home'; }
-        else if (!this.demandOff) this.park(t);
+        else if (!this.demandOff && t.to.kind !== 'gate') this.park(t);
       }
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
@@ -256,12 +284,16 @@ export class Game {
     if (this.follow && !this.cars.includes(this.follow)) this.follow = null;
   }
 
-  // Business income on arrival: a worker at a workplace, a customer at a shop (half when it has no goods), a truck of goods
+  // Business income on arrival: a worker at a workplace, a customer at a shop (half when it has no goods), a truck of goods;
+  // trade: an export reaching a highway exit, an import or a visitor from one (a commuter from outside pays as a worker)
   private business(t: Trip): void {
-    const x = t.purpose === 'commute' ? T.TAX_COMMUTE : t.purpose === 'freight' ? T.TAX_FREIGHT : T.TAX_SHOP * (t.to.stock > 0 ? 1 : 0.5);
+    const out = t.to.kind === 'gate', trade = out || (t.from.kind === 'gate' && t.purpose !== 'commute');
+    const x = out ? T.TAX_EXPORT : trade ? (t.purpose === 'freight' ? T.TAX_IMPORT : T.TAX_VISIT)
+      : t.purpose === 'commute' ? T.TAX_COMMUTE : t.purpose === 'freight' ? T.TAX_FREIGHT : T.TAX_SHOP * (t.to.stock > 0 ? 1 : 0.5);
     const pay = x * DIFFICULTY[this.cfg.difficulty].tax;
     this.money += pay;
-    this.ledger.today.business += pay;
+    if (trade) { this.ledger.today.trade += pay; this.metrics.trade(); }
+    else this.ledger.today.business += pay;
   }
 
   // Residential taxes per day at the current population and happiness
@@ -303,28 +335,55 @@ export class Game {
   }
 
   // On the hour: workplaces count their staff, homes accrue shopping trips along SHOP_CURVE, staffed factories accrue
-  // trucks during TRUCK_HOURS; each whole trip goes to a gravity-picked reachable shop
+  // trucks during TRUCK_HOURS; each whole trip goes to a gravity-picked reachable shop. With a highway exit in reach (linked):
+  // some trucks export through it, factories import raw materials and short shops goods from it, visitors come to shops and
+  // offices along SHOP_CURVE, and commuters from outside take OUTSIDE_JOBS of the slots no resident holds, arriving in the morning.
   private hourly(h: number): void {
     if (h === 3) this.assign();
     if (this.demandOff) return;
-    const comp = this.components(), mult = DIFFICULTY[this.cfg.difficulty].trips, [t0, t1] = T.TRUCK_HOURS;
+    const comp = this.components(), mult = DIFFICULTY[this.cfg.difficulty].trips, [t0, t1] = T.TRUCK_HOURS, trucking = h >= t0 && h < t1;
+    const reach = new Set(this.buildings.filter(b => b.kind === 'gate').map(b => comp.get(b.node)));
+    // the exit a trip from or to b uses, gravity-picked (no roll without one, so a town with no linked exit keeps its stream)
+    const exit = (b: Building): Building | null => reach.has(comp.get(b.node)) ? this.pick(b, comp, x => +(x.kind === 'gate')) : null;
+    const span = T.COMMUTE_MAX - T.COMMUTE_MIN, morning = h >= T.COMMUTE_MIN && h < T.COMMUTE_MAX, held = new Map<Building, number>();
+    if (morning) for (const c of this.commuters) if (c.work) held.set(c.work, (held.get(c.work) ?? 0) + 1);
     this.grow(comp);
     for (const b of this.buildings) {
-      if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.who).length * T.PEOPLE_PER_CAR / b.jobs);
+      if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.purpose === 'commute').length * T.PEOPLE_PER_CAR / b.jobs);
       if (b.kind === 'home') {
         b.shopAcc += b.residents / T.PEOPLE_PER_CAR * T.SHOP_RATE * T.SHOP_CURVE[h] / SHOP_SUM * mult;
         for (; b.shopAcc >= 1; b.shopAcc--) {
           const to = this.pick(b, comp, s => s.kind === 'shop' ? s.jobs : 0);
           if (to) this.queueTrip(b, to, 'shop');
         }
-      } else if (b.kind === 'industry' && h >= t0 && h < t1) {
-        // empty shops pull the goods
-        b.truckAcc += T.TRUCKS_PER_DAY * b.staffed * mult / (t1 - t0);
-        for (; b.truckAcc >= 1; b.truckAcc--) {
-          const to = this.pick(b, comp, s => s.kind === 'shop' ? 1 + Math.max(0, T.STOCK_START - s.stock) : 0);
-          if (to) this.queueTrip(b, to, 'freight');
-        }
+        continue;
       }
+      const linked = b.kind !== 'gate' && reach.has(comp.get(b.node));
+      if (b.kind === 'industry' && trucking) this.trucks(b, comp, mult, linked ? exit : null);
+      if (!linked) continue;
+      if (b.kind === 'industry' && trucking) b.importAcc += T.IMPORTS_PER_DAY * b.staffed * mult / (t1 - t0);
+      if (b.kind === 'shop' && trucking && b.stock <= T.IMPORT_STOCK) b.importAcc += T.IMPORT_SHOP;
+      for (; b.importAcc >= 1; b.importAcc--) { const from = exit(b); if (from) this.queueTrip(from, b, 'freight'); }
+      if (b.kind === 'shop' || b.kind === 'office') b.visitAcc += T.VISITS[b.kind] * T.SHOP_CURVE[h] / SHOP_SUM * mult;
+      for (; b.visitAcc >= 1; b.visitAcc--) { const from = exit(b); if (from) this.queueTrip(from, b, 'visit'); }
+      // the i-th commuter from outside arrives in hour COMMUTE_MIN + i mod span
+      const n = morning ? Math.floor((Math.floor(b.jobs / T.PEOPLE_PER_CAR) - (held.get(b) ?? 0)) * T.OUTSIDE_JOBS) : 0;
+      for (let i = h - T.COMMUTE_MIN; i >= 0 && i < n; i += span) {
+        const from = exit(b);
+        if (from) this.queueTrip(from, b, 'commute').leave = this.time + T.WORK_HOURS * HOUR;
+      }
+    }
+  }
+
+  // A factory's trucks this hour (TRUCKS_PER_DAY x staffed): goods to a reachable shop, the emptier the likelier; with an exit
+  // linked, EXPORT_SHARE of them (all, with no shop to reach) leave the map through it
+  private trucks(b: Building, comp: Map<Node, number>, mult: number, exit: ((b: Building) => Building | null) | null): void {
+    const [t0, t1] = T.TRUCK_HOURS;
+    b.truckAcc += T.TRUCKS_PER_DAY * b.staffed * mult / (t1 - t0);
+    for (; b.truckAcc >= 1; b.truckAcc--) {
+      const shop = this.pick(b, comp, s => s.kind === 'shop' ? 1 + Math.max(0, T.STOCK_START - s.stock) : 0), out = exit?.(b);
+      const to = out && (!shop || random() < T.EXPORT_SHARE) ? out : shop;
+      if (to) this.queueTrip(b, to, 'freight');
     }
   }
 
@@ -379,7 +438,7 @@ export class Game {
 
   // Undirected road components by node; a door without a road is a component of its own.
   // ponytail: undirected, so a one-way trap still counts as reachable; findPath at departure is the final judge (noroute)
-  private components(): Map<Node, number> {
+  components(): Map<Node, number> {
     const comp = new Map<Node, number>();
     let id = 0;
     for (const n of this.graph.nodes) {
@@ -394,6 +453,13 @@ export class Game {
       }
     }
     return comp;
+  }
+
+  // Highway exits a building of the town reaches by road: trade and visitors only flow through these
+  // ponytail: the renderer and HUD call it per frame (a graph walk); cache it against version if big networks stutter
+  linkedExits(comp = this.components()): Building[] {
+    const town = new Set(this.buildings.filter(b => b.kind !== 'gate').map(b => comp.get(b.node)));
+    return this.buildings.filter(b => b.kind === 'gate' && town.has(comp.get(b.node)));
   }
 
   // Gravity model: a building in from's component, picked with weight cap(b) x exp(-distance / GRAVITY_D)
@@ -468,12 +534,12 @@ export class Game {
     }
   }
 
-  // Arrived: a shopper buys one item and stays SHOP_STAY hours, a truck unloads and turns back at once,
-  // a commuter stays for its shift (leave was set when it left home)
+  // Arrived: a shopper (or a visitor) buys one item and stays SHOP_STAY hours, a truck unloads and turns back at once,
+  // a commuter stays for its shift (leave was set when it left home, or the exit)
   private park(t: Trip): void {
     const b = t.to;
-    if (t.purpose === 'shop') { b.stock = Math.max(0, b.stock - 1); t.leave = this.time + T.SHOP_STAY * HOUR; }
-    if (t.purpose === 'freight') b.stock += T.STOCK_PER_TRUCK;
+    if (t.purpose === 'shop' || t.purpose === 'visit') { if (b.kind === 'shop') b.stock = Math.max(0, b.stock - 1); t.leave = this.time + T.SHOP_STAY * HOUR; }
+    if (t.purpose === 'freight' && b.kind === 'shop') b.stock += T.STOCK_PER_TRUCK;
     if (t.who) t.who.at = 'away';
     b.parked.push(t);
   }
@@ -681,14 +747,18 @@ export class Game {
     return cost > this.money ? 'Not enough money' : '';
   }
 
-  // Pays (negative: gets back) construction money and refreshes the daily upkeep
+  // Pays (negative: gets back) construction money and refreshes the daily upkeep; toasts a newly linked highway exit
   private spend(cost: number): void {
     this.money -= cost;
+    if (cost) this.sfx.add(cost > 0 ? 'build' : 'demolish');
     this.ledger.today.build += cost;
     this.upkeepDay = this.upkeepPerDay();
     this.changed();
     this.syncPlans();
     this.version++;
+    const n = this.linkedExits().length;
+    if (n > this.exitsLinked) this.say('Highway exit linked: exports, imports and visitors can come and go');
+    this.exitsLinked = n;
   }
 
   // An edited junction plan whose roads changed (an arm added, removed or turned past 15 degrees) goes back to the default
@@ -711,7 +781,7 @@ export class Game {
 
   // A driveway is free as it stands, but priced in full when 'type' (a retype) is asked for
   private edgePrice(e: Edge, type?: RoadType): number {
-    return !type && e.drive ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
+    return !type && (e.drive || exitEdge(e)) ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
   }
 
   // A road from a to b runs through a footprint grown by pad (by default up to DOOR_D - 2, so a road along the front still reaches a door)
@@ -801,6 +871,12 @@ export class Game {
     return chain[chain.length - 1];
   }
 
+  // Road tool, click to click: curve = bend to meet the roads at either end (tangentAt), else one straight segment
+  planRoad(a: Vec, c: Vec, curve = this.roadCurve): PathPlan {
+    const ta = curve ? this.tangentAt(a, c) : null, tb = curve ? this.tangentAt(c, a) : null;
+    return { ...this.planPath(!ta && !tb ? [a, c] : cubicPoints(a, ...autoControls(a, c, ta, tb), c)), note: curve ? 'Curve' : 'Straight' };
+  }
+
   // Curved / freehand road through several anchors. The ends snap on 'level' first, else onto a node or road of another level (snapEnd);
   // intermediate anchors snap to nodes only (of 'level'), so a path can pass through a junction, or the door of a building without a road.
   // Ends on two levels make a ramp: segment i of n sits at 'level' clamped to within i levels of the start and n-1-i of the end, one
@@ -816,6 +892,7 @@ export class Game {
       const q = points[i + 1], n = q ? Math.max(1, Math.floor(dist(p, q) / TILE)) : 1;
       return Array.from({ length: n }, (_, k) => q ? { x: p.x + (q.x - p.x) * k / n, y: p.y + (q.y - p.y) * k / n } : p);
     });
+    else if (!level && snapMid) points = points.flatMap((p, i) => i ? [...shoreSplits(this.terrain, points[i - 1], p, TILE / 2), p] : [p]);
     const mid = (p: Vec): Snap => {
       if (!snapMid) return { node: null, edge: null, point: { x: p.x, y: p.y } };
       const n = this.graph.nearestNode(p, NODE_R + 4, level);
@@ -902,11 +979,15 @@ export class Game {
   }
 
   demolishAt(p: Vec): void {
+    const b = this.buildingUnder(p);
+    if (b) { this.tryDemolish(b); return; }
+    this.armed = null;
     const n = this.graph.nearestNode(p, NODE_R + 4);
     if (n && n.control !== 'none') { this.setControl(n, 'none'); return; }
     // prefer a road on the current level where several are stacked
     const hit = this.graph.nearestEdge(p, ROAD_W, this.level) ?? this.graph.nearestEdge(p, ROAD_W);
     if (!hit) return;
+    if (exitEdge(hit.edge)) { this.say('The highway to the outside stays: build onto it instead'); return; }
     const e = hit.edge, back = this.refundOf(e);
     this.dropCars(this.graph.removeEdge(e));
     this.spend(-back);
@@ -949,11 +1030,80 @@ export class Game {
     return best;
   }
 
+  // a highway exit's gate never counts: it stands off the map and cannot be moved or demolished
+  buildingUnder(p: Vec): Building | null {
+    return this.buildings.find(b => b.kind !== 'gate' && b.contains(p, 2)) ?? null;
+  }
+
+  // Residents or workers a demolish would turn out ('' for none): an occupied building takes a second click
+  occupants(b: Building): string {
+    const r = Math.round(b.residents), w = this.commuters.filter(c => c.work === b).length * T.PEOPLE_PER_CAR;
+    return r ? `${r} resident${r > 1 ? 's' : ''} move out` : w ? `${w} workers lose their jobs` : '';
+  }
+
+  // Demolish click on a building: an empty one goes at once, an occupied one arms on the first click and goes on the second.
+  // Back in the tray costs MOVE_COST (career), so demolish and re-place is never cheaper than a move
+  tryDemolish(b: Building): boolean {
+    const who = this.occupants(b), broke = this.afford(this.moveCost);
+    if (broke) { this.armed = null; this.say(broke); return false; }
+    if (who && this.armed !== b) { this.armed = b; this.say(`Click again to demolish: ${who}`); return false; }
+    this.demolishBuilding(b);
+    this.say(`${ZONES[b.kind].label} demolished${this.creative ? '' : `: back in the tray · ${fmtMoney(this.moveCost)}`}`);
+    return true;
+  }
+
+  // Lets go of b's door: its driveways go (their cars back to their origin's door), the door node stays as a plain joint
+  // only when a road runs through it
+  private unhook(b: Building): void {
+    const n = b.node;
+    for (const e of n.edges.filter(e => e.drive)) this.dropCars(this.graph.removeEdge(e));
+    n.building = null;
+    this.graph.dropIfOrphan(n);
+  }
+
+  // Removes b and every reference to it, and puts it back in the tray for MOVE_COST (career). Its commuters move out, workers lose the job;
+  // a car on its way to b (not a return leg) heads to another place of its purpose, any other trip from or to b ends and its
+  // commuter is home again. Its reports go too, so a save never points at it.
+  demolishBuilding(b: Building): void {
+    this.unhook(b);
+    this.buildings = this.buildings.filter(x => x !== b);
+    this.commuters = this.commuters.filter(c => c.home !== b);
+    for (const c of this.commuters) if (c.work === b) c.work = null;
+    const gone = (t: Trip): boolean => t.from === b || t.to === b;
+    const home = (t: Trip): void => { if (t.who) t.who.at = 'home'; };
+    const comp = this.components();
+    for (const car of this.cars.filter(c => gone(c.trip))) {
+      const t = car.trip, to = t.to === b && !t.back ? this.pick(t.from, comp, x => t.purpose === 'commute' || x.kind === 'shop' ? x.jobs : 0) : null;
+      if (to) { t.to = to; if (t.who) t.who.work = to; car.path = null; continue; }
+      this.graph.detachCar(car);
+      this.cars.splice(this.cars.indexOf(car), 1);
+      home(t);
+    }
+    for (const o of [b, ...this.buildings]) for (const list of [o.pending, o.parked]) {
+      for (let i = 0; i < list.length; i++) if (o === b || gone(list[i])) home(list.splice(i--, 1)[0]);
+    }
+    this.reports = this.reports.filter(r => r.from !== b && r.to !== b);
+    if (this.picked === b) this.picked = null;
+    if (this.armed === b) this.armed = null;
+    if (b.kind !== 'gate') this.tray[b.kind]++;
+    this.sfx.add('demolish');
+    this.spend(this.moveCost);
+  }
+
+  // Picks b up with the place tool: the ghost follows the cursor and a click sets it down (MOVE_COST in career); Esc puts it back
+  startMove(b: Building): void {
+    if (b.kind === 'gate') return;
+    this.placing = b.kind;
+    this.setTool('place');
+    this.moving = b;
+  }
+
   // Edit click, first hit wins: a car (followed, with its card), a junction (its panel), a building (its card), a road run (selected)
   select(p: Vec | null): void {
+    this.armed = null;
     this.follow = p ? this.carAt(p) : null;
     this.inspect = p && !this.follow ? this.junctionAt(p) : null;
-    this.picked = p && !this.follow && !this.inspect ? this.buildings.find(b => b.contains(p, 2)) ?? null : null;
+    this.picked = p && !this.follow && !this.inspect ? this.buildingUnder(p) : null;
     this.selected = p && !this.follow && !this.inspect && !this.picked ? this.runAt(p) : null;
   }
 
@@ -964,22 +1114,31 @@ export class Game {
     if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
     if (t !== 'edit') { this.selected = null; this.inspect = null; this.follow = null; this.picked = null; }
-    if (t !== 'place') this.placing = null;
+    if (t !== 'place') this.placing = this.moving = null;
+    if (t !== 'demolish') this.armed = null;
     if (t !== 'interchange') this.ichg = null;
   }
 
   // ---- Place tool ----
 
+  // The first zone after `from` (tray order, wrapping round to `from` itself) with a building left
+  nextKind(from: Zone | null = null): Zone | undefined {
+    const i = from ? ZONE_KEYS.indexOf(from) + 1 : 0;
+    return [...ZONE_KEYS.slice(i), ...ZONE_KEYS.slice(0, i)].find(z => this.tray[z] >= 1);
+  }
+
   // Picks up a building of the zone (or of the first zone with one left) from the tray
-  startPlacing(kind = ZONE_KEYS.find(z => this.tray[z] >= 1)): void {
+  startPlacing(kind = this.nextKind()): void {
     if (!kind || this.tray[kind] < 1) { this.say('No buildings to place: the next level brings more'); return; }
+    this.moving = null;
     this.placing = kind;
     this.setTool('place');
   }
 
   // Ghost of the held building at p. Near an access road (SNAP_R) it faces the road with its door DRIVE_GAP past the road's edge;
   // elsewhere it stands free, turned by placeAngle. It must lie inside the map on dry land, clear of roads (by a 4px margin) and
-  // of other buildings, with one left in the tray. Free: buildings cost nothing.
+  // of other buildings, with one left in the tray. Free: buildings cost nothing. Moving one: no tray needed, MOVE_COST in career,
+  // and its own footprint and driveways are out of the way.
   planPlace(p: Vec, kind = this.placing): PlacePlan | null {
     if (!kind) return null;
     const hit = this.accessEdges().map(e => ({ e, ...distToSegment(p, e.a, e.b) })).filter(h => h.d <= T.SNAP_R).sort((x, y) => x.d - y.d)[0];
@@ -992,14 +1151,14 @@ export class Game {
       b = buildingAt(kind, { x: q.x + nx * d, y: q.y + ny * d }, Math.atan2(-ny, -nx));
       road = q;
     } else b = new Building(kind, p.x, p.y, this.placeAngle);
-    const pts = b.outline(), m = 4;
+    const pts = b.outline(), m = 4, mv = this.moving;
     // ponytail: overlap by sampled outline points both ways; fine for near-square footprints, SAT if long thin ones arrive
-    const reason = this.tray[kind] < 1 ? 'None left in the tray'
-      : pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
+    const reason = (mv ? this.afford(this.moveCost) : this.tray[kind] < 1 ? 'None left in the tray' : '')
+      || (pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
       : pts.some(q => inWater(this.terrain, q, m) || inMountain(this.terrain, q, m)) ? 'Blocked by water or a mountain'
-      : this.graph.edges.some(e => this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
-      : this.buildings.some(o => pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m))) ? 'Overlaps a building'
-      : '';
+      : this.graph.edges.some(e => !(mv && e.drive && (e.a === mv.node || e.b === mv.node)) && this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
+      : this.buildings.some(o => o !== mv && (pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m)))) ? 'Overlaps a building'
+      : '');
     const near = (z: Zone): number => this.buildings.filter(o => o.kind === z && dist(o, b) < T.POLLUTION_R).length;
     const noisy = () => this.graph.edges.some(e => !e.tunnel && TIERS[e.type.tier].noise >= T.NOISY && distToSegment(b, e.a, e.b).d < T.NOISE_R);
     const warn = !road ? 'No road yet: connect its door'
@@ -1010,16 +1169,39 @@ export class Game {
     return { b, ok: !reason, reason, warn, road };
   }
 
-  // Places the held building at p with its free driveway; the tool lets go once that zone runs out
+  get moveCost(): number { return this.creative ? 0 : T.MOVE_COST; }
+
+  // Places the held building at p with its free driveway; once that zone runs out the tool takes the next one left, or lets go.
+  // A moved building keeps its households, jobs and trips: cars on their way to it find the new door.
   placeBuilding(p: Vec): boolean {
     const plan = this.planPlace(p);
     if (!plan) return false;
     if (!plan.ok) { this.say(plan.reason); return false; }
-    const b = plan.b;
-    if (b.kind === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
+    const mv = this.moving;
+    if (mv) {
+      this.unhook(mv);
+      Object.assign(mv, { x: plan.b.x, y: plan.b.y, angle: plan.b.angle });
+      const d = mv.door();
+      this.graph.addNode(d.x, d.y, mv);
+      this.connect();
+      for (const c of this.cars) if (c.trip.to === mv) c.path = null;
+      this.spend(this.moveCost);
+      this.sfx.add('place');
+      this.setTool('edit');
+      this.picked = mv;
+      this.say(`${ZONES[mv.kind].label} moved${this.moveCost ? ` · ${fmtMoney(this.moveCost)}` : ''}`);
+      return true;
+    }
+    const b = plan.b, z = this.placing!;
+    if (z === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
     this.addBuilding(b);
     this.connect();
-    if (--this.tray[b.kind] < 1) this.setTool('road');
+    this.sfx.add('place');
+    if (--this.tray[z] < 1) {
+      const next = this.nextKind(z);
+      if (next) { this.placing = next; this.say(`No ${ZONES[z].label} left in the tray: switched to ${ZONES[next].label}`); }
+      else this.setTool('road');
+    }
     return true;
   }
 
@@ -1377,6 +1559,7 @@ export class Game {
 
   say(text: string): void {
     this.message = text;
+    this.said++;
     clearTimeout(this.msgTimeout);
     // ponytail: real time (2.5 s), so the message clears even while the game is paused
     this.msgTimeout = setTimeout(() => { this.message = ''; }, 2500);

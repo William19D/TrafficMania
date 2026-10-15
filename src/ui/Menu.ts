@@ -1,4 +1,5 @@
-// Main menu (Continue, New game, Load, Controls) and the pause menu (Esc with nothing to cancel): Resume, Save, Load, Controls, Quit
+// Main menu (Continue, New game, Load, Sound, Controls) and the pause menu (Esc with nothing to cancel): Resume, Save, Load, Sound,
+// Controls, Quit
 import type { Game } from '../core/Game.ts';
 import { fmtMoney } from '../core/Game.ts';
 import { BIOMES, DIFFICULTY, SIZES } from '../core/config.ts';
@@ -6,8 +7,10 @@ import type { Biome, Difficulty, GameConfig, MapSize, Mode } from '../core/confi
 import { AUTO, SLOTS, peek } from '../core/Save.ts';
 import { CONTROLS } from './HUD.ts';
 import { icon } from './icons.ts';
+import { sound } from './Sound.ts';
+import type { Mix } from './Sound.ts';
 
-type View = 'main' | 'new' | 'load' | 'save' | 'help' | 'pause';
+type View = 'main' | 'new' | 'load' | 'save' | 'help' | 'pause' | 'sound';
 export interface MenuHooks {
   game(): Game;
   newGame(cfg: GameConfig): void;
@@ -59,6 +62,14 @@ export class Menu {
       const b = (e.target as Element).closest<HTMLElement>('[data-m]');
       if (b && !(b as HTMLButtonElement).disabled) this.act(b.dataset.m!, b.dataset.v);
     });
+    // volume sliders: live while dragging, no redraw (the slider keeps focus); the effects one plays a sample when let go
+    el.addEventListener('input', e => {
+      const r = e.target as HTMLInputElement, k = r.dataset.vol as keyof Mix | undefined;
+      if (!k) return;
+      sound.set({ [k]: Number(r.value) / 100 });
+      r.nextElementSibling!.textContent = `${r.value}%`;
+    });
+    el.addEventListener('change', e => { if ((e.target as HTMLElement).dataset.vol === 'sfx') sound.play('place'); });
   }
 
   get open(): boolean { return this.view !== null; }
@@ -96,7 +107,8 @@ export class Menu {
     const d = this.draft;
     if (m === 'resume') this.close(true);
     else if (m === 'back') this.show(this.home);
-    else if (m === 'new' || m === 'load' || m === 'save' || m === 'help') this.show(m);
+    else if (m === 'new' || m === 'load' || m === 'save' || m === 'help' || m === 'sound') this.show(m);
+    else if (m === 'snd' && v) { const [k, x] = v.split(':'); sound.set({ [k]: x === '1' }); this.render(); }
     else if (m === 'continue') { if (this.h.load(AUTO)) this.close(false); else this.render(); }
     else if (m === 'slot' && v) {
       if (this.view === 'save') { this.note = this.h.save(v) ? `Saved to ${SLOT_NAME(v)}.` : 'Could not save: storage is full or blocked.'; this.show('pause'); }
@@ -129,7 +141,7 @@ export class Menu {
         <p class="sub">Design the road network, find the bottleneck, fix it and grow the city.</p>
         <div class="mlist">
           ${a.ok ? btn('continue', `<span>Continue</span><small>${a.text}</small>`, 'primary') : ''}
-          ${btn('new', 'New game', a.ok ? '' : 'primary')}${btn('load', 'Load game')}${btn('help', 'Controls')}
+          ${btn('new', 'New game', a.ok ? '' : 'primary')}${btn('load', 'Load game')}${btn('sound', 'Sound')}${btn('help', 'Controls')}
         </div>`;
     } else if (v === 'pause') {
       body = `<h2 id="mn-title">Paused</h2>
@@ -138,7 +150,7 @@ export class Menu {
           <button class="iconbtn" data-m="copy" aria-label="Copy the seed" title="Copy the seed">${icon('copy')}</button></div>
         <div class="mlist">
           ${btn('resume', 'Resume <kbd>Esc</kbd>', 'primary')}${btn('save', `${icon('save')}Save game`)}${btn('load', 'Load game')}
-          ${btn('help', 'Controls')}${btn('quit', 'Quit to menu')}
+          ${btn('sound', 'Sound')}${btn('help', 'Controls')}${btn('quit', 'Quit to menu')}
         </div>
         <p class="note" role="status">${esc(this.note)}</p>`;
     } else if (v === 'load' || v === 'save') {
@@ -149,6 +161,21 @@ export class Menu {
           const s = slotLine(k), ok = v === 'save' || s.ok;
           return `<button class="slot" data-m="slot" data-v="${k}"${ok ? '' : ' disabled'}><b>${SLOT_NAME(k)}</b><span>${s.text}</span><small>${s.sub}</small></button>`;
         }).join('')}</div>
+        <div class="actions">${back}</div>`;
+    } else if (v === 'sound') {
+      const x = sound.mix;
+      // onV: the value of k that 'On' sets (muted is on when false)
+      const toggle = (k: 'muted' | 'musicOn', label: string, onV: boolean) => `
+        <div class="field" role="group" aria-label="${label}"><span class="flabel">${label}</span>
+          <div class="opts">${([['On', onV], ['Off', !onV]] as const).map(([l, v]) => `<button class="opt" data-m="snd" data-v="${k}:${+v}" aria-pressed="${x[k] === v}">${l}</button>`).join('')}</div></div>`;
+      const slider = (k: 'master' | 'music' | 'sfx', label: string) => `
+        <label class="field"><span class="flabel">${label}</span>
+          <span class="vol"><input type="range" min="0" max="100" step="5" data-vol="${k}" value="${Math.round(x[k] * 100)}"><output>${Math.round(x[k] * 100)}%</output></span></label>`;
+      body = `<h2 id="mn-title">Sound</h2>
+        <p class="sub"><kbd>Shift</kbd> + <kbd>M</kbd> mutes or unmutes at any time.</p>
+        ${toggle('muted', 'Sound', false)}
+        ${slider('master', 'Master volume')}${slider('sfx', 'Effects and city')}
+        ${toggle('musicOn', 'Music', true)}${slider('music', 'Music volume')}
         <div class="actions">${back}</div>`;
     } else if (v === 'help') {
       body = `<h2 id="mn-title">Controls</h2>

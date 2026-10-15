@@ -2,20 +2,24 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
 import type { Trip } from '../src/entities/Trip.ts';
-import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
+import { Car, GIVE_UP_S, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING, ZONES } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
+import { dist, snapAngle } from '../src/util/geom.ts';
+import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
+import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
+import { daylight } from '../src/rendering/Lighting.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -29,7 +33,7 @@ const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
   setSeed(12345);
-  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], biome: 'temperate' };
+  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: 'temperate' };
   w.graph = new RoadGraph();
   w.buildings = [];
   w.tutorialActive = true;
@@ -55,8 +59,10 @@ const trip = (from: Node, to: Node): Trip => makeTrip('commute', from.building!,
   if (t.lakes.length < 4) fail(`terrain: archipelago has only ${t.lakes.length} lakes`);
   // Starter town: 4 homes and the 3 workplaces; on easy a starter street gives every home a driveway, on normal nothing has a road
   for (const difficulty of ['easy', 'normal'] as const) {
-    const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home');
-    if (homes.length !== 4 || w.buildings.length !== 7) fail(`starter town: ${w.buildings.map(b => b.kind)}`);
+    const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home'), gates = w.buildings.filter(b => b.kind === 'gate');
+    if (homes.length !== 4 || w.buildings.length - gates.length !== 7) fail(`starter town: ${w.buildings.map(b => b.kind)}`);
+    // 2-4 highway exits, each a gate with its free stub and no town road to it yet
+    if (gates.length < 2 || gates.length > 4 || gates.some(b => b.node.edges.length !== 1) || w.linkedExits().length || w.upkeepPerDay() !== (difficulty === 'easy' ? w.upkeepDay : 0)) fail(`exits: ${gates.length} gates`);
     if (homes.some(b => b.connected !== (difficulty === 'easy'))) fail(`starter town: ${difficulty} homes connected ${homes.map(b => b.connected)}`);
   }
 }
@@ -306,6 +312,20 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (let t = 0; t < 3 * 60; t++) w.update(DT);
   if (c.lane.from === J || c.granted || c.lane.edge.length - c.s < stopDist(J) - 1) fail(`short approach: moto ran the busy junction (on ${c.lane.from.id}->${c.lane.to.id}, s=${c.s.toFixed(1)})`);
 }
+// Joint before a junction: a lone car through plain joint M onto a 15px link to plain J (a road crossing a curve next to its joint)
+// rolls onto the link to queue at J and arrives, instead of stopping short of M until it gives up
+{
+  const w = blank(), wg = w.graph, flat = { bridge: false, tunnel: false, level: 0, type: { tier: 'avenue', lanes: 1, oneWay: false } as RoadType };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), M = wg.addNode(485, 500), J = wg.addNode(500, 500);
+  for (const [a, b] of [[X, M], [M, J], [J, Y], [J, Z]]) wg.addEdge(a!, b!, { ...flat }, 0);
+  w.demandOff = true;
+  const e = wg.edgeBetween(X, M)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y));
+  c.s = 50;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  for (let t = 0; t < 15 * 60 && w.cars.includes(c); t++) w.update(DT);
+  if (w.score !== 1) fail(`joint before a junction: car stopped at ${c.lane.from.id}->${c.lane.to.id} s=${c.s.toFixed(1)}, waited ${c.wait.toFixed(1)}s`);
+}
 // Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
@@ -416,6 +436,23 @@ for (const kind of ['ambulance', 'car'] as const) {
   if (!J.plan) fail('edits: a slight bend reset the junction plan');
   if (Math.abs(w.money - (m1 - bend.net!)) > 1e-6) fail(`edits: bend cost ${m1 - w.money}, expected ${bend.net}`);
 }
+// Road shape: from a street's end, Curve bends the new road to leave along the street, Straight lays one segment; Ctrl's 15° steps
+{
+  const w = blank(), A = w.graph.addNode(500, 500), B = w.graph.addNode(100, 500), to = { x: 800, y: 900 };
+  w.commitPath(w.planPath([B, A], 0));
+  const c = w.planRoad(A, to, true), s = w.planRoad(A, to, false);
+  if (!c.ok || c.points.length < 3 || c.note !== 'Curve') fail(`road shape: curve gave ${c.points.length} points (${c.reason})`);
+  if (!s.ok || s.points.length !== 2 || s.note !== 'Straight') fail(`road shape: straight gave ${s.points.length} points (${s.reason})`);
+  const q = snapAngle(A, { x: 600, y: 530 }, Math.PI / 12), deg = Math.atan2(q.y - A.y, q.x - A.x) * 180 / Math.PI;
+  if (Math.abs(deg - 15) > 1e-9 || Math.abs(dist(A, q) - Math.hypot(100, 30)) > 1e-9) fail(`road shape: snapped to ${deg}°`);
+  // a straight road over a river is a bridge only over the water: the land either side stays a street a building can join
+  w.terrain.rivers = [{ points: [{ x: 1200, y: 0 }, { x: 1200, y: 1200 }], width: 60 }];
+  const r = w.planRoad({ x: 900, y: 100 }, { x: 1500, y: 100 }, false), kinds = r.segs.map(s => s.bridge).join();
+  if (!r.ok || kinds !== 'false,true,false') fail(`road shape: a straight road over a river built as bridges ${kinds} (${r.reason})`);
+  w.commitPath(r);
+  w.startPlacing('home');
+  if (!w.planPlace({ x: 1000, y: 150 })?.road) fail('road shape: no building snaps to the land part of a road over a river');
+}
 // Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
 // get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the
 // tray and pays the grant once
@@ -445,6 +482,11 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.update(DT);
   if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
   if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+  // the last shop placed hands the tool the next kind left (a factory); the last factory puts the tool away
+  w.tray = { home: 0, shop: 1, office: 0, industry: 1 };
+  w.startPlacing('shop');
+  if (!w.placeBuilding({ x: 780, y: 440 }) || w.tool !== 'place' || w.placing !== 'industry') fail(`levels: after the last shop ${w.tool} ${w.placing}`);
+  if (!w.placeBuilding({ x: 800, y: 575 }) || w.tool !== 'road' || w.placing) fail(`levels: after the last factory ${w.tool} ${w.placing}`);
 }
 // Driveways: homes placed facing each other across a street, doors 13px apart along it, share one junction instead of leaving a
 // stretch of road shorter than a truck between two (which locked both), and both commutes arrive
@@ -719,11 +761,182 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   // granted through each driveway junction it keeps its speed: well under the free-flow time's per-junction allowance
   if (w.reports[0]?.outcome !== 'smooth' || w.reports[0].ratio > 0.9) fail(`free flow: ${w.reports[0]?.outcome} at ${w.reports[0]?.ratio.toFixed(2)}x the free-flow time`);
 }
+// Driveway merge: with a steady stream both ways down a street, the road never queues at a driveway junction, and a car leaving a
+// driveway on each side gets in within MERGE_S plus a little (the road keeps clear for it once it has waited MERGE_S)
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.office = 99;
+  for (const x of [60, 1480]) { w.startPlacing('office'); w.placeBuilding({ x, y: 540 }); }
+  for (const x of [740, 780]) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  const [o1, o2] = w.buildings.filter(b => b.kind === 'office'), [h1, h2] = w.buildings.filter(b => b.kind === 'home');
+  for (let i = 0; i < 30; i++) { w.queueTrip(o1, o2, 'commute'); w.queueTrip(o2, o1, 'commute'); }
+  let t = 0;
+  for (; t < 8 * 60; t++) w.update(DT);
+  const out = [w.queueTrip(h1, o2, 'commute'), w.queueTrip(h2, o1, 'commute')];
+  for (; t < 120 * 60 && w.score < 62; t++) {
+    w.update(DT);
+    invariants(w);
+    if (w.graph.nodes.some(n => w.graph.drivewayJunction(n) && n.queue.some(c => !c.lane.edge.drive))) fail('merge: a road car queued at a driveway junction');
+  }
+  if (w.score !== 62 || out.some(r => r.jamS > MERGE_S + 1)) fail(`merge: ${w.score} of 62 arrived, driveway waits ${out.map(r => r.jamS.toFixed(1))}s`);
+}
+// Rush hour: a city of ~100 homes lining a street grid (a driveway junction every ~80px, plain 4-way junctions, three lights on the
+// avenue, a roundabout, a yield T, a one-way piece and a viaduct whose ramps land on two junctions) through two rush hours. Nothing
+// deadlocks (driveway merges, U-turn reroutes, plain junctions taking non-crossing cars together, starved side roads and lefts):
+// no car comes near giving up, no trip fails, and most trips run smooth.
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  const road = (a: number[], b: number[], type = street, level = 0): void => w.commitPath(w.planPath([{ x: a[0], y: a[1] }, { x: b[0], y: b[1] }], level, type));
+  const xs = [200, 520, 840, 1160, 1480], ys = [200, 450, 700, 950];
+  for (const x of xs) road([x, 200], [x, 950], x === 840 ? { tier: 'avenue', lanes: 1, oneWay: false } : street);
+  for (const y of ys) {
+    if (y === 950) { road([200, y], [520, y]); road([520, y], [840, y], { tier: 'street', lanes: 1, oneWay: true }); road([840, y], [1480, y]); }
+    else road([200, y], [1480, y], y === 450 ? { tier: 'avenue', lanes: 2, oneWay: false } : street);
+  }
+  road([200, 700], [1160, 450], { tier: 'avenue', lanes: 1, oneWay: false }, 2);
+  w.tray = { home: 999, shop: 999, office: 999, industry: 999 };
+  let k = 0;
+  const place = (p: Vec): void => { k++; w.startPlacing(k % 11 === 0 ? 'shop' : k % 5 === 0 ? 'office' : k % 37 === 0 ? 'industry' : 'home'); w.placeBuilding(p); };
+  for (const y of ys) for (let x = 220; x < 1470; x += 40) for (const d of [-40, 40]) if ((x + y + d) % 120 < 60) place({ x, y: y + d });
+  for (const x of xs) for (let y = 220; y < 940; y += 40) for (const d of [-40, 40]) if ((x + y + d) % 120 < 60) place({ x: x + d, y });
+  w.setTool('road');
+  for (const b of w.buildings) if (b.kind === 'home') b.residents = 15;
+  for (const [x, y, c] of [[520, 450, 'light'], [840, 450, 'light'], [1160, 450, 'light'], [520, 700, 'roundabout'], [1480, 450, 'yield']] as const) w.placeControl({ x, y }, c);
+  if (w.buildings.filter(b => b.kind === 'home').length < 90 || w.buildings.some(b => !b.connected)) fail('rush hour: town not built');
+  let maxWait = 0;
+  while (w.clock < 34) {
+    w.update(DT);
+    for (const c of w.cars) maxWait = Math.max(maxWait, c.wait);
+  }
+  const smooth = w.stats.smooth / w.stats.arrived;
+  if (maxWait > GIVE_UP_S - 2 || w.stats.failed || smooth < 0.75) fail(`rush hour: longest stop ${maxWait.toFixed(1)}s, ${w.stats.failed} failed, ${(smooth * 100).toFixed(0)}% smooth of ${w.stats.arrived}`);
+}
+// Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
+// (cars, trips, commuters, reports, nodes), its cars on the way head to another workplace, it goes back to the tray, saves and loads, and the sim runs on; a home moved down the street
+// keeps its residents and commuters, costs MOVE_COST, and its commuters get home to the new door
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.office = w.tray.shop = 99;
+  for (let x = 150; x < 700; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  for (const [k, x] of [['office', 300], ['shop', 700], ['office', 1100]] as const) { w.startPlacing(k); w.placeBuilding({ x, y: 540 }); }
+  const refs = (what: string): void => {
+    const B = new Set(w.buildings), N = new Set(w.graph.nodes), C = new Set(w.commuters);
+    const bad = (t: Trip): boolean => !B.has(t.from) || !B.has(t.to) || (!!t.who && !C.has(t.who));
+    if (w.cars.some(c => bad(c.trip)) || w.buildings.some(b => [...b.pending, ...b.parked].some(bad))) fail(`${what}: a trip points at a removed building`);
+    if (w.commuters.some(c => !B.has(c.home) || (c.work && !B.has(c.work)))) fail(`${what}: a commuter points at a removed building`);
+    if (w.reports.some(r => !B.has(r.from) || !B.has(r.to))) fail(`${what}: a report points at a removed building`);
+    if (w.graph.nodes.some(n => n.building && !B.has(n.building)) || w.buildings.some(b => !N.has(b.node) || b.node.building !== b)) fail(`${what}: door nodes out of sync`);
+  };
+  const O1 = w.buildings.find(b => b.kind === 'office')!;
+  for (let t = 0; t < 6 * HOUR * 60 && (w.cars.filter(c => c.trip.to === O1).length < 2 || !w.reports.some(r => r.to === O1)); t++) w.update(DT);
+  const enRoute = w.cars.filter(c => c.trip.to === O1 && !c.trip.back);
+  if (enRoute.length < 2) fail(`demolish: only ${enRoute.length} cars headed to the office`);
+  const tray = w.tray.office;
+  if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: an occupied office went on the first click');
+  const cash = w.money;
+  w.money = 0;
+  if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: went with no money for MOVE_COST');
+  w.money = cash;
+  w.tryDemolish(O1);
+  if (!w.tryDemolish(O1) || w.buildings.includes(O1) || w.tray.office !== tray + 1) fail('demolish: the second click did not remove it into the tray');
+  // back in the tray costs a move, so demolish and re-place never beats Move
+  if (w.money !== cash - TUNING.MOVE_COST) fail(`demolish: cost $${cash - w.money}, not MOVE_COST`);
+  refs('demolish');
+  if (!enRoute.some(c => w.cars.includes(c) && c.trip.to !== O1 && c.trip.to.jobs > 0)) fail('demolish: no car on its way was sent to another workplace');
+  const json = serialize(w);
+  if (serialize(deserialize(json)) !== json) fail('demolish: the save does not round-trip');
+  const score = w.score;
+  for (let t = 0; t < HOUR * 60; t++) { w.update(DT); invariants(w); }
+  refs('demolish, an hour on');
+  if (w.score <= score) fail('demolish: nothing arrived after it');
+  const H = w.buildings.find(b => b.kind === 'home' && w.commuters.some(c => c.home === b && c.at === 'away'))!;
+  if (!H) fail('move: no home with a commuter at work');
+  const res = H.residents, mine = w.commuters.filter(c => c.home === H).length, money = w.money, before = new Set(w.reports);
+  w.startMove(H);
+  if (!w.placeBuilding({ x: 1300, y: 460 })) fail(`move: refused, ${w.message}`);
+  refs('move');
+  if (H.x < 1200 || !H.connected || H.residents !== res || w.commuters.filter(c => c.home === H).length !== mine) fail('move: the home did not keep its place, residents or commuters');
+  if (w.money !== money - TUNING.MOVE_COST || w.moving) fail(`move: cost $${money - w.money}`);
+  const home = (): boolean => w.reports.some(r => !before.has(r) && r.to === H && r.back && r.purpose === 'commute' && r.outcome !== 'gaveup' && r.outcome !== 'noroute');
+  for (let t = 0; t < 12 * HOUR * 60 && !home(); t++) { w.update(DT); invariants(w); }
+  if (!home()) fail('move: no commuter got home to the moved door');
+  refs('move, hours on');
+}
+// Sound cues: a road raises 'build', a building 'place', a demolish 'demolish'; a refused build raises none but still counts a message
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false }, cues = (): string => { const c = [...w.sfx].join(); w.sfx.clear(); return c; };
+  w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 900, y: 500 }], 0, street));
+  const built = cues();
+  w.tray.home = 9;
+  w.startPlacing('home'); w.placeBuilding({ x: 400, y: 460 });
+  const placed = cues();
+  w.demolishAt({ x: 800, y: 500 });
+  const gone = cues(), said = w.said;
+  w.money = 0;
+  w.commitPath(w.planPath([{ x: 300, y: 700 }, { x: 900, y: 700 }], 0, street));
+  if (built !== 'build' || placed !== 'place' || gone !== 'demolish' || cues() || w.said !== said + 1) fail(`sound cues: '${built}' '${placed}' '${gone}'`);
+}
+// Outside connections: an exit no town road reaches trades nothing and its stub cannot be demolished; once a street links it,
+// factory trucks export through it (and leave the map), import trucks arrive at the factory from it, and trade is paid
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.terrain.exits = [{ door: { x: 0, y: 500 }, end: { x: 160, y: 500 }, angle: 0 }];
+  w.addExits();
+  const gate = w.buildings.find(b => b.kind === 'gate')!, edges = w.graph.edges.length;
+  w.demolishAt({ x: 80, y: 500 });
+  if (w.graph.edges.length !== edges || !gate.connected) fail('exits: the stub was demolished');
+  // a road onto the stub's middle splits it: both halves stay free and cannot be demolished
+  w.commitPath(w.planPath([{ x: 80, y: 640 }, { x: 80, y: 500 }], 0, street));
+  const stub = w.graph.edges.filter(e => e.type.tier === 'highway'), up = w.upkeepPerDay(), cash = w.money;
+  for (const x of [40, 120]) w.demolishAt({ x, y: 500 });
+  if (stub.length !== 2 || stub.some(e => !e.exit || !w.graph.edges.includes(e)) || w.money !== cash || w.upkeepPerDay() !== up) fail('exits: a split stub piece lost its exit flag');
+  w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.industry = w.tray.shop = 99;
+  for (let x = 340; x < 760; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  w.startPlacing('industry'); w.placeBuilding({ x: 1000, y: 540 });
+  w.startPlacing('shop'); w.placeBuilding({ x: 1300, y: 540 });
+  const F = w.buildings.find(b => b.kind === 'industry')!, traded = () => w.ledger.today.trade + w.ledger.yesterday.trade;
+  const via = (out: boolean) => w.reports.filter(r => r.purpose === 'freight' && !r.back && (out ? r.from === F && r.to === gate : r.from === gate && r.to === F)
+    && r.outcome !== 'gaveup' && r.outcome !== 'noroute').length;
+  while (w.clock < 30) { w.update(DT); invariants(w); }
+  if (w.reports.some(r => r.from === gate || r.to === gate) || gate.pending.length || traded() || !w.reports.some(r => r.from === F && r.purpose === 'freight')) fail('exits: an unlinked exit traded, or the factory sent no trucks');
+  w.commitPath(w.planPath([{ x: 160, y: 500 }, { x: 300, y: 500 }], 0, street));
+  if (w.linkedExits()[0] !== gate) fail('exits: the street did not link the exit');
+  while (w.clock < 78) { w.update(DT); invariants(w); }
+  if (via(true) < 2 || via(false) < 2 || traded() <= 0) fail(`exits: ${via(true)} exports left, ${via(false)} imports arrived, $${traded()} trade`);
+}
 // No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0)
 {
   const w = new Game({ ...SIM, difficulty: 'normal' });
   while (!w.gameOver && w.day < 8) w.update(0.5);
   if (w.gameOver !== 'unhappy' || w.day > TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS) fail(`no roads: '${w.gameOver}' on day ${w.day}`);
+}
+// Building art: every variant's body and chimney stand inside the footprint, offices come in several heights, and a street of
+// ten buildings 50px apart shows at least five looks
+{
+  for (const kind of ['home', 'shop', 'office', 'industry'] as const) for (let v = 0; v < VARIANTS; v++) {
+    const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2, { body: [x, y, w, h], chimney: c } = look(kind, v);
+    if (x < -H || y < -W || x + w > H || y + h > W || (c && (Math.abs(c.x) > H || Math.abs(c.y) > W))) fail(`art: ${kind} variant ${v} spills out of its footprint`);
+  }
+  if (new Set(Array.from({ length: VARIANTS }, (_, v) => look('office', v).height)).size < 3) fail('art: offices all one height');
+  const street = new Set(Array.from({ length: 10 }, (_, i) => variant(300 + i * 50, 640)));
+  if (street.size < 5 || variant(321.5, 77) !== variant(321.5, 77)) fail(`art: a street shows ${street.size} looks`);
+}
+// Day/night: no tint at noon, a full blue night at midnight, a warm dusk part way to night, and the tint never jumps between two
+// clock readings 3 in-game minutes apart; a shade of a shade still parses (vehicle tones are shaded again for roofs and outlines)
+{
+  const noon = daylight(12), mid = daylight(0), dusk = daylight(18.6);
+  if (noon.r + noon.g + noon.b !== 765 || noon.night) fail('light: noon is tinted');
+  if (mid.night !== 1 || mid.b <= mid.r) fail('light: midnight is not a blue night');
+  if (dusk.r <= dusk.b || dusk.night <= 0 || dusk.night >= 1) fail('light: dusk is not warm');
+  for (let h = 0; h < 24; h += 0.05) {
+    const a = daylight(h), b = daylight(h + 0.05);
+    if (Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 12 || Math.abs(a.night - b.night) > 0.05) fail(`light: the tint jumps at ${h.toFixed(2)}h`);
+  }
+  if (shade(shade('#5A6FD8', -0.2), 0) !== shade('#5A6FD8', -0.2)) fail('art: a shade does not shade again');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through
