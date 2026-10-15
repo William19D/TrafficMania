@@ -3,7 +3,7 @@ import { dist, distToSegment, segmentsCross } from '../util/geom.ts';
 import type { Building } from '../entities/Building.ts';
 import { DOOR_R } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
-import { TIERS } from '../core/config.ts';
+import { TIERS, TUNING } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
 import type { JunctionPlan, Move } from './Junction.ts';
 import { LEFT, approachOf, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
@@ -43,6 +43,7 @@ export interface Node {
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
   controlDay: number; // day the control was built (refund rule)
   plan: JunctionPlan | null; // edited phases / turn bans; null = the default plan (Junction.planOf)
+  delay: number; // EMA of the mean stopped seconds of the cars queued at it (heat map)
 }
 
 // INVARIANT: cars sorted ascending by s; the last one is the furthest ahead.
@@ -54,6 +55,7 @@ export interface Edge {
   bridge: boolean; tunnel: boolean; level: number;
   day: number; // build day (refund rule); a split keeps it
   drive: boolean; // auto driveway to a building: free, no upkeep, no refund
+  heat: number; // congestion EMA 0..1: the larger of density and slowness (1 - speed / top speed) of its cars
 }
 
 export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean }
@@ -66,7 +68,7 @@ export class RoadGraph {
   private nextId = 1;
 
   addNode(x: number, y: number, building: Building | null = null): Node {
-    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0, plan: null };
+    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0, plan: null, delay: 0 };
     if (building) building.node = n;
     this.nodes.push(n);
     return n;
@@ -75,7 +77,7 @@ export class RoadGraph {
   addEdge(a: Node, b: Node, flags: EdgeFlags, day = 0): Edge {
     const e = {
       id: this.nextId++, a, b, length: dist(a, b),
-      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive,
+      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive, heat: 0,
     } as Edge;
     this.buildLanes(e, flags.type);
     a.edges.push(e);
@@ -122,6 +124,7 @@ export class RoadGraph {
     this.unlink(e);
     const e1 = this.addEdge(a, n, flags, e.day);
     const e2 = this.addEdge(n, b, flags, e.day);
+    e1.heat = e2.heat = e.heat;
     // Distributes the cars keeping ascending order (iterated from lowest to highest s)
     const move = (old: Lane) => {
       const k = this.lanesFrom(e, old.from).indexOf(old);
@@ -364,8 +367,16 @@ export class RoadGraph {
   }
 
   update(dt: number): void {
+    const k = Math.min(1, dt / TUNING.HEAT_TAU);
+    for (const e of this.edges) {
+      let n = 0, slow = 0;
+      for (const l of e.lanes) for (const c of l.cars) { n++; slow += 1 - Math.min(1, c.speed / c.top(e)); }
+      const x = n ? Math.max(n * (CAR_LEN + GAP) / (e.length * e.lanes.length), slow / n) : 0;
+      e.heat += (Math.min(1, x) - e.heat) * k;
+    }
     for (const n of this.nodes) {
       n.queue = n.queue.filter(c => c.lane.to === n);
+      n.delay += ((n.queue.length ? n.queue.reduce((s, c) => s + c.wait, 0) / n.queue.length : 0) - n.delay) * k;
       const plan = n.control === 'light' || n.control === 'yield' || n.plan ? planOf(n) : null;
       if (n.control === 'light') {
         const ph = plan!.phases;

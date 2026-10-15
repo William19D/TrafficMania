@@ -17,15 +17,19 @@ import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_BATCH, ENDLESS_POP, LEVELS, TIERS, 
 import type { Feature, GameConfig, Purpose, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 import { ICHG, ICHG_KEYS } from './Templates.ts';
+import { Metrics } from './Metrics.ts';
 import type { Ichg } from './Templates.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place' | 'grid' | 'interchange';
 // Tools locked below a city level
 export const TOOL_LOCK: Partial<Record<Tool, Feature>> = { roundabout: 'roundabout', grid: 'grid', interchange: 'interchange' };
 export type GameOver = '' | 'bankrupt' | 'unhappy';
+// Map overlays: congestion heat map, or road noise and factory pollution with each home's happiness
+export type Overlay = 'none' | 'heat' | 'noise';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
+export const OUTCOME_LABEL: Record<Outcome, string> = { smooth: 'smooth run', wait: 'long wait', detour: 'detour', gaveup: 'gave up', noroute: 'no route' };
 const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map(o => [o, 0])) as Record<Outcome, number>;
 // $ per day by category; build is the net spent on construction (refunds count negative)
 export interface Ledger { taxes: number; business: number; upkeep: number; build: number; grants: number }
@@ -36,6 +40,13 @@ export const fmtMoney = (n: number): string => {
   const a = Math.abs(n), s = a >= 1e6 ? `${(a / 1e6).toFixed(1)}M` : Math.round(a).toLocaleString('en-US');
   return (n < 0 && s !== '0' ? '−$' : '$') + s;
 };
+// Game seconds as in-game time: 14 min · 1.5 h
+export const fmtMin = (secs: number): string => {
+  const m = secs / HOUR * 60;
+  return m < 59.5 ? `${Math.round(m)} min` : `${(m / 60).toFixed(1)} h`;
+};
+// What held a car up at node n: its control, 'none' for a plain junction, 'road' for a queue between junctions
+export const jamAt = (n: Node | null): Control | 'road' => !n || (n.control === 'none' && n.edges.length < 3) ? 'road' : n.control;
 export interface Snap { node: Node | null; edge: Edge | null; point: Vec }
 // Place tool ghost: road = where its driveway would join (null: no access road in reach); warn = what its residents will dislike
 export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null }
@@ -76,6 +87,11 @@ export class Game {
   // Last 200 finished trips, oldest first; arrived / failed since the start, outcomes since midnight
   reports: TripReport[] = [];
   stats = { arrived: 0, smooth: 0, failed: 0, today: outcomes0() };
+  metrics = new Metrics();
+  overlay: Overlay = 'none';
+  // Edit click: the car the camera follows (its card), the building whose card is open
+  follow: Car | null = null;
+  picked: Building | null = null;
   // Infinity in creative mode
   money: number;
   ledger = { today: ledger0(), yesterday: ledger0() };
@@ -201,6 +217,10 @@ export class Game {
     // every hour passed (a time jump runs each one): demand and happiness, then that hour's taxes and upkeep, then midnight
     for (const hr = Math.floor(this.clock); this.lastHour < hr;) {
       const h = ++this.lastHour % 24;
+      this.metrics.add({
+        day: Math.floor(this.lastHour / 24) + 1, hour: h, money: this.money, pop: this.population, happy: this.happiness,
+        waiting: this.cars.reduce((n, c) => n + +(c.speed < 1), 0) + this.buildings.reduce((n, b) => n + b.pending.length, 0),
+      });
       this.hourly(h);
       this.payHour();
       if (!h) this.midnight();
@@ -223,13 +243,17 @@ export class Game {
         this.stats.arrived++;
         const t = car.trip, secs = this.time - t.departed;
         if (!t.back) this.business(t);
-        this.report(t, this.outcome(t, secs), secs);
+        const o = this.outcome(t, secs);
+        this.report(t, o, secs);
+        if (car === this.follow) this.say(`Arrived: ${OUTCOME_LABEL[o]}, ${fmtMin(secs)}`);
         if (t.back) { if (t.who) t.who.at = 'home'; }
         else if (!this.demandOff) this.park(t);
       }
       this.graph.detachCar(car);
       this.cars.splice(i, 1);
     }
+    // the followed car arrived, or its trip went back to the door
+    if (this.follow && !this.cars.includes(this.follow)) this.follow = null;
   }
 
   // Business income on arrival: a worker at a workplace, a customer at a shop (half when it has no goods), a truck of goods
@@ -466,7 +490,14 @@ export class Game {
     if (outcome === 'smooth') this.stats.smooth++;
     const shop = t.purpose === 'shop' && !t.back;
     for (const b of new Set([t.from, t.to])) if (b.kind === 'home') b.recent.push({ at: this.time, score: SCORE[outcome], shop });
-    this.reports.push({ purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour });
+    if (outcome === 'gaveup' || outcome === 'noroute') this.metrics.fail();
+    else this.metrics.arrive(seconds / HOUR * 60);
+    const j = t.jam;
+    this.reports.push({
+      purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour,
+      ratio: t.ideal ? seconds / t.ideal : 1, stretch: t.idealLen ? t.driven / t.idealLen : 1, door: t.departed ? t.departed - t.queued : 0,
+      jam: j && { x: j.x, y: j.y }, jamAt: jamAt(j), jamS: t.jamS,
+    });
     if (this.reports.length > 200) this.reports.shift();
   }
 
@@ -499,7 +530,8 @@ export class Game {
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       b.pending.splice(i, 1);
       const ideal = findPath(this.graph, b.node, trip.to.node, null, true) ?? path;
-      trip.ideal = trip.idealLen = trip.driven = trip.stopped = 0;
+      trip.ideal = trip.idealLen = trip.driven = trip.stopped = trip.jamS = 0;
+      trip.jam = null;
       for (let j = 1; j < ideal.length; j++) {
         const x = this.graph.edgeBetween(ideal[j - 1], ideal[j])!;
         trip.idealLen += x.length;
@@ -895,10 +927,22 @@ export class Game {
     return n && !n.building && n.edges.length >= 3 ? n : null;
   }
 
-  // Edit click: a junction opens its panel, else the road run is selected
+  // The car drawn nearest p within r
+  carAt(p: Vec, r = 10): Car | null {
+    let best: Car | null = null, bd = r;
+    for (const c of this.cars) {
+      const d = dist(p, this.graph.carPos(c));
+      if (d < bd) { best = c; bd = d; }
+    }
+    return best;
+  }
+
+  // Edit click, first hit wins: a car (followed, with its card), a junction (its panel), a building (its card), a road run (selected)
   select(p: Vec | null): void {
-    this.inspect = p ? this.junctionAt(p) : null;
-    this.selected = p && !this.inspect ? this.runAt(p) : null;
+    this.follow = p ? this.carAt(p) : null;
+    this.inspect = p && !this.follow ? this.junctionAt(p) : null;
+    this.picked = p && !this.follow && !this.inspect ? this.buildings.find(b => b.contains(p, 2)) ?? null : null;
+    this.selected = p && !this.follow && !this.inspect && !this.picked ? this.runAt(p) : null;
   }
 
   // Switching away from Edit drops the selection at once, so a click right after the switch cannot retype it
@@ -907,7 +951,7 @@ export class Game {
     if (locked) { this.say(locked); return; }
     if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
-    if (t !== 'edit') { this.selected = null; this.inspect = null; }
+    if (t !== 'edit') { this.selected = null; this.inspect = null; this.follow = null; this.picked = null; }
     if (t !== 'place') this.placing = null;
     if (t !== 'interchange') this.ichg = null;
   }

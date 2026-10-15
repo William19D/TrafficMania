@@ -6,6 +6,7 @@ import { ROAD_W, NODE_R, CAR_W, LANE_W, roadWidth } from '../network/RoadGraph.t
 import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
+import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 import { CONTROL_LABEL, fmtMoney } from '../core/Game.ts';
 
@@ -23,12 +24,24 @@ const ACCENT = '#2F6FED';
 const BRAKE_ON = '#FF2A2A';
 const BRAKE_OFF = '#8C2A2A';
 const AMBER = '#FFB020';
+const NOISE = '#8E7CC3';
+const SMOG = '#9A6B2F';
+// Heat map: free flow -> slow -> jammed
+const HEAT: [number, number, number][] = [[0x4C, 0xC2, 0x6A], [0xE0, 0xA1, 0x00], [0xE5, 0x48, 0x4D]];
+export const heatColor = (h: number): string => {
+  const x = 2 * Math.max(0, Math.min(1, h)), i = Math.min(1, Math.floor(x)), f = x - i, a = HEAT[i], b = HEAT[i + 1];
+  return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join()})`;
+};
+// Home happiness dot under an overlay: the happiness chip's bands
+const happyColor = (h: number): string => h >= TUNING.GROW_HI ? GREEN : h >= TUNING.GROW_LO ? AMBER : RED;
 
 export class CanvasRenderer {
   cam: { x: number; y: number; zoom: number };
   private ctx: CanvasRenderingContext2D;
   // Land colour of the current biome, for the roundabout islands
   private land = BIOMES.temperate.land;
+  // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
+  private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -108,6 +121,15 @@ export class CanvasRenderer {
     const dpr = devicePixelRatio || 1;
     // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
     if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
+    // Follow camera: centred on the car, zoomed in to at least 1.2 when the follow starts
+    const fc = game.follow;
+    if (fc) {
+      const p = game.graph.carPos(fc);
+      if (this.route.car !== fc) { this.route = { car: fc, nodes: [] }; this.cam.zoom = Math.max(this.cam.zoom, 1.2); }
+      this.cam.x = p.x;
+      this.cam.y = p.y;
+      this.clamp();
+    }
     const z = this.cam.zoom;
 
     // Background: flat land (in screen coordinates)
@@ -193,6 +215,8 @@ export class CanvasRenderer {
       ctx.stroke();
     });
 
+    if (game.overlay === 'noise') this.noiseMap(game);
+
     const edges = game.graph.edges;
     const nodes = game.graph.nodes;
     const ground = edges.filter((e) => !e.tunnel && e.level === 0);
@@ -245,6 +269,7 @@ export class CanvasRenderer {
 
     // Lane markings: centre line / median, lane separators, shoulders, one-way chevrons; driveways stay plain
     for (const e of ground) if (!e.drive) this.markings(e.a, e.b, e.type);
+    if (game.overlay === 'heat') this.heatMap(ground, levelNodes(0));
 
     this.controls(levelNodes(0));
     // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
@@ -259,12 +284,29 @@ export class CanvasRenderer {
       const nodesL = levelNodes(L);
       halo(L);
       this.viaduct(L, layer, nodesL);
+      if (game.overlay === 'heat') this.heatMap(layer, nodesL);
       this.controls(nodesL);
       carsAt(L);
     }
 
     // Junction open in the Edit panel
     if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
+    if (game.picked) this.outlineB(game.picked, ACCENT, 6);
+
+    // Followed car: its route ahead as a dashed accent line, and a ring around it
+    if (fc) {
+      if (fc.path) this.route.nodes = fc.path;
+      const p = game.graph.carPos(fc);
+      ctx.globalAlpha = 0.8;
+      ctx.setLineDash([6, 5]);
+      this.polyline([p, ...this.route.nodes]);
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      this.ring(p.x, p.y, 14, ACCENT, 2.5);
+      ctx.globalAlpha = 1;
+    }
 
     // Tutorial targets: pulsing accent ring + static outer ring
     if (game.tutorialActive && game.tutorialTargets.length) {
@@ -356,9 +398,9 @@ export class CanvasRenderer {
     for (const b of game.buildings) {
       const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
       if (b.connected) {
-        // homes: a red dot while households are moving out, residents and happiness under the cursor
+        // homes: a red dot while households are moving out (every home's happiness under an overlay), residents and happiness under the cursor
         if (b.kind !== 'home') continue;
-        if (b.happy < TUNING.GROW_LO) { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, RED); }
+        if (b.happy < TUNING.GROW_LO || game.overlay !== 'none') { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, happyColor(b.happy)); }
         if (over) this.text(b.residents < 1 ? `Abandoned · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${ZONES.home.residents} residents · ${Math.round(b.happy)}% happy`,
           b.x, top, 'bold 11px system-ui', b.happy < TUNING.GROW_LO ? RED : DARK);
         continue;
@@ -517,10 +559,24 @@ export class CanvasRenderer {
     } else if (game.tool === 'place') {
       this.ghost(game, p);
     } else if (game.tool === 'edit') {
+      // same order as Game.select: car, junction, building, road
+      const c = game.carAt(p);
+      if (c) {
+        const q = g.carPos(c);
+        this.ring(q.x, q.y, 14, ACCENT, 2);
+        label('Click to follow this car', q.x, q.y, ACCENT);
+        return;
+      }
       const j = game.junctionAt(p);
       if (j) {
         this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
         label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
+        return;
+      }
+      const b = game.buildings.find(x => x.contains(p, 2));
+      if (b) {
+        this.outlineB(b, ACCENT, 4);
+        label(`${ZONES[b.kind].label}: click for details`, p.x, p.y, ACCENT);
         return;
       }
       const run = game.runAt(p);
@@ -529,6 +585,63 @@ export class CanvasRenderer {
       this.runPath(run, ACCENT);
       ctx.globalAlpha = 1;
       label('Click to edit · drag to bend', p.x, p.y, ACCENT);
+    }
+  }
+
+  // Rounded outline pad px around a building's footprint
+  private outlineB(b: Building, color: string, pad: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.beginPath();
+    ctx.roundRect(-b.h / 2 - pad, -b.w / 2 - pad, b.h + 2 * pad, b.w + 2 * pad, 4 + pad);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Heat map over one level: each road stroked green -> amber -> red by its heat; junctions with waiting cars get a disc sized and
+  // coloured by their delay (8 s and more = red)
+  private heatMap(edges: Edge[], nodes: Node[]): void {
+    const ctx = this.ctx;
+    ctx.globalAlpha = 0.75;
+    for (const e of edges) if (!e.tunnel) this.line(e, heatColor(e.heat), e.width + 4);
+    for (const n of nodes) {
+      if (n.delay < 0.5) continue;
+      this.circle(n.x, n.y, NODE_R * 0.6 + Math.min(18, 2 * n.delay), heatColor(n.delay / 8));
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Noise and pollution, under the roads: a purple band NOISE_R either side of each road by its tier's noise (one path per tier, so
+  // joints do not darken), and a brown haze fading out at POLLUTION_R round each factory while it has workers
+  private noiseMap(game: Game): void {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = NOISE;
+    for (const t of Object.keys(TIERS) as RoadType['tier'][]) {
+      const es = game.graph.edges.filter(e => e.type.tier === t && !e.drive && !e.tunnel);
+      if (!es.length) continue;
+      ctx.beginPath();
+      for (const e of es) { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
+      ctx.globalAlpha = 0.25 * TIERS[t].noise;
+      for (const w of [2, 1]) { ctx.lineWidth = w * TUNING.NOISE_R; ctx.stroke(); }
+    }
+    ctx.globalAlpha = 1;
+    for (const b of game.buildings) {
+      if (b.kind !== 'industry' || b.staffed <= 0) continue;
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, TUNING.POLLUTION_R);
+      g.addColorStop(0, SMOG + Math.round(0x66 * b.staffed).toString(16).padStart(2, '0'));
+      g.addColorStop(1, SMOG + '00');
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, TUNING.POLLUTION_R, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
     }
   }
 

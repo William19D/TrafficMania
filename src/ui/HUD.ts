@@ -1,11 +1,14 @@
-import type { Game, Tool } from '../core/Game.ts';
+import type { Game, Overlay, Tool } from '../core/Game.ts';
 import type { Ledger, PathPlan } from '../core/Game.ts';
-import { CONTROL_LABEL, TOOL_LOCK, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
-import type { Tier, Zone } from '../core/config.ts';
-import type { Building } from '../entities/Building.ts';
+import type { Purpose, Tier, Zone } from '../core/config.ts';
+import type { Car, Kind } from '../entities/Car.ts';
+import type { TripReport } from '../entities/Trip.ts';
+import type { Vec } from '../util/geom.ts';
 import type { Control, RoadType } from '../network/RoadGraph.ts';
 import type { Move, Preset } from '../network/Junction.ts';
 import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
@@ -15,7 +18,7 @@ const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
   { tool: 'light', label: 'Light', key: '2', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day.` },
   { tool: 'roundabout', label: 'Roundabout', key: '3', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
-  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction, or a junction for its control, light phases and turn bans. Drag a road to bend it.' },
+  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its lanes or direction. Drag a road to bend it.' },
   { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
   { tool: 'place', label: 'Buildings', key: 'B', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
   { tool: 'grid', label: 'Grid', key: '6', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
@@ -81,6 +84,9 @@ const CONTROLS: [string, string][] = [
   ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
   ['Street grid', '<kbd>6</kbd>: click a corner, the end of the first side, then the depth'],
   ['Interchange', '<kbd>7</kbd>: click a junction, pick a type, then Build'],
+  ['Follow a car / building details', '<kbd>4</kbd>, click it; <kbd>Esc</kbd> stops'],
+  ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
+  ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
   ['Help', '<kbd>?</kbd>'],
@@ -111,6 +117,57 @@ const pad = (n: number) => String(n).padStart(2, '0');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
+// ---------- analysis: trip reports, the car card, metrics ----------
+// Where a trip goes, out and back
+const DEST: Record<Purpose, [string, string]> = { commute: ['work', 'home'], shop: ['the shop', 'home'], freight: ['the shop', 'the factory'] };
+const tripName = (p: Purpose, back: boolean): string =>
+  back ? (p === 'freight' ? 'Empty truck back' : 'Trip home') : { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery' }[p];
+const JAM_AT: Record<Control | 'road', string> = {
+  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
+};
+const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
+// A trip report in the resident's voice; a stop under a quarter hour is not worth naming
+function tripLine(r: TripReport): string {
+  const to = DEST[r.purpose][+r.back], x = (n: number) => `${n.toFixed(1)}x`;
+  const jam = r.jam && r.jamS >= HOUR / 4 ? `, stuck ${fmtMin(r.jamS)} ${JAM_AT[r.jamAt]}` : '';
+  switch (r.outcome) {
+    case 'smooth': return `Smooth run to ${to}, ${fmtMin(r.seconds)}`;
+    case 'wait': return r.door > HOUR ? `Waited ${fmtMin(r.door)} at the door to get on the road`
+      : `${tripName(r.purpose, r.back)} took ${x(r.ratio)} as long as on empty roads${jam}`;
+    case 'detour': return `Detour to ${to}: drove ${x(r.stretch)} the shortest route`;
+    case 'gaveup': return `Gave up driving to ${to}${jam || ': waited too long at the door'}`;
+    case 'noroute': return `No road to ${to}`;
+  }
+}
+// A clickable report line: jumps to where the trip got stuck, else to where it started
+const tripBtn = (r: TripReport): string => {
+  const p = r.jam ?? r.from;
+  return `<button class="tline o-${r.outcome}" data-jump="${Math.round(p.x)},${Math.round(p.y)}" data-tip="Day ${r.day}, ${pad(Math.floor(r.hour))}:00. Click to look">${esc(tripLine(r))}</button>`;
+};
+// Metrics charts: series, label, value format; zero: the axis starts at 0; max: at least this top
+const CHARTS: { k: keyof Sample; label: string; fmt: (v: number) => string; zero?: boolean; max?: number }[] = [
+  { k: 'waiting', label: 'Waiting cars', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'trip', label: 'Average trip', fmt: n => fmtMin(n / 60 * HOUR), zero: true },
+  { k: 'through', label: 'Trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'failed', label: 'Failed trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'money', label: 'Money', fmt: fmtMoney },
+  { k: 'pop', label: 'Population', fmt: n => Math.round(n).toLocaleString('en-US'), zero: true },
+  { k: 'happy', label: 'Happiness', fmt: n => `${Math.round(n)}%`, zero: true, max: 100 },
+];
+function spark(v: number[], zero = false, max = -Infinity): [string, number, number] {
+  const lo = Math.min(zero ? 0 : Infinity, ...v), hi = Math.max(max, ...v), k = hi - lo || 1, n = v.length - 1;
+  const pts = v.map((y, i) => `${(i / n * 100).toFixed(1)},${(23 - (y - lo) / k * 22).toFixed(1)}`).join(' ');
+  return [`<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`, lo, hi];
+}
+// Legend panel per overlay (the car colours without one)
+const LEGEND: Record<Overlay, string> = {
+  none: Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join(''),
+  heat: '<b>Traffic</b><span class="grad"></span><span class="ends"><small>flowing</small><small>jammed</small></span><span>Discs: cars waiting at a junction</span>',
+  noise: '<b>Noise and pollution</b><span><i style="background:#8E7CC3"></i>Road noise</span><span><i style="background:#9A6B2F"></i>Factory pollution</span>'
+    + '<span><i class="dot" style="background:#4CC26A"></i>Happy home</span><span><i class="dot" style="background:#FFB020"></i>Content</span><span><i class="dot" style="background:#E5484D"></i>Moving out</span>',
+};
+const OVERLAYS: Overlay[] = ['none', 'heat', 'noise'];
+
 // Restart a CSS animation class
 function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.remove(cls, ...others);
@@ -138,13 +195,18 @@ export class HUD {
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
     clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
+  // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
+  private show = { metrics: false, feed: false };
+  private carFor: Car | null = null;
+  private feedAt = 0;
   // Last level the player has seen in the level-up modal, and the speed to resume when it closes
   private seenLevel: number;
   private resume: 0 | 1 | 2 | 4 = 1;
   onTutorial: (() => void) | null = null;
-  // Called with the next building without a road each time the warning chip is clicked
-  onDanger: ((b: Building) => void) | null = null;
+  // Moves the camera there: the next building without a road (warning chip), a trip report's spot
+  onJump: ((p: Vec) => void) | null = null;
   private dangerIdx = 0;
   // Junction panel: what a turn click edits (light signals of phase jPhase, or bans)
   private jMode: 'signals' | 'bans' = 'signals';
@@ -179,13 +241,37 @@ export class HUD {
         <table>${CONTROLS.map(([a, b]) => `<tr><th scope="row">${a}</th><td>${b}</td></tr>`).join('')}</table>
         <button class="btn" data-action="tutorial">Replay tutorial</button>
       </div>
-      <div class="panel pop jpanel" hidden role="dialog" aria-label="Junction">
-        <div class="pop-head"><h2>Junction</h2><button class="iconbtn" data-j="close" aria-label="Close [Esc]">${icon('close')}</button></div>
-        <div class="jbody"></div>
+      <div class="panel views" role="group" aria-label="Analysis">
+        <button class="iconbtn" data-view="heat" aria-pressed="false" aria-label="Traffic heat map" data-tip="Traffic heat map: green roads flow, red ones are jammed; discs show cars waiting at junctions" data-key="C">${icon('heat')}</button>
+        <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
+        <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
+        <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
       </div>
-      <div class="panel pop ipanel" hidden role="dialog" aria-label="Interchange">
-        <div class="pop-head"><h2>Interchange</h2><button class="iconbtn" data-i="close" aria-label="Close [Esc]">${icon('close')}</button></div>
-        <div class="jbody ibody"></div>
+      <div class="rcol">
+        <div class="panel pop cpanel" hidden role="dialog" aria-label="Followed car">
+          <div class="pop-head"><h2 class="ctitle"></h2><button class="iconbtn" data-v="car" aria-label="Stop following [Esc]">${icon('close')}</button></div>
+          <div class="jbody cbody"></div>
+        </div>
+        <div class="panel pop bpanel" hidden role="dialog" aria-label="Building">
+          <div class="pop-head"><h2 class="btitle"></h2><button class="iconbtn" data-v="building" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody bbody"></div>
+        </div>
+        <div class="panel pop jpanel" hidden role="dialog" aria-label="Junction">
+          <div class="pop-head"><h2>Junction</h2><button class="iconbtn" data-j="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody"></div>
+        </div>
+        <div class="panel pop ipanel" hidden role="dialog" aria-label="Interchange">
+          <div class="pop-head"><h2>Interchange</h2><button class="iconbtn" data-i="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody ibody"></div>
+        </div>
+        <div class="panel pop fpanel" hidden role="dialog" aria-label="Trip reports">
+          <div class="pop-head"><h2>Trip reports</h2><button class="iconbtn" data-v="feed" aria-label="Close [T]">${icon('close')}</button></div>
+          <div class="jbody fbody"></div>
+        </div>
+        <div class="panel pop mpanel" hidden role="dialog" aria-label="Metrics">
+          <div class="pop-head"><h2>Metrics</h2><button class="iconbtn" data-v="metrics" aria-label="Close [M]">${icon('close')}</button></div>
+          <div class="jbody mbody"></div>
+        </div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${toolBtn(TOOLS[0])}
@@ -231,9 +317,7 @@ export class HUD {
           <small class="tray-h">To place</small>
           ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: click, then click the map near a road">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
         </div>
-        <div class="panel legend" role="group" aria-label="Car colours by trip">
-          ${Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join('')}
-        </div>
+        <div class="panel legend" role="group" aria-label="Map legend">${LEGEND.none}</div>
       </div>
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
@@ -265,8 +349,25 @@ export class HUD {
     this.q('[data-action="tutorial"]').onclick = () => { this.setHelp(false); this.onTutorial?.(); };
     const jump = () => {
       const off = game.buildings.filter(b => !b.connected);
-      if (off.length) this.onDanger?.(off[this.dangerIdx++ % off.length]);
+      if (off.length) this.onJump?.(off[this.dangerIdx++ % off.length]);
     };
+    // Analysis: overlays and panels; a trip line jumps the camera (and stops a follow, which would pull it back)
+    this.q('.views').onclick = e => {
+      const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
+      if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
+      else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+    };
+    this.q('.rcol').addEventListener('click', e => {
+      const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
+      if (v === 'car') game.follow = null;
+      else if (v === 'building') game.picked = null;
+      else if (v === 'metrics' || v === 'feed') this.show[v] = false;
+      if (j) {
+        const [x, y] = j.split(',').map(Number);
+        game.follow = null;
+        this.onJump?.({ x, y });
+      }
+    });
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
@@ -300,8 +401,16 @@ export class HUD {
     if (e.key === 'Escape') {
       this.hideTip();
       this.setHelp(false);
-    } else if ((e.key === '?' || e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    } else if (e.ctrlKey || e.metaKey || e.altKey) {
+      return;
+    } else if (e.key === '?' || e.key === 'h' || e.key === 'H') {
       this.setHelp(!this.helpOpen);
+    } else if (e.key === 'c' || e.key === 'C') {
+      g.overlay = OVERLAYS[(OVERLAYS.indexOf(g.overlay) + 1) % OVERLAYS.length];
+    } else if (e.key === 'm' || e.key === 'M') {
+      this.show.metrics = !this.show.metrics;
+    } else if (e.key === 't' || e.key === 'T') {
+      this.show.feed = !this.show.feed;
     }
   }
 
@@ -622,6 +731,92 @@ export class HUD {
       <div class="jpre"><button class="btn primary" data-i="build"${cur.ok ? '' : ' disabled'}>Build · ${price(cur)}</button><button class="btn" data-i="close">Cancel</button></div>`;
   }
 
+  // ---------- analysis panels ----------
+  private updateViews(): void {
+    const g = this.game, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}`;
+    if (key === this.last.views) return;
+    this.last.views = key;
+    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
+    this.root.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
+    this.q('.legend').innerHTML = LEGEND[g.overlay];
+    this.q('.mpanel').hidden = !this.show.metrics;
+    this.q('.fpanel').hidden = !this.show.feed;
+    this.last.metrics = this.last.feed = undefined;
+  }
+
+  // Followed car: trip, from -> to, time so far against the free-flow time, speed, stops
+  private updateCar(): void {
+    const g = this.game, c = g.follow, panel = this.q('.cpanel');
+    if (!c) { if (this.carFor) { this.carFor = null; this.last.car = ''; panel.hidden = true; } return; }
+    const t = c.trip, el = g.time - t.departed, tier = TIERS[c.lane.edge.type.tier], kmh = Math.round(c.speed * tier.kmh / tier.limit);
+    const key = `${Math.round(el / HOUR * 60)}|${kmh}|${Math.round(t.stopped / HOUR * 60)}`;
+    if (c === this.carFor && key === this.last.car) return;
+    this.carFor = c;
+    this.last.car = key;
+    panel.hidden = false;
+    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t.purpose, t.back)}`;
+    const slow = t.ideal && el > T.SMOOTH_X * t.ideal;
+    const jam = t.jamS >= HOUR / 4 ? `longest ${fmtMin(t.jamS)} ${JAM_AT[jamAt(t.jam)]}` : '';
+    this.q('.cbody').innerHTML = `
+      <p class="jnote">${ZONES[t.from.kind].label} → ${ZONES[t.to.kind].label} · ${KIND_LABEL[c.kind]}</p>
+      <div class="kv"><span>Driving</span><b class="num${slow ? ' bad' : ''}">${fmtMin(el)}</b><small>${fmtMin(t.ideal)} on empty roads</small></div>
+      <div class="kv"><span>Speed</span><b class="num">${kmh} km/h</b><small>${tier.label}, ${tier.kmh} km/h</small></div>
+      <div class="kv"><span>Stopped</span><b class="num">${fmtMin(t.stopped)}</b><small>${jam}</small></div>
+      <p class="jnote">The camera follows it; the dashed line is its route. Esc stops.</p>`;
+  }
+
+  // Building card: residents and happiness parts (home), jobs, staff and goods (workplaces), its last 5 trips
+  private updateBuilding(): void {
+    const g = this.game, b = g.picked, panel = this.q('.bpanel');
+    const mine = b ? g.reports.filter(r => r.from === b || r.to === b).slice(-5).reverse() : [];
+    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${mine.map(r => r.seconds).join()}` : '';
+    if (key === this.last.bld) return;
+    this.last.bld = key;
+    panel.hidden = !b;
+    if (!b) return;
+    const z = ZONES[b.kind], pc = (x: number) => `${Math.round(100 * x)}%`;
+    const bar = (label: string, v: number, bad = false) =>
+      `<div class="pbar2${bad ? ' bad' : ''}"><span>${label}</span><i><i style="width:${pc(Math.min(1, v))}"></i></i><b class="num">${pc(v)}</b></div>`;
+    let body = '';
+    if (b.kind === 'home') {
+      const mineC = g.commuters.filter(c => c.home === b), p = b.parts;
+      body = `<p class="jnote">${Math.round(b.residents)} / ${z.residents} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
+        + bar('Jobs', p.job) + bar('Shops', p.shop) + bar('Trips', p.trips) + bar('Pollution', p.pollution, true) + bar('Noise', p.noise, true);
+    } else {
+      body = `<p class="jnote">${z.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
+    }
+    if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
+    this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
+    this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
+  }
+
+  // Trip feed: today's outcomes, then the last 30 reports, newest first
+  private updateFeed(): void {
+    const g = this.game, n = g.stats.arrived + g.stats.failed, key = `${n}|${g.day}`;
+    if (!this.show.feed || key === this.last.feed || (this.last.feed !== undefined && performance.now() - this.feedAt < 500)) return;
+    this.last.feed = key;
+    this.feedAt = performance.now();
+    const td = g.stats.today;
+    this.q('.fbody').innerHTML = `
+      <p class="jnote">Today: <b class="o-smooth">${td.smooth} smooth</b> · <b class="o-wait">${td.wait} long waits</b> · <b class="o-detour">${td.detour} detours</b>`
+      + ` · <b class="o-gaveup">${td.gaveup} gave up</b> · <b class="o-noroute">${td.noroute} no road</b></p>`
+      + (g.reports.length ? `<div class="flist">${g.reports.slice(-30).reverse().map(tripBtn).join('')}</div>` : '<p class="jnote">No trips yet: they show up here as cars arrive.</p>');
+  }
+
+  // Metrics: one sparkline per series over the whole run, redrawn once per sample
+  private updateMetrics(): void {
+    const g = this.game, m = g.metrics, s = m.samples, key = `${s.length}|${m.every}|${s[s.length - 1]?.day}|${s[s.length - 1]?.hour}`;
+    if (!this.show.metrics || key === this.last.metrics) return;
+    this.last.metrics = key;
+    if (s.length < 2) { this.q('.mbody').innerHTML = '<p class="jnote">Collecting: a point is added every in-game hour.</p>'; return; }
+    const rows = CHARTS.filter(c => c.k !== 'money' || !g.creative).map(c => {
+      const v = s.map(x => x[c.k]), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
+      return `<div class="mrow" role="img" aria-label="${c.label}: now ${now}, from ${c.fmt(lo)} to ${c.fmt(hi)}">`
+        + `<span>${c.label}</span><b class="num">${now}</b><small class="num">${c.fmt(lo)} – ${c.fmt(hi)}</small>${svg}</div>`;
+    }).join('');
+    this.q('.mbody').innerHTML = `<p class="jnote">From day ${s[0].day} ${pad(s[0].hour)}:00 to now, a point every ${m.every === 1 ? 'hour' : `${m.every} hours`}.</p>${rows}`;
+  }
+
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
     const g = this.game, L = this.last;
@@ -743,6 +938,11 @@ export class HUD {
     this.updatePicker();
     this.updateJunction();
     this.updateIchg();
+    this.updateViews();
+    this.updateCar();
+    this.updateBuilding();
+    this.updateFeed();
+    this.updateMetrics();
     const gk = `${g.tool}|${g.gridSize}`;
     if (gk !== L.gsz) {
       L.gsz = gk;

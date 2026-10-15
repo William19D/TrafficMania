@@ -570,6 +570,35 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 150 * 60 && w.score < pairs; t++) w.update(DT);
   if (w.score !== pairs) fail(`interchange ${kind}: ${w.score} of ${pairs} trips arrived`);
 }
+// Analysis: one metric sample per in-game hour (24 over one day, and one per hour of the main run); a lane of stopped cars heats its
+// road while an idle road stays cold, the junction they wait at builds up delay, and an Edit click on a car follows it
+{
+  const w = blank();
+  w.update(TUNING.DAY_SECONDS);
+  if (w.metrics.samples.length !== 24) fail(`metrics: ${w.metrics.samples.length} samples after one day`);
+  const ms = game.metrics.samples, hours = Math.floor(game.clock) - TUNING.START_HOUR;
+  if (ms.length !== hours || ms.some(s => !Object.values(s).every(Number.isFinite))) fail(`metrics: ${ms.length} samples in ${hours} hours of the main run`);
+  if (!ms.some(s => s.through > 0) || !ms.some(s => s.trip > 0)) fail('metrics: no throughput or trip time sampled');
+  const flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), P = town(w, 100, 900), Q = town(w, 900, 900);
+  w.commitPath(w.planPath([X, Y], 0, flat));
+  w.commitPath(w.planPath([P, Q], 0, flat));
+  const xy = w.graph.edgeBetween(X, Y)!, pq = w.graph.edgeBetween(P, Q)!, lane = w.graph.lanesFrom(xy, X)[0]!;
+  for (let k = 0; k < 12; k++) {
+    const c = new Car(lane, trip(X, Y));
+    c.s = xy.length - stopDist(Y) - k * (c.len + 5) - 10;
+    c.wait = 5;
+    lane.cars.unshift(c);
+    w.cars.push(c);
+    Y.queue.push(c);
+  }
+  for (let t = 0; t < 20 * 60; t++) w.graph.update(DT);
+  if (xy.heat < 0.5 || pq.heat !== 0 || Y.delay < 1) fail(`heat: jammed road ${xy.heat.toFixed(2)}, idle road ${pq.heat.toFixed(2)}, delay ${Y.delay.toFixed(1)}`);
+  w.tool = 'edit';
+  const c = lane.cars[3]!;
+  w.select(w.graph.carPos(c));
+  if (w.follow !== c || w.selected) fail('follow: an Edit click on a car did not follow it');
+}
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
   + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)}`);

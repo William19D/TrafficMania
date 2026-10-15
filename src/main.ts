@@ -31,7 +31,7 @@ const hud = new HUD(hudRoot, game);
 const tutorial = new Tutorial(hudRoot, game);
 Object.assign(window, { game, tutorial, renderer, hud }); // debugging from the console
 hud.onTutorial = () => tutorial.start();
-hud.onDanger = c => renderer.centerOn(c);
+hud.onJump = p => renderer.centerOn(p);
 let tutorialDone = false;
 try { tutorialDone = localStorage.getItem('tm_tutorial_done') === '1'; } catch { /* storage blocked: show the tutorial */ }
 if (!tutorialDone) tutorial.start();

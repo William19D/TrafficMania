@@ -73,7 +73,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   canvas.addEventListener('pointermove', e => {
     hover = renderer.screenToWorld(e.clientX, e.clientY);
     if (panning) {
-      if (Math.hypot(e.clientX - last.x, e.clientY - last.y) > 0) panMoved = true;
+      // dragging the map lets go of a followed car
+      if (Math.hypot(e.clientX - last.x, e.clientY - last.y) > 0) { panMoved = true; game.follow = null; }
       renderer.pan(e.clientX - last.x, e.clientY - last.y);
       last = { x: e.clientX, y: e.clientY };
       return;

@@ -648,3 +648,70 @@ kbd {
 .jpre { display: flex; flex-wrap: wrap; align-items: center; gap: .375em; margin-top: .25em; }
 .jpre small { width: 100%; font-size: var(--label); color: var(--muted); font-weight: 600; }
 #hud .jpre .btn { min-height: 36px; padding: 0 .75em; }
+
+/* ---------- analysis: overlay and panel buttons (left of help), right panel column ---------- */
+.views {
+  position: absolute;
+  top: var(--edge-t);
+  right: calc(var(--edge-r) + max(48px, 3em) + 8px);
+  display: flex;
+  gap: 2px;
+  padding: .25em;
+}
+#hud .views [aria-pressed="true"] { background: var(--accent); color: #fff; }
+.rcol {
+  position: absolute;
+  top: calc(var(--edge-t) + max(48px, 3em) + 8px);
+  right: var(--edge-r);
+  width: min(22em, calc(100vw - 24px));
+  max-height: calc(100vh - var(--edge-t) - max(48px, 3em) - var(--dock-h) - var(--edge-b) - 28px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#hud > .rcol { pointer-events: none; }
+.rcol > * { pointer-events: auto; }
+.rcol .pop { position: static; width: auto; max-height: none; overflow: visible; flex: none; }
+.ctitle, .btitle { display: flex; align-items: center; gap: .4em; }
+.cdot { display: inline-block; width: .8em; height: .8em; border-radius: 50%; border: 1px solid var(--ink); }
+.kv { display: grid; grid-template-columns: 5em auto 1fr; align-items: baseline; gap: .5em; font-size: max(14px, .875em); }
+.kv span, .kv small { color: var(--muted); }
+.kv small { font-size: var(--label); text-align: right; }
+.kv b.bad, .jnote b.o-gaveup, .jnote b.o-noroute { color: #B42F34; }
+.pbar2 { display: grid; grid-template-columns: 5.5em 1fr 3em; align-items: center; gap: .5em; font-size: var(--label); }
+.pbar2 > i { display: block; height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
+.pbar2 > i > i { display: block; height: 100%; background: var(--success); }
+.pbar2.bad > i > i { background: var(--danger); }
+.pbar2 b { text-align: right; }
+.fsub { font-size: var(--label); color: var(--muted); font-weight: 600; margin-top: .25em; }
+.flist { display: flex; flex-direction: column; max-height: 22em; overflow-y: auto; }
+#hud .tline {
+  display: flex; align-items: baseline; gap: .5em; width: 100%;
+  padding: .3em .375em; text-align: left; font-size: var(--label); font-weight: 500; line-height: 1.35;
+}
+.tline::before { content: ''; flex: none; width: .55em; height: .55em; border-radius: 50%; background: var(--success); transform: translateY(-.05em); }
+.tline.o-wait::before { background: var(--warning); }
+.tline.o-detour::before { background: var(--accent); }
+.tline.o-gaveup::before, .tline.o-noroute::before { background: var(--danger); border-radius: 1px; }
+.jnote b.o-smooth { color: #1B6E3D; }
+.jnote b.o-wait { color: #8A6400; }
+.jnote b.o-detour { color: var(--accent); }
+.mrow { display: grid; grid-template-columns: 1fr auto; column-gap: .5em; font-size: var(--label); }
+.mrow span { color: var(--muted); font-weight: 600; }
+.mrow small { grid-column: 1 / -1; order: 3; color: var(--muted); font-size: 11px; }
+.spark { grid-column: 1 / -1; width: 100%; height: 28px; overflow: visible; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.legend b { font-size: var(--label); }
+.legend .grad { display: block; width: 9em; height: .5em; border-radius: 3px; background: linear-gradient(90deg, #4CC26A, #E0A100, #E5484D); }
+.legend .ends { display: flex; justify-content: space-between; width: 9em; color: var(--muted); }
+.legend i.dot { width: .7em; height: .7em; border-radius: 50%; }
+/* narrower: the resources row keeps clear of the analysis buttons; phones: the buttons stack under help, panels beside them */
+@media (max-width: 1279px) {
+  .res { max-width: calc(100vw - 21em); }
+}
+@media (max-width: 768px) {
+  .res { max-width: calc(100vw - 88px); }
+  .views { top: calc(var(--edge-t) + max(48px, 3em) + 8px); right: var(--edge-r); flex-direction: column; }
+  .rcol { right: calc(var(--edge-r) + 56px); width: calc(100vw - 24px - 56px); }
+}

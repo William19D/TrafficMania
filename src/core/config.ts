@@ -140,4 +140,5 @@ export const TUNING = {
   PLACED_OCC: 0.4,           // a home placed from the tray moves in 40% full
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
   POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // factory pollution reach, road noise reach, a tier the place tool warns about
+  HEAT_TAU: 10,              // game seconds: congestion (edge heat, junction delay) EMA time constant
 } as const;

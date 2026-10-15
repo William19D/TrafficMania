@@ -84,6 +84,7 @@ export class Car {
 
     const w = this.wait;
     this.wait = this.speed < 1 ? w + dt : 0;
+    if (this.wait > this.trip.jamS) { this.trip.jamS = this.wait; this.trip.jam = node; }
     if (this.wait > GIVE_UP_S) return 'stuck';
 
     // Recompute route from the node we are heading to; U-turn back down our own edge only when nothing else leads there
