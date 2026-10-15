@@ -31,7 +31,7 @@ const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
   setSeed(12345);
-  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], biome: 'temperate' };
+  w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: 'temperate' };
   w.graph = new RoadGraph();
   w.buildings = [];
   w.tutorialActive = true;
@@ -57,8 +57,10 @@ const trip = (from: Node, to: Node): Trip => makeTrip('commute', from.building!,
   if (t.lakes.length < 4) fail(`terrain: archipelago has only ${t.lakes.length} lakes`);
   // Starter town: 4 homes and the 3 workplaces; on easy a starter street gives every home a driveway, on normal nothing has a road
   for (const difficulty of ['easy', 'normal'] as const) {
-    const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home');
-    if (homes.length !== 4 || w.buildings.length !== 7) fail(`starter town: ${w.buildings.map(b => b.kind)}`);
+    const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home'), gates = w.buildings.filter(b => b.kind === 'gate');
+    if (homes.length !== 4 || w.buildings.length - gates.length !== 7) fail(`starter town: ${w.buildings.map(b => b.kind)}`);
+    // 2-4 highway exits, each a gate with its free stub and no town road to it yet
+    if (gates.length < 2 || gates.length > 4 || gates.some(b => b.node.edges.length !== 1) || w.linkedExits().length || w.upkeepPerDay() !== (difficulty === 'easy' ? w.upkeepDay : 0)) fail(`exits: ${gates.length} gates`);
     if (homes.some(b => b.connected !== (difficulty === 'easy'))) fail(`starter town: ${difficulty} homes connected ${homes.map(b => b.connected)}`);
   }
 }
@@ -832,6 +834,30 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 12 * HOUR * 60 && !home(); t++) { w.update(DT); invariants(w); }
   if (!home()) fail('move: no commuter got home to the moved door');
   refs('move, hours on');
+}
+// Outside connections: an exit no town road reaches trades nothing and its stub cannot be demolished; once a street links it,
+// factory trucks export through it (and leave the map), import trucks arrive at the factory from it, and trade is paid
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.terrain.exits = [{ door: { x: 0, y: 500 }, end: { x: 160, y: 500 }, angle: 0 }];
+  w.addExits();
+  const gate = w.buildings.find(b => b.kind === 'gate')!, edges = w.graph.edges.length;
+  w.demolishAt({ x: 80, y: 500 });
+  if (w.graph.edges.length !== edges || !gate.connected) fail('exits: the stub was demolished');
+  w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 1500, y: 500 }], 0, street));
+  w.tray.home = w.tray.industry = w.tray.shop = 99;
+  for (let x = 340; x < 760; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  w.startPlacing('industry'); w.placeBuilding({ x: 1000, y: 540 });
+  w.startPlacing('shop'); w.placeBuilding({ x: 1300, y: 540 });
+  const F = w.buildings.find(b => b.kind === 'industry')!, traded = () => w.ledger.today.trade + w.ledger.yesterday.trade;
+  const via = (out: boolean) => w.reports.filter(r => r.purpose === 'freight' && !r.back && (out ? r.from === F && r.to === gate : r.from === gate && r.to === F)
+    && r.outcome !== 'gaveup' && r.outcome !== 'noroute').length;
+  while (w.clock < 30) { w.update(DT); invariants(w); }
+  if (w.reports.some(r => r.from === gate || r.to === gate) || gate.pending.length || traded() || !w.reports.some(r => r.from === F && r.purpose === 'freight')) fail('exits: an unlinked exit traded, or the factory sent no trucks');
+  w.commitPath(w.planPath([{ x: 160, y: 500 }, { x: 300, y: 500 }], 0, street));
+  if (w.linkedExits()[0] !== gate) fail('exits: the street did not link the exit');
+  while (w.clock < 78) { w.update(DT); invariants(w); }
+  if (via(true) < 2 || via(false) < 2 || traded() <= 0) fail(`exits: ${via(true)} exports left, ${via(false)} imports arrived, $${traded()} trade`);
 }
 // No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0)
 {

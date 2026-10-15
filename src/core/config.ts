@@ -63,20 +63,25 @@ export const TIERS: Record<Tier, {
   highway: { label: 'Highway', limit: 150, kmh: 90, lanes: [2, 3], oneWay: true, cost: 220, noise: 0.9, access: false, level: 6, fill: '#F7F7F5', out: '#8A99AD', shoulder: 3, median: 0, line: 'double' },
 };
 
-// Building zones: footprint w (along the front) x h (depth) px; residents / jobs: capacity; look: fill, outline, roof inset
+// Building zones: footprint w (along the front) x h (depth) px; residents / jobs: capacity; look: fill, outline, roof inset.
+// A Site is a zone or a highway exit ('gate': the map-edge end of an outside connection, never in the tray)
 export type Zone = 'home' | 'shop' | 'office' | 'industry';
-export const ZONES: Record<Zone, { label: string; w: number; h: number; residents: number; jobs: number; fill: string; out: string; roof: string }> = {
+export type Site = Zone | 'gate';
+export const ZONES: Record<Site, { label: string; w: number; h: number; residents: number; jobs: number; fill: string; out: string; roof: string }> = {
   home: { label: 'Home', w: 28, h: 24, residents: 30, jobs: 0, fill: '#FFFFFF', out: '#8DB17A', roof: '#BCDCA8' },
   shop: { label: 'Shop', w: 44, h: 30, residents: 0, jobs: 10, fill: '#8EC3EE', out: '#4F8CC6', roof: '#BBDAF5' },
   office: { label: 'Office', w: 38, h: 38, residents: 0, jobs: 30, fill: '#ABA3CF', out: '#7468A8', roof: '#CBC5E4' },
   industry: { label: 'Factory', w: 56, h: 40, residents: 0, jobs: 25, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
+  gate: { label: 'Highway exit', w: 30, h: 16, residents: 0, jobs: 0, fill: '#2F8F5B', out: '#1F6B42', roof: '#3FA36B' },
 };
 // Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
-export type Purpose = 'commute' | 'shop' | 'freight';
+// visit: a visitor from outside the map to a shop or office
+export type Purpose = 'commute' | 'shop' | 'freight' | 'visit';
 export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   commute: { label: 'Commute', color: '#5A6FD8' },
   shop: { label: 'Shopping', color: '#E8608E' },
   freight: { label: 'Freight', color: '#E39B2D' },
+  visit: { label: 'Visitors', color: '#1FA39A' },
 };
 
 // City levels (career): population to reach each one and the batch of buildings it puts in the tray. LEVELS[0] is the start
@@ -144,4 +149,11 @@ export const TUNING = {
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
   POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // factory pollution reach, road noise reach, a tier the place tool warns about
   HEAT_TAU: 10,              // game seconds: congestion (edge heat, junction delay) EMA time constant
+  // Outside connections (highway exits), only once linked to the town's roads: EXPORT_SHARE of a factory's trucks leave the map
+  // (all of them with no shop to reach); a factory imports IMPORTS_PER_DAY trucks x staffed of raw materials; a shop at or under
+  // IMPORT_STOCK goods orders IMPORT_SHOP trucks per hour from outside (TRUCK_HOURS); visitors per day along SHOP_CURVE;
+  // OUTSIDE_JOBS of the job slots no resident holds fill with commuters from outside (arriving COMMUTE_MIN..MAX).
+  // $ per export leaving, import arriving, visitor arriving (x taxMult): the ledger's trade
+  EXIT_STUB: 160, EXPORT_SHARE: 0.4, IMPORTS_PER_DAY: 3, IMPORT_STOCK: 5, IMPORT_SHOP: 0.5, VISITS: { shop: 4, office: 2 }, OUTSIDE_JOBS: 0.5,
+  TAX_EXPORT: 40, TAX_IMPORT: 15, TAX_VISIT: 8,
 } as const;

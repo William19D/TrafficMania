@@ -2,7 +2,7 @@
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Vec } from '../util/geom.ts';
 import { mulberry32, hashSeed, random } from '../util/rng.ts';
-import { BIOMES, DIFFICULTY, SIZES } from '../core/config.ts';
+import { BIOMES, DIFFICULTY, SIZES, TUNING } from '../core/config.ts';
 import type { Biome, GameConfig, Zone } from '../core/config.ts';
 import { Building, buildingAt } from '../entities/Building.ts';
 
@@ -12,12 +12,15 @@ export const WORLD = { w: 2000, h: 1200 };
 export interface River { points: Vec[]; width: number }
 export interface Mountain { x: number; y: number; r: number; poly: Vec[] }
 export interface Patch { poly: Vec[]; kind: 'sand' | 'grass' }
+// Outside connection: a highway enters at door (on the map edge), angle = its heading into the map, and ends at end
+export interface Exit { door: Vec; end: Vec; angle: number }
 export interface Terrain {
   rivers: River[];
   mountains: Mountain[];
   lakes: Vec[][];
   patches: Patch[];
   trees: Vec[];
+  exits: Exit[];
   biome: Biome;
 }
 
@@ -82,7 +85,7 @@ export function generateTerrain(cfg: GameConfig): Terrain {
 
 function terrain(cfg: GameConfig): Terrain {
   const b = BIOMES[cfg.biome], d = DIFFICULTY[cfg.difficulty];
-  const t: Terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], biome: cfg.biome };
+  const t: Terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: cfg.biome };
   for (let i = int(b.rivers ?? d.rivers); i > 0; i--) t.rivers.push(makeRiver());
   const count = Math.max(0, int(d.mountains) + b.mountains);
   for (let tries = 0; tries < 300 && t.mountains.length < count; tries++) {
@@ -124,6 +127,18 @@ function terrain(cfg: GameConfig): Terrain {
       if (t.trees.some(q => dist(p, q) < 9)) continue;
       t.trees.push(p);
     }
+  }
+
+  // 2-4 exits: an EXIT_STUB highway square to an edge from its middle 60%, over dry land, a third of the map's span apart.
+  // Rolled last, so the rest of a seed's map is what it was before exits existed.
+  // ponytail: a map with too much water at its edges (archipelago) can end up with fewer than 2
+  const exits = int([2, 4]), apart = (WORLD.w + WORLD.h) / 6;
+  for (let tries = 0; tries < 200 && t.exits.length < exits; tries++) {
+    const side = Math.floor(rng() * 4), f = rand(0.2, 0.8), x = side < 2 ? side * WORLD.w : f * WORLD.w, y = side < 2 ? f * WORLD.h : (side - 2) * WORLD.h;
+    const angle = [0, Math.PI, Math.PI / 2, -Math.PI / 2][side], door = { x, y };
+    const end = { x: x + Math.cos(angle) * TUNING.EXIT_STUB, y: y + Math.sin(angle) * TUNING.EXIT_STUB }, terr = segmentCrosses(t, door, end);
+    if (terr.water || terr.mountain || inWater(t, end, 40) || inMountain(t, end, 40) || t.exits.some(e => dist(e.door, door) < apart)) continue;
+    t.exits.push({ door, end, angle });
   }
   return t;
 }
@@ -183,7 +198,8 @@ export function findStarterTown(t: Terrain): { buildings: Building[]; road: [Vec
       const x = f * b.h / 2, y = g * b.w / 2;
       pts.push({ x: b.x + x * c - y * s, y: b.y + x * s + y * c });
     }
-    return pts.every(p => !outside(p, -40) && !inWater(t, p, 12) && !inMountain(t, p, 12)) && taken.every(o => dist(o, b) > 120);
+    return pts.every(p => !outside(p, -40) && !inWater(t, p, 12) && !inMountain(t, p, 12)) && taken.every(o => dist(o, b) > 120)
+      && t.exits.every(x => distToSegment(b, x.door, x.end).d > 90);
   };
   for (let i = 0; i < 300; i++) {
     const c = { x: rand(300, WORLD.w - 300), y: rand(300, WORLD.h - 300) }, ax = rng() < 0.5 ? 0 : Math.PI / 2;

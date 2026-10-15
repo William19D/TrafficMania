@@ -5,7 +5,8 @@ import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
-import type { Purpose, Tier, Zone } from '../core/config.ts';
+import type { Purpose, Site, Tier, Zone } from '../core/config.ts';
+import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
 import type { Vec } from '../util/geom.ts';
@@ -28,13 +29,14 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
 };
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
-const ZONE_PIC: Record<Zone, (f: string, o: string, r: string) => string> = {
+const ZONE_PIC: Record<Site, (f: string, o: string, r: string) => string> = {
   home: (f, o, r) => `<path d="M5 11h14v10H5z" fill="${f}"/><path d="M2.5 12 12 4l9.5 8z" fill="${r}"/><path d="M10 15h4v6h-4z" fill="${o}"/>`,
   shop: (f, o, r) => `<path d="M3 10h18v11H3z" fill="${f}"/><path d="M2 6h20v4H2z" fill="${r}"/><path d="M7 6v4M12 6v4M17 6v4" stroke="${o}"/><path d="M6 13h7v4H6zM15 13h3v8h-3z" fill="#fff"/>`,
   office: (f, o, r) => `<path d="M6 3h12v18H6z" fill="${f}"/><path d="M6 3h12v3H6z" fill="${r}"/><path d="M9 9h2M13 9h2M9 12.5h2M13 12.5h2M9 16h2M13 16h2" stroke="#fff" stroke-width="2"/>`,
   industry: (f, o, r) => `<path d="M16 3h3v18h-3z" fill="${o}"/><path d="M2 21V11l5-4v4l5-4v4l4-3v13z" fill="${f}"/><path d="M5 14h2M9.5 14h2" stroke="${r}" stroke-width="2"/>`,
+  gate: (f, o) => `<path d="M11 13h2v8h-2z" fill="${o}"/><path d="M3 4h18v9H3z" fill="${f}"/><path d="M7 8.5h8M12.5 6l2.5 2.5-2.5 2.5" stroke="#fff"/>`,
 };
-const zonePic = (z: Zone): string => {
+const zonePic = (z: Site): string => {
   const { fill, out, roof } = ZONES[z];
   return `<svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="${out}" stroke-width="1.5" stroke-linejoin="round">${ZONE_PIC[z](fill, out, roof)}</svg>`;
 };
@@ -138,22 +140,28 @@ const pad = (n: number) => String(n).padStart(2, '0');
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 
 // ---------- analysis: trip reports, the car card, metrics ----------
-// Where a trip goes, out and back
-const DEST: Record<Purpose, [string, string]> = { commute: ['work', 'home'], shop: ['the shop', 'home'], freight: ['the shop', 'the factory'] };
-const tripName = (p: Purpose, back: boolean): string =>
-  back ? (p === 'freight' ? 'Empty truck back' : 'Trip home') : { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery' }[p];
+// A trip or its report: where it goes (a commute out goes to work, a highway exit is out of town) and what it is called
+interface Leg { purpose: Purpose; back: boolean; from: Building; to: Building }
+const PLACE: Record<Site, string> = { home: 'home', shop: 'the shop', office: 'the office', industry: 'the factory', gate: 'the highway' };
+const destOf = (t: Leg): string => t.purpose === 'commute' && !t.back && t.to.kind !== 'gate' ? 'work' : PLACE[t.to.kind];
+const NAME: Record<Purpose, string> = { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery', visit: 'Visitor' };
+const tripName = (t: Leg): string => {
+  const out = t.to.kind === 'gate', inn = t.from.kind === 'gate';
+  if (t.back) return t.purpose === 'freight' ? 'Empty truck back' : out ? 'Leaving town' : 'Trip home';
+  return out ? 'Export' : inn && t.purpose === 'freight' ? 'Import' : inn && t.purpose === 'commute' ? 'Commute from outside' : NAME[t.purpose];
+};
 const JAM_AT: Record<Control | 'road', string> = {
   light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
 const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
 function tripLine(r: TripReport): string {
-  const to = DEST[r.purpose][+r.back], x = (n: number) => `${n.toFixed(1)}x`;
+  const to = destOf(r), x = (n: number) => `${n.toFixed(1)}x`;
   const jam = r.jam && r.jamS >= HOUR / 4 ? `, stuck ${fmtMin(r.jamS)} ${JAM_AT[r.jamAt]}` : '';
   switch (r.outcome) {
     case 'smooth': return `Smooth run to ${to}, ${fmtMin(r.seconds)}`;
     case 'wait': return r.door > HOUR ? `Waited ${fmtMin(r.door)} at the door to get on the road`
-      : `${tripName(r.purpose, r.back)} took ${x(r.ratio)} as long as on empty roads${jam}`;
+      : `${tripName(r)} took ${x(r.ratio)} as long as on empty roads${jam}`;
     case 'detour': return `Detour to ${to}: drove ${x(r.stretch)} the shortest route`;
     case 'gaveup': return `Gave up driving to ${to}${jam || ': waited too long at the door'}`;
     case 'noroute': return `No road to ${to}`;
@@ -170,6 +178,7 @@ const CHARTS: { k: keyof Sample; label: string; fmt: (v: number) => string; zero
   { k: 'trip', label: 'Average trip', fmt: n => fmtMin(n / 60 * HOUR), zero: true },
   { k: 'through', label: 'Trips per hour', fmt: n => String(Math.round(n)), zero: true },
   { k: 'failed', label: 'Failed trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'trade', label: 'Trade and visitors per hour', fmt: n => String(Math.round(n)), zero: true },
   { k: 'money', label: 'Money', fmt: fmtMoney },
   { k: 'pop', label: 'Population', fmt: n => Math.round(n).toLocaleString('en-US'), zero: true },
   { k: 'happy', label: 'Happiness', fmt: n => `${Math.round(n)}%`, zero: true, max: 100 },
@@ -791,7 +800,7 @@ export class HUD {
     this.carFor = c;
     this.last.car = key;
     panel.hidden = false;
-    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t.purpose, t.back)}`;
+    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t)}`;
     const slow = t.ideal && el > T.SMOOTH_X * t.ideal;
     const jam = t.jamS >= HOUR / 4 ? `longest ${fmtMin(t.jamS)} ${JAM_AT[jamAt(t.jam)]}` : '';
     this.q('.cbody').innerHTML = `
@@ -850,7 +859,7 @@ export class HUD {
     this.last.metrics = key;
     if (s.length < 2) { this.q('.mbody').innerHTML = '<p class="jnote">Collecting: a point is added every in-game hour.</p>'; return; }
     const rows = CHARTS.filter(c => c.k !== 'money' || !g.creative).map(c => {
-      const v = s.map(x => x[c.k]), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
+      const v = s.map(x => x[c.k] ?? 0), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
       return `<div class="mrow" role="img" aria-label="${c.label}: now ${now}, from ${c.fmt(lo)} to ${c.fmt(hi)}">`
         + `<span>${c.label}</span><b class="num">${now}</b><small class="num">${c.fmt(lo)} – ${c.fmt(hi)}</small>${svg}</div>`;
     }).join('');
@@ -861,10 +870,10 @@ export class HUD {
   update(): void {
     const g = this.game, L = this.last;
 
-    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business income (yesterday's,
-    // or today's so far on the first day) - the network's upkeep; grants are one-off
+    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business and trade income
+    // (yesterday's, or today's so far on the first day) - the network's upkeep; grants are one-off
     const money = Math.round(g.money);
-    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business - g.upkeepDay);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay);
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -875,10 +884,12 @@ export class HUD {
       n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
       c.classList.toggle('debt', money < 0);
       const y = g.ledger.yesterday, t = g.ledger.today;
-      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
+      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, trade ${fmtMoney(x.trade)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
         + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '');
       c.dataset.tip = `Money. Residents pay ${fmtMoney(g.taxPerDay())}/day in taxes (more when they are happy); workers, shoppers and goods`
-        + ` arriving pay business income. Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
+        + ` arriving pay business income. Exports, imports and visitors through the highway exits pay trade income`
+        + (g.linkedExits().length ? '.' : ': none is linked yet, build a road to one at the map edge.')
+        + ` Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
         + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
         + (g.creative ? '' : ` In debt at ${DIFFICULTY[g.cfg.difficulty].debtDays} midnights in a row = bankrupt.`);
       if (prev !== undefined && Number.isFinite(d) && d !== 0) {

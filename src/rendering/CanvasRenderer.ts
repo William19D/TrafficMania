@@ -8,7 +8,7 @@ import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
-import { CONTROL_LABEL, fmtMoney } from '../core/Game.ts';
+import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -280,7 +280,8 @@ export class CanvasRenderer {
 
     this.controls(levelNodes(0));
     // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
-    for (const b of game.buildings) this.building(b, game.time);
+    for (const b of game.buildings) if (b.kind !== 'gate') this.building(b, game.time);
+    this.exits(game);
     carsAt(0);
 
     // Elevated layers, lowest first: each covers the roads and cars below it
@@ -546,6 +547,7 @@ export class CanvasRenderer {
       const hit = g.nearestEdge(p, ROAD_W, game.level) ?? g.nearestEdge(p, ROAD_W);
       if (!hit) return;
       const e = hit.edge;
+      if (exitEdge(e)) { label('The highway to the outside stays', hit.point.x, hit.point.y, RED); return; }
       ctx.lineCap = 'round';
       ctx.globalAlpha = 0.6;
       this.line(e, RED, e.width + 6);
@@ -595,7 +597,7 @@ export class CanvasRenderer {
         label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
         return;
       }
-      const b = game.buildings.find(x => x.contains(p, 2));
+      const b = game.buildingUnder(p);
       if (b) {
         this.outlineB(b, ACCENT, 4);
         below(`${ZONES[b.kind].label}: click for details · drag to move`, b, ACCENT);
@@ -607,6 +609,58 @@ export class CanvasRenderer {
       this.runPath(run, ACCENT);
       ctx.globalAlpha = 1;
       label('Click to edit · drag to bend', p.x, p.y, ACCENT);
+    }
+  }
+
+  // Outside connections: past the gate the highway runs on off the map under a fade, with an arrow out and one in, and a green
+  // sign at the edge; an exit no town road reaches yet pulses at its stub's end with what linking it brings
+  private exits(game: Game): void {
+    const ctx = this.ctx, gates = game.buildings.filter(b => b.kind === 'gate');
+    if (!gates.length) return;
+    const linked = new Set(game.linkedExits()), pulse = Math.sin(performance.now() / 250);
+    for (const b of gates) {
+      const d = b.node, e = d.edges[0], ux = Math.cos(b.angle), uy = Math.sin(b.angle);
+      if (!e) continue;
+      const w = e.width, at = (s: number, o: number): Vec => ({ x: d.x + ux * s - uy * o, y: d.y + uy * s + ux * o }), far = at(-110, 0);
+      ctx.lineCap = 'butt';
+      this.seg(d, far, TIERS.highway.out, w + 3);
+      this.seg(d, far, TIERS.highway.fill, w);
+      this.markings(d, far, e.type);
+      const fade = ctx.createLinearGradient(d.x, d.y, far.x, far.y);
+      fade.addColorStop(0, this.land + '00');
+      fade.addColorStop(0.7, this.land);
+      this.seg(at(-8, 0), far, fade, w + 6);
+      ctx.lineCap = 'round';
+      // inbound traffic keeps right: its lane is at +o heading in (+s), the outbound one at -o heading out
+      for (const k of [1, -1]) {
+        const p = at(-26, k * LANE_W), tip = at(-26 + k * 7, k * LANE_W), l = at(-26 - k * 4, k * LANE_W + 5), r = at(-26 - k * 4, k * LANE_W - 5);
+        this.polyline([tip, l, p, r], true);
+        ctx.fillStyle = k > 0 ? GREEN : '#2F8F5B';
+        ctx.fill();
+      }
+      // sign beside the inbound lane, square to the screen
+      const s = at(30, w / 2 + 22), name = ['WEST', 'NORTH', 'EAST', 'SOUTH'][(Math.round(b.angle / (Math.PI / 2)) + 4) % 4];
+      this.seg(s, { x: s.x, y: s.y + 12 }, '#6E6E6A', 2);
+      ctx.beginPath();
+      ctx.roundRect(s.x - 25, s.y - 9, 50, 15, 3);
+      ctx.fillStyle = ZONES.gate.fill;
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 8px system-ui';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText(`${name} EXIT`, s.x, s.y - 1);
+      if (linked.has(b)) continue;
+      const o = e.a === d ? e.b : e.a;
+      ctx.setLineDash([5, 4]);
+      this.ring(o.x, o.y, w / 2 + 8 + 2 * pulse, ACCENT, 2);
+      ctx.setLineDash([]);
+      const k = w / 2 + 24 + 58 * Math.abs(ux), q = { x: o.x + ux * k, y: o.y + uy * k };
+      this.text('Connect a road here', q.x, q.y - 7, 'bold 11px system-ui', ACCENT);
+      this.text('exports, imports and visitors', q.x, q.y + 7, '10px system-ui', DARK);
     }
   }
 
@@ -974,7 +1028,7 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
-  private seg(a: Vec, b: Vec, color: string, width: number): void {
+  private seg(a: Vec, b: Vec, color: string | CanvasGradient, width: number): void {
     const ctx = this.ctx;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
