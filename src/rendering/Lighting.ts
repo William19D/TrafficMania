@@ -4,7 +4,7 @@ export interface Daylight { r: number; g: number; b: number; night: number }
 
 // hour, tint rgb, night: blue night, warm dawn, plain day, warm dusk
 const KEYS: [number, number, number, number, number][] = [
-  [0, 116, 130, 188, 1], [4.5, 116, 130, 188, 1], [6, 250, 226, 204, 0.3], [7.5, 255, 255, 255, 0],
+  [0, 116, 130, 188, 1], [4.5, 116, 130, 188, 1], [6, 255, 238, 220, 0.25], [7.5, 255, 255, 255, 0],
   [17, 255, 255, 255, 0], [18.6, 250, 212, 182, 0.4], [20.2, 116, 130, 188, 1], [24, 116, 130, 188, 1],
 ];
 export function daylight(hour: number): Daylight {

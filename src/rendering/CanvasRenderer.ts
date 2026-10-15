@@ -146,6 +146,8 @@ export class CanvasRenderer {
     const dpr = devicePixelRatio || 1;
     // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
     if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
+    // still 0x0: nothing to draw, and a 0 zoom would make a 0px ground canvas whose drawImage throws and stops the game loop
+    if (!innerWidth || !innerHeight) return;
     // Follow camera: centred on the car, zoomed in to at least 1.2 when the follow starts
     const fc = game.follow;
     if (fc) {
