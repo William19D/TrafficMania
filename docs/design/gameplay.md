@@ -529,5 +529,29 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - simcheck: every variant's body and chimney stand inside the footprint, offices come in at least 3 heights, and a street of 10 buildings 50px apart shows at least 5 looks.
 - Known gaps:
   - Zooming back and forth across a whole-number zoom x dpr step repaints the ground each time, about 25 ms of hitch.
-  - Shadows fall the same way at every hour; there is no day/night lighting.
+  - Shadows fall the same way at every hour (P8b added day/night lighting, not moving shadows).
   - Building looks do not change as a home fills up or a business grows.
+
+**P8b Richer graphics: roads, vehicles, day/night.**
+- Roads (`CanvasRenderer.ts`):
+  - **Sidewalks**: street, avenue and boulevard get a paved sidewalk with a kerb under the road, 5px a side, joints and roundabout rings included. Dirt, highways, bridges and driveways get none.
+  - **Driveways** are a concrete strip 4px narrower than a street, with no markings. Where one crosses a sidewalk it covers it.
+  - **Junction paint** goes on a junction with 3+ roads, or with a sign or light. A driveway junction gets none, since it is a bend for the road's traffic. The stop line covers only the incoming lanes (the right half of a two-way road, all of a one-way road into the node). It is solid at a light or a stop sign and dashed elsewhere. At a light, a zebra crossing sits on every arm, starting past the widest road crossing that arm, and the stop line sits just behind it. ponytail: cars still stop at `stopDist`, so on a street meeting an avenue they halt a few px past the line.
+  - **Lane arrows**: each incoming lane gets an arrow `NODE_R` + 22px out from the junction. It shows the turns the junction's roads allow: left, straight, right, by angle, with one-way roads that cannot be entered skipped. Turn bans are not shown. Roads shorter than `NODE_R` + 40px get no arrows.
+  - **Other details**: a manhole on every third road of 50px or more. Street lamps stand on the verge of every town road and highway: one per link of 34px or more (a home-lined road is cut into ~40px links), one per 70px on longer links, alternating sides.
+  - **Bridges and viaducts**: a bridge deck casts a shadow on the water. A viaduct's shadow falls `level` x (3, 4.5) px down-right, as a faint wide band and a core, so higher decks throw longer, softer shadows. Each pillar has its own shadow down to the ground and a highlight.
+- Vehicles (`src/rendering/VehicleArt.ts`): every vehicle is a cached sprite per kind, purpose, tone and scale bucket (`artS`), drawn with one rotated `drawImage` on a blurred drop-shadow sprite. The shadow is offset (1.2, 1.8) in world space, so it always falls down-right. The live lights are drawn on top: tail lights (bright while braking), indicators and the ambulance's bar. Each car takes one of 5 tones of its purpose colour (`TONES`, from a per-car counter in a `WeakMap`), so a stream of commuters is not one flat blue, but the hue still says the purpose. Nothing is allocated per car per frame beyond `carPos`.
+  - **Car**: hood highlight, glazed cabin (rear window, side glass, windshield), a lighter roof panel, side mirrors and headlights.
+  - **Truck**: a purpose-coloured box trailer with ribs, a coupling, and a darker cab with its windshield and mirrors.
+  - **Bus**: glazed flanks, a pale roof with skylights and an AC unit, and a wide windshield.
+  - **Ambulance**: white, with a boxy rear, a purpose stripe and a red cross.
+  - **Motorbike**: two wheels, handlebars, and a rider with a helmet in a shade of the purpose colour.
+  - `shade` now also takes `rgb()` strings, so a tone can be shaded again.
+- Day/night (`src/rendering/Lighting.ts`): `daylight(hour)` interpolates keyframes into a multiply tint and a `night` factor 0..1. Night (20:12-04:30) is blue, dawn (06:00) and dusk (18:36) are warm, and 07:30-17:00 is untinted. The game starts at 06:00, so the first view is a soft dawn. The tint covers the world after the elevated layers. Labels, tool hints, previews and the off-screen markers stay untinted. Under an overlay (heat, noise) there is no tint, so the colours read true. Then, scaled by `night`, these are added with `lighter`: a warm pool under each street lamp, lit windows on every building (an empty home stays dark), a headlight beam ahead of each vehicle (narrower on a motorbike) and a red glow behind braking ones. Traffic-light heads are redrawn over the tint. Windows come from a night sprite per building variant (`sprite(kind, v, s, true)`): light spilling from a home's windows and its porch lamp, a shop's glowing front and sign, an office's curtain wall lit in patches, a factory's skylights and yard lamps.
+- Cost: on a 62-road, 30-building street at 1280x720, a frame renders in about 1.9 ms of script by day and 2.1 ms at night. Junction paint, arrows, manholes and lamps together take under 0.15 ms.
+- simcheck: `daylight` has no tint at noon, a full blue night at midnight, and a warm dusk part way to night. The tint never jumps between two readings 3 in-game minutes apart. A shade of a shade still parses.
+- Known gaps:
+  - Roads are still stroked every frame. A cached road layer would need invalidating on every graph change.
+  - The night glows draw over viaducts when a lamp, window or headlight lies underneath.
+  - Lane arrows ignore turn bans and lane-by-turn rules: every incoming lane shows every turn the junction allows.
+  - Signs and the roundabout island are tinted at night like everything else. Only light heads are redrawn.

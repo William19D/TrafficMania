@@ -7,9 +7,9 @@ import { mulberry32 } from '../util/rng.ts';
 // (half W = w / 2). Each kind has VARIANTS looks picked by position, so a street is not copy-pasted.
 export const VARIANTS = 32;
 
-// Shades a #RRGGBB colour: k > 0 toward white, k < 0 toward black
+// Shades a #RRGGBB (or rgb(r,g,b), so a shade can be shaded again) colour: k > 0 toward white, k < 0 toward black
 export function shade(hex: string, k: number): string {
-  const v = parseInt(hex.slice(1), 16), t = k < 0 ? 0 : 255, f = Math.abs(k);
+  const v = hex[0] === '#' ? parseInt(hex.slice(1), 16) : hex.match(/\d+/g)!.reduce((a, n) => a * 256 + +n, 0), t = k < 0 ? 0 : 255, f = Math.abs(k);
   const ch = (s: number): number => Math.round(((v >> s) & 255) * (1 - f) + t * f);
   return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
 }
@@ -36,15 +36,16 @@ export function look(kind: Site, v: number): Look {
 }
 const floors = (v: number): number => 2 + (v % 4);
 
-// Cached models per kind, variant and pixel scale (sprites are drawn rotated, one drawImage each)
+// Cached models per kind, variant and pixel scale (sprites are drawn rotated, one drawImage each); night: the same frame with
+// only its lit windows, which the renderer adds over the night tint
 export const PAD = 1;
 const sprites = new Map<string, HTMLCanvasElement>();
-export function sprite(kind: Site, v: number, s: number): HTMLCanvasElement {
-  const key = `${kind}${v}@${s}`;
+export function sprite(kind: Site, v: number, s: number, night = false): HTMLCanvasElement {
+  const key = `${kind}${v}${night ? 'n' : ''}@${s}`;
   let c = sprites.get(key);
   if (c) return c;
   // ponytail: one scale bucket is in use at a time, so a full cache is from old zooms
-  if (sprites.size > 4 * VARIANTS * 2) sprites.clear();
+  if (sprites.size > 4 * VARIANTS * 4) sprites.clear();
   const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2;
   c = document.createElement('canvas');
   c.width = Math.ceil((2 * H + 2 * PAD) * s);
@@ -53,7 +54,8 @@ export function sprite(kind: Site, v: number, s: number): HTMLCanvasElement {
   ctx.scale(s, s);
   ctx.translate(H + PAD, W + PAD);
   ctx.lineCap = ctx.lineJoin = 'round';
-  paint(ctx, kind, v, H, W);
+  if (night) paintNight(ctx, kind, v, H, W, s);
+  else paint(ctx, kind, v, H, W);
   sprites.set(key, c);
   return c;
 }
@@ -219,4 +221,34 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
       } else for (let i = 0; i < 4; i++) box(fx + 1.5 + (i % 2) * 4, y0 + 1 + Math.floor(i / 2) * 4 + r() * 2);
     }
   }
+}
+
+// Lit windows at night, top-down: light spilling from a home's windows and its porch lamp, a shop's glowing front and sign, an
+// office's curtain wall lit in patches, a factory's skylights and yard lamps. Warm, with a soft halo.
+function paintNight(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W: number, s: number): void {
+  const r = mulberry32(v * 4973 + 17), [bx, by, bw, bh] = look(kind, v).body, fx = bx + bw;
+  const warm = (x: number, y: number, w: number, h: number, a = 1): void => { c.globalAlpha = a; c.fillStyle = '#FFD27A'; c.fillRect(x, y, w, h); };
+  c.shadowColor = '#FFB347';
+  c.shadowBlur = 3 * s;
+  if (kind === 'home') {
+    for (const y of [by + bh * 0.25, by + bh * 0.62]) if (r() < 0.8) warm(fx - 0.2, y, 1.2, 2.6);
+    for (const k of [by - 0.9, by + bh - 0.3]) if (r() < 0.6) warm(bx + bw * (0.2 + r() * 0.5), k, 2.6, 1.2);
+    c.beginPath();
+    c.arc(fx + 1.6, 2.8, 1, 0, Math.PI * 2);
+    c.fillStyle = '#FFE9B0';
+    c.fill();
+  } else if (kind === 'shop') {
+    warm(fx + 4.5, by + 2, 2.2, bh - 4, 0.9);
+    warm(fx - 6.5, -10, 4.5, 20, 0.45);
+    for (const k of [-1, 1]) warm(H - 3, k * (W - 3) - 1, 2, 2, 0.8);
+  } else if (kind === 'office') {
+    // the mullion cells of the glass ring round the roof
+    for (let x = bx + 0.8; x < fx - 2.5; x += 3) for (const y of [by + 0.8, by + bh - 2.6]) if (r() < 0.5) warm(x, y, 2.6, 1.8, 0.9);
+    for (let y = by + 3.5; y < by + bh - 3; y += 3) for (const x of [bx + 0.8, fx - 2.6]) if (r() < 0.5) warm(x, y, 1.8, 2.6, 0.9);
+  } else if (kind === 'industry') {
+    const n = 5 + (v & 1), sw = bw / n;
+    for (let k = 0; k < n; k++) warm(bx + (k + 1) * sw - 1, by + 1, 1.2, bh - 2, 0.55);
+    for (const k of [-1, 1]) warm(H - 2.5, k * (W - 2.5) - 1, 2, 2);
+  }
+  c.globalAlpha = 1;
 }

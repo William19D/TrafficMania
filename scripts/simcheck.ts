@@ -18,7 +18,8 @@ import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
-import { VARIANTS, look, variant } from '../src/rendering/BuildingArt.ts';
+import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
+import { daylight } from '../src/rendering/Lighting.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -890,6 +891,19 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (new Set(Array.from({ length: VARIANTS }, (_, v) => look('office', v).height)).size < 3) fail('art: offices all one height');
   const street = new Set(Array.from({ length: 10 }, (_, i) => variant(300 + i * 50, 640)));
   if (street.size < 5 || variant(321.5, 77) !== variant(321.5, 77)) fail(`art: a street shows ${street.size} looks`);
+}
+// Day/night: no tint at noon, a full blue night at midnight, a warm dusk part way to night, and the tint never jumps between two
+// clock readings 3 in-game minutes apart; a shade of a shade still parses (vehicle tones are shaded again for roofs and outlines)
+{
+  const noon = daylight(12), mid = daylight(0), dusk = daylight(18.6);
+  if (noon.r + noon.g + noon.b !== 765 || noon.night) fail('light: noon is tinted');
+  if (mid.night !== 1 || mid.b <= mid.r) fail('light: midnight is not a blue night');
+  if (dusk.r <= dusk.b || dusk.night <= 0 || dusk.night >= 1) fail('light: dusk is not warm');
+  for (let h = 0; h < 24; h += 0.05) {
+    const a = daylight(h), b = daylight(h + 0.05);
+    if (Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 12 || Math.abs(a.night - b.night) > 0.05) fail(`light: the tint jumps at ${h.toFixed(2)}h`);
+  }
+  if (shade(shade('#5A6FD8', -0.2), 0) !== shade('#5A6FD8', -0.2)) fail('art: a shade does not shade again');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through
