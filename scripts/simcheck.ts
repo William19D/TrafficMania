@@ -14,6 +14,7 @@ import { findPath } from '../src/network/Pathfinder.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
+import { deserialize, serialize } from '../src/core/Save.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -84,6 +85,23 @@ game.placeControl(J1, 'light');
 game.placeControl(R, 'roundabout');
 if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not placed');
 
+// Car invariants: every lane sorted with no overlaps or stale cars, every junction occupant on the graph
+const invariants = (w: Game): void => {
+  const live = new Set(w.cars), t = w.time.toFixed(2);
+  for (const e of w.graph.edges) for (const l of e.lanes) {
+    for (let k = 0; k < l.cars.length; k++) {
+      const c = l.cars[k];
+      if (!live.has(c) || c.lane !== l) fail(`stale car on lane ${e.id} at t=${t}`);
+      const n = l.cars[k + 1];
+      if (n && n.s < c.s) fail(`lane ${e.id} not sorted at t=${t}`);
+      if (!n || n.s - c.s - sep(c, n) >= -1e-6) continue;
+      fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - sep(c, n)).toFixed(2)} at t=${t}`);
+    }
+  }
+  for (const n of w.graph.nodes) for (const c of n.occupants) {
+    if (!live.has(c) || !c.lane.cars.includes(c)) fail(`node ${n.id} holds a car off the graph at t=${t}`);
+  }
+};
 const DT = 1 / 60, STEPS = 300 * 60;
 let maxCars = 0, lo = Infinity, hi = 0;
 const kinds = new Set<string>();
@@ -108,19 +126,7 @@ for (let i = 0; i < STEPS; i++) {
     if (l === c.lane && x && c.exit && x !== c.exit && x.edge === c.exit.edge && l.edge.length - c.s < 2 * NODE_R) fail(`exit lane switched inside the turn arc at t=${game.time.toFixed(2)}`);
     exits.set(c, [c.lane, c.exit]);
   }
-  for (const e of g.edges) for (const l of e.lanes) {
-    for (let k = 0; k < l.cars.length; k++) {
-      const c = l.cars[k];
-      if (!live.has(c) || c.lane !== l) fail(`stale car on lane ${e.id} at t=${game.time.toFixed(2)}`);
-      const n = l.cars[k + 1];
-      if (n && n.s < c.s) fail(`lane ${e.id} not sorted at t=${game.time.toFixed(2)}`);
-      if (!n || n.s - c.s - sep(c, n) >= -1e-6) continue;
-      fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - sep(c, n)).toFixed(2)} at t=${game.time.toFixed(2)}`);
-    }
-  }
-  for (const n of g.nodes) for (const c of n.occupants) {
-    if (!live.has(c) || !c.lane.cars.includes(c)) fail(`node ${n.id} holds a car off the graph at t=${game.time.toFixed(2)}`);
-  }
+  invariants(game);
 }
 if (game.score <= 0) fail('no car arrived');
 // Commuters leave home in the morning rush, and some reached work and drove home
@@ -598,6 +604,21 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const c = lane.cars[3]!;
   w.select(w.graph.carPos(c));
   if (w.follow !== c || w.selected) fail('follow: an Edit click on a car did not follow it');
+}
+// Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
+// again, and the loaded game runs 60s within the car invariants and gets trips through
+{
+  const json = serialize(game), w = deserialize(json);
+  if (serialize(w) !== json) fail('save: a loaded game saves differently');
+  const pending = (x: Game): number => x.buildings.reduce((n, b) => n + b.pending.length, 0);
+  if (w.cars.length || pending(w) !== pending(game) + game.cars.length) fail(`save: ${pending(w)} trips waiting, expected ${pending(game) + game.cars.length}`);
+  if (w.graph.edges.length !== g.edges.length || w.graph.nodes.filter(n => n.control !== 'none').length !== g.nodes.filter(n => n.control !== 'none').length) fail('save: the network changed');
+  const score = w.score;
+  for (let t = 0; t < 60 * 60; t++) {
+    try { w.update(DT); } catch (e) { fail(`save: exception in the loaded game: ${(e as Error).stack}`); }
+    invariants(w);
+  }
+  if (w.score <= score) fail('save: no trip arrived in the loaded game');
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

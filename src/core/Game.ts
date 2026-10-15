@@ -140,9 +140,9 @@ export class Game {
   tutorialTargets: Vec[] = [];
   // Last successful commitPath: edges created and plan level (read by the tutorial)
   lastBuild: { segs: number; level: number } | null = null;
-  private lastHour: number = T.START_HOUR;
+  lastHour: number = T.START_HOUR;
   // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
-  private assignAt = 0;
+  assignAt = 0;
   private msgTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(public cfg: GameConfig = DEFAULT_CONFIG) {

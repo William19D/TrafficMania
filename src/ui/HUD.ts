@@ -71,7 +71,7 @@ const FRIENDLY: Record<string, string> = {
 };
 const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
-const CONTROLS: [string, string][] = [
+export const CONTROLS: [string, string][] = [
   ['Road / Light / Roundabout / Edit / Demolish / Grid / Interchange', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd> <kbd>6</kbd> <kbd>7</kbd>'],
   ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
@@ -88,6 +88,7 @@ const CONTROLS: [string, string][] = [
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
+  ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
   ['Help', '<kbd>?</kbd>'],
 ];
@@ -191,7 +192,7 @@ export class HUD {
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
   private toasts: Toast[] = [];
-  private helpOpen = false;
+  helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
     clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
@@ -205,6 +206,10 @@ export class HUD {
   private seenLevel: number;
   private resume: 0 | 1 | 2 | 4 = 1;
   onTutorial: (() => void) | null = null;
+  // Game over: play the same map again, or go to the main menu; the menu button (pause menu)
+  onRestart: (() => void) | null = null;
+  onMenu: (() => void) | null = null;
+  onPause: (() => void) | null = null;
   // Moves the camera there: the next building without a road (warning chip), a trip report's spot
   onJump: ((p: Vec) => void) | null = null;
   private dangerIdx = 0;
@@ -212,7 +217,8 @@ export class HUD {
   private jMode: 'signals' | 'bans' = 'signals';
   private jPhase = 0;
 
-  constructor(private root: HTMLElement, private game: Game) {
+  // signal: aborted when this game's HUD is replaced, removing its window, document and root listeners
+  constructor(private root: HTMLElement, private game: Game, signal?: AbortSignal) {
     this.seenLevel = game.cityLevel;
     root.innerHTML = `
       <div class="panel res" role="group" aria-label="Resources">
@@ -246,6 +252,7 @@ export class HUD {
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
+        <button class="iconbtn" data-view="menu" aria-label="Menu" data-tip="Menu: save, load, quit" data-key="Esc">${icon('menu')}</button>
       </div>
       <div class="rcol">
         <div class="panel pop cpanel" hidden role="dialog" aria-label="Followed car">
@@ -356,6 +363,7 @@ export class HUD {
       const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
       else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+      else if (v === 'menu') this.onPause?.();
     };
     this.q('.rcol').addEventListener('click', e => {
       const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
@@ -380,10 +388,10 @@ export class HUD {
     this.q('.danger').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } };
     document.addEventListener('pointerdown', e => {
       if (this.helpOpen && !(e.target as Element).closest('.pop, .helpbtn')) this.setHelp(false, false);
-    });
+    }, { signal });
     // capture phase on window: runs before Input's listener, so modal keys never reach the tools
-    window.addEventListener('keydown', e => this.onKey(e), true);
-    this.bindTips();
+    window.addEventListener('keydown', e => this.onKey(e), { capture: true, signal });
+    this.bindTips(signal);
   }
 
   private q<T extends HTMLElement = HTMLElement>(s: string): T {
@@ -395,7 +403,7 @@ export class HUD {
     const g = this.game;
     if (g.gameOver || g.pendingLevel) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) location.reload(); else this.closeLevel(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else this.closeLevel(); }
       return;
     }
     if (e.key === 'Escape') {
@@ -426,7 +434,7 @@ export class HUD {
   }
 
   // ---------- tooltips: one shared .tip ----------
-  private bindTips(): void {
+  private bindTips(signal?: AbortSignal): void {
     const target = (e: Event) => (e.target as Element).closest<HTMLElement>('[data-tip]');
     this.root.addEventListener('pointerover', e => {
       if (e.pointerType === 'touch') return;
@@ -436,17 +444,17 @@ export class HUD {
       if (!el?.dataset.tip) return;
       this.tipFor = el;
       this.tipTimer = setTimeout(() => this.showTip(el), 300);
-    });
+    }, { signal });
     this.root.addEventListener('pointerout', e => {
       const to = e.relatedTarget as Node | null;
       if (this.tipFor && to && this.tipFor.contains(to)) return;
       this.hideTip();
-    });
+    }, { signal });
     this.root.addEventListener('focusin', e => {
       const el = target(e);
       if (el?.dataset.tip && (e.target as Element).matches(':focus-visible')) this.showTip(el);
-    });
-    this.root.addEventListener('focusout', () => this.hideTip());
+    }, { signal });
+    this.root.addEventListener('focusout', () => this.hideTip(), { signal });
     // touch: long-press a dock button shows its tooltip for 2.5 s
     let press: ReturnType<typeof setTimeout> | undefined;
     this.root.addEventListener('pointerdown', e => {
@@ -454,10 +462,10 @@ export class HUD {
       const el = target(e);
       if (!el?.closest('.dock')) return;
       press = setTimeout(() => { this.showTip(el, true); setTimeout(() => this.hideTip(), 2500); }, 500);
-    });
+    }, { signal });
     const stop = () => clearTimeout(press);
-    this.root.addEventListener('pointerup', stop);
-    this.root.addEventListener('pointercancel', stop);
+    this.root.addEventListener('pointerup', stop, { signal });
+    this.root.addEventListener('pointercancel', stop, { signal });
   }
 
   private showTip(el: HTMLElement, touch = false): void {
@@ -539,10 +547,11 @@ export class HUD {
             <div>${icon('smile', 'big')}<span>Smooth trips</span><b class="num">${g.stats.arrived ? Math.round(100 * g.stats.smooth / g.stats.arrived) : 0}%</b></div>
             <div>${icon('money', 'big')}<span>Money</span><b class="num">${fmtMoney(g.money)}</b></div>
           </div>
-          <div class="actions"><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
+          <div class="actions"><button class="btn" data-action="to-menu">Main menu</button><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
         </div>`;
       const b = this.q<HTMLButtonElement>('[data-action="restart"]');
-      b.onclick = () => location.reload();
+      b.onclick = () => this.onRestart?.();
+      this.q('[data-action="to-menu"]').onclick = () => this.onMenu?.();
       b.focus();
     } else if (g.pendingLevel) {
       // every level reached since the last modal (several at once merge): unlocks, the batch and the grants
@@ -737,7 +746,7 @@ export class HUD {
     if (key === this.last.views) return;
     this.last.views = key;
     const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
-    this.root.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
+    this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
     this.q('.legend').innerHTML = LEGEND[g.overlay];
     this.q('.mpanel').hidden = !this.show.metrics;
     this.q('.fpanel').hidden = !this.show.feed;

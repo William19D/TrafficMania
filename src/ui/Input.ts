@@ -10,8 +10,11 @@ const CLICK_PX = 6;
 
 type Mode = 'idle' | 'placing' | 'pressed' | 'bending';
 
-export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: CanvasRenderer): {
+// signal: aborted when the game is replaced, removing every listener
+export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: CanvasRenderer, signal?: AbortSignal): {
   readonly preview: PathPlan | null; readonly anchor: Vec | null; readonly handle: Vec | null; readonly hover: Vec | null;
+  // a road, bend or grid in progress (Esc cancels it before it opens the pause menu)
+  readonly busy: boolean;
 } {
   let hover: Vec | null = null;
   let panning = false;
@@ -68,7 +71,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     else if (game.tool === 'demolish') game.demolishAt(w);
     else if (game.tool === 'place') game.placeBuilding(w);
     else game.placeControl(w, game.tool);
-  });
+  }, { signal });
 
   canvas.addEventListener('pointermove', e => {
     hover = renderer.screenToWorld(e.clientX, e.clientY);
@@ -98,7 +101,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
         plan = game.planPath(cubicPoints(anchor, ...bendControls(anchor, end, w), end));
       }
     }
-  });
+  }, { signal });
 
   canvas.addEventListener('pointerup', e => {
     if (e.button === 1 || e.button === 2) {
@@ -143,20 +146,20 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       plan = autoPlan(anchor, anchor);
     }
     press = null;
-  });
+  }, { signal });
 
-  canvas.addEventListener('pointerleave', () => { hover = null; });
+  canvas.addEventListener('pointerleave', () => { hover = null; }, { signal });
 
-  canvas.addEventListener('pointercancel', () => { panning = false; cancel(); });
+  canvas.addEventListener('pointercancel', () => { panning = false; cancel(); }, { signal });
 
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
     renderer.zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1);
-  }, { passive: false });
+  }, { passive: false, signal });
 
   canvas.addEventListener('contextmenu', e => {
     e.preventDefault();
-  });
+  }, { signal });
 
   window.addEventListener('keydown', e => {
     const n = Number(e.key);
@@ -175,7 +178,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool('road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
-  });
+  }, { signal });
 
   // Tool switches from the HUD (or a modal opening) cancel the placement / bend and drop the Edit selection.
   // also mirrors the tool onto <body data-tool> so CSS can switch the canvas cursor
@@ -191,5 +194,6 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     get anchor() { live(); return grid[0] ?? anchor; },
     get handle() { live(); return handle; },
     get hover() { live(); return blocked() ? null : hover; },
+    get busy() { return mode !== 'idle' || !!run || grid.length > 0; },
   };
 }

@@ -56,6 +56,13 @@ export class CanvasRenderer {
     addEventListener('resize', () => this.resize());
   }
 
+  // A new game (its map may have another size): the whole map in view
+  reset(): void {
+    this.cam = { x: WORLD.w / 2, y: WORLD.h / 2, zoom: Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * 0.95 };
+    this.route = { car: null, nodes: [] };
+    this.clamp();
+  }
+
   resize(): void {
     const dpr = devicePixelRatio || 1;
     this.canvas.width = Math.round(innerWidth * dpr);
