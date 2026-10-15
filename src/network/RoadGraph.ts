@@ -297,9 +297,16 @@ export class RoadGraph {
     return { x: n.x + Math.cos(ang) * RING_R, y: n.y + Math.sin(ang) * RING_R, angle: ang - Math.PI / 2 };
   }
 
-  // A node can take a road of this level: doors and bare nodes always, otherwise it needs an edge of that level.
+  // A node takes a road of this level when all its roads are on it (a ramp joint, on two levels, takes none); doors take ground roads
   nodeLevelOk(n: Node, level: number): boolean {
-    return !!n.building || n.edges.length === 0 || n.edges.some(e => e.level === level);
+    return n.building ? level === 0 : n.edges.every(e => this.hidden.has(e) || e.level === level);
+  }
+
+  // Level of a node's roads: NaN for a ramp joint (two levels), 'bare' for a node without roads; doors are ground
+  levelOf(n: Node, bare = NaN): number {
+    if (n.building) return 0;
+    const ls = new Set(n.edges.filter(e => !this.hidden.has(e)).map(e => e.level));
+    return ls.size === 1 ? [...ls][0] : ls.size ? NaN : bare;
   }
 
   nearestNode(p: Vec, r: number, level?: number): Node | null {

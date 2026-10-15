@@ -37,6 +37,8 @@ body[data-tool="roundabout"] canvas { cursor: pointer; }
 body[data-tool="demolish"] canvas { cursor: cell; }
 body[data-tool="edit"] canvas { cursor: pointer; }
 body[data-tool="place"] canvas { cursor: copy; }
+body[data-tool="grid"] canvas { cursor: crosshair; }
+body[data-tool="interchange"] canvas { cursor: pointer; }
 
 #hud {
   --dock-h: 4.75em;
@@ -546,6 +548,13 @@ kbd {
   .eh { display: none; }
   .elev { width: auto; min-width: 3.5em; }
 }
+/* Grid and Interchange widened the dock again: the tier caption goes (the swatch tooltips name the tier) and the tools pack tighter */
+@media (max-width: 1439px) {
+  .plabel { display: none; }
+  .dock { gap: 6px; }
+  #hud .tool { min-width: 3.75em; padding-inline: .375em; }
+  .tool .lbl { font-size: 12px; }
+}
 /* below ~1280px the centred status bar would hit the resources row once the no-road chip shows */
 @media (max-width: 1279px) {
   .status { top: calc(var(--edge-t) + 56px); }
@@ -609,6 +618,9 @@ kbd {
 .jbody { display: flex; flex-direction: column; gap: .5em; }
 .jbody .seg { flex-wrap: wrap; align-self: flex-start; }
 .jnote { margin: 0; font-size: var(--label); color: var(--muted); }
+.jnote.bad { color: var(--danger); font-weight: 600; }
+.ipanel { width: min(22em, calc(100vw - 24px)); }
+.gsz small { font-size: 10px; font-weight: 600; }
 .jsvg { display: block; width: min(14em, 100%); aspect-ratio: 1; margin: 0 auto; }
 .jsvg .arm { stroke: #9E9E9A; stroke-width: 11; stroke-linecap: round; }
 .jsvg .arm.main { stroke-width: 15; stroke: #85857F; }

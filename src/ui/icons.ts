@@ -25,6 +25,8 @@ const P: Record<string, string> = {
   frown: '<circle cx="12" cy="12" r="9.5"/><path d="M8 16.5a5 5 0 0 1 8 0M9 9.5v.01M15 9.5v.01"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   place: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>',
+  grid: '<rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
+  interchange: '<path d="M12 2v20M2 12h20"/><path d="M12 7a5 5 0 1 0 5 5M12 17a5 5 0 1 0-5-5"/>',
 };
 
 export const ICONS: Record<string, string> = Object.fromEntries(

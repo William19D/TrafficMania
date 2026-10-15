@@ -5,7 +5,7 @@ import type { Vec } from '../util/geom.ts';
 import { dist } from '../util/geom.ts';
 import { cubicPoints, autoControls, bendControls } from '../util/curve.ts';
 
-const KEY_TOOLS: Tool[] = ['road', 'light', 'roundabout', 'edit', 'demolish'];
+const KEY_TOOLS: Tool[] = ['road', 'light', 'roundabout', 'edit', 'demolish', 'grid', 'interchange'];
 const CLICK_PX = 6;
 
 type Mode = 'idle' | 'placing' | 'pressed' | 'bending';
@@ -24,6 +24,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let handle: Vec | null = null;
   let plan: PathPlan | null = null;
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
+  let grid: Vec[] = []; // Grid tool: the corner, then the end of the first side
 
   const blocked = () => game.gameOver || game.pendingLevel > 0;
 
@@ -33,6 +34,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     anchor = end = handle = null;
     plan = null;
     run = null;
+    grid = [];
   };
 
   const autoPlan = (a: Vec, c: Vec): PathPlan => {
@@ -61,7 +63,9 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     } else if (game.tool === 'edit') {
       press = { x: e.clientX, y: e.clientY };
       run = game.runAt(w);
-    } else if (game.tool === 'demolish') game.demolishAt(w);
+    } else if (game.tool === 'grid') press = { x: e.clientX, y: e.clientY };
+    else if (game.tool === 'interchange') game.pickInterchange(w);
+    else if (game.tool === 'demolish') game.demolishAt(w);
     else if (game.tool === 'place') game.placeBuilding(w);
     else game.placeControl(w, game.tool);
   });
@@ -83,6 +87,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       }
       return;
     }
+    if (game.tool === 'grid' && grid.length && !blocked()) { plan = game.planGrid(grid[0], grid[1] ?? w, grid[1] ? w : null); return; }
     if (game.tool !== 'road' || blocked()) { if (mode !== 'idle') cancel(); return; }
     if (mode === 'placing' && anchor) plan = autoPlan(anchor, w);
     else if ((mode === 'pressed' || mode === 'bending') && anchor && end && press) {
@@ -110,6 +115,16 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
         game.select(renderer.screenToWorld(e.clientX, e.clientY));
       }
       cancel();
+      return;
+    }
+    if (game.tool === 'grid') {
+      if (press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) <= CLICK_PX) {
+        const w = renderer.screenToWorld(e.clientX, e.clientY);
+        if (grid.length < 2) grid.push(w);
+        else if (game.commitGrid(grid[0], grid[1], w)) cancel();
+        if (grid.length) plan = game.planGrid(grid[0], grid[1] ?? w, grid[1] ? w : null);
+      }
+      press = null;
       return;
     }
     if (game.tool !== 'road') return;
@@ -156,7 +171,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       if (game.tool === 'place') game.setTool('road');
       else { cancel(); game.startPlacing(); }
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
-    else if (e.key === 'Escape') { cancel(); game.select(null); if (game.tool === 'place') game.setTool('road'); }
+    else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool('road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
   });
@@ -166,12 +181,13 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   const live = () => {
     if (document.body.dataset.tool !== game.tool) document.body.dataset.tool = game.tool;
     if ((mode !== 'idle' || run) && (game.tool !== (run ? 'edit' : 'road') || blocked())) cancel();
+    if (grid.length && (game.tool !== 'grid' || blocked())) cancel();
     if (game.selected && game.tool !== 'edit') game.select(null);
   };
 
   return {
-    get preview() { live(); return plan; },
-    get anchor() { live(); return anchor; },
+    get preview() { live(); return game.tool === 'interchange' ? game.ichgAt(blocked() ? null : hover) : plan; },
+    get anchor() { live(); return grid[0] ?? anchor; },
     get handle() { live(); return handle; },
     get hover() { live(); return blocked() ? null : hover; },
   };

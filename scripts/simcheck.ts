@@ -514,6 +514,62 @@ for (const kind of ['yield', 'stop'] as const) {
   if (kind === 'yield' && first !== main) fail('yield: the side road went before the main road');
   if (w.score !== 2) fail(`${kind}: ${w.score} of 2 cars arrived`);
 }
+// Ramps: a road at L2 from a ground road's dead end climbs a level per segment (L0, L1, then L2); a 2-tile one is too steep; a viaduct
+// ending at a door comes down to the ground first (doors take ground roads only); a commute over it arrives
+{
+  const w = blank(), flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  const X = town(w, 100, 500), Y = town(w, 900, 500), P = { x: 300, y: 500 }, Q = { x: 600, y: 500 };
+  w.commitPath(w.planPath([X, P], 0, flat));
+  const up = w.planPath([P, Q], 2, flat), ul = up.segs.map(g => g.level);
+  if (!up.ok || ul[0] !== 0 || ul[1] !== 1 || ul.slice(2).some(l => l !== 2)) fail(`ramps: up ${ul} (${up.reason})`);
+  if (w.planPath([P, { x: 380, y: 500 }], 2, flat).reason !== 'Too steep: make the ramp longer') fail('ramps: a 2-tile ramp to L2 passed');
+  w.commitPath(up);
+  const down = w.planPath([Q, Y], 2, flat), dl = down.segs.map(g => g.level);
+  if (!down.ok || dl[0] !== 2 || dl[dl.length - 1] !== 0) fail(`ramps: down to the door ${dl} (${down.reason})`);
+  w.commitPath(down);
+  w.queueTrip(X.building!, Y.building!, 'commute');
+  for (let t = 0; t < 30 * 60; t++) w.update(DT);
+  if (w.score !== 1) fail(`ramps: the commute over the viaduct did not arrive (score ${w.score})`);
+}
+// Grid: 480 x 320 in 4-tile blocks is 3 x 2 blocks: 2 crossings inside, 6 T-junctions on the border, 4 corners, at the previewed price
+{
+  const w = blank(), a = { x: 200, y: 200 }, b = { x: 680, y: 200 }, c = { x: 300, y: 520 };
+  w.demandOff = true;
+  w.roadType = { tier: 'street', lanes: 1, oneWay: false };
+  const plan = w.planGrid(a, b, c), m0 = w.money;
+  if (!plan.ok || !w.commitGrid(a, b, c)) fail(`grid: ${plan.reason}`);
+  const deg = (k: number) => w.graph.nodes.filter(n => n.edges.length === k).length;
+  if (deg(4) !== 2 || deg(3) !== 6 || deg(2) !== 4 || w.graph.nodes.length !== 12 || Math.abs(m0 - plan.cost - w.money) > 1e-6) {
+    fail(`grid: ${deg(4)} crossings, ${deg(3)} T-junctions, ${deg(2)} corners of ${w.graph.nodes.length}, paid ${m0 - w.money} for ${plan.cost}`);
+  }
+}
+// Interchanges on a boulevard (main road) crossing an avenue: no node joins the two roads at one level any more, and a trip between
+// every pair of arms arrives (the trumpet on a T)
+for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
+  const w = blank(), wg = w.graph, main: RoadType = { tier: 'boulevard', lanes: 2, oneWay: false }, side: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  const cx = 1000, cy = 600, r = 500;
+  const arms = [town(w, cx - r, cy), town(w, cx + r, cy), town(w, cx, cy + r)];
+  if (kind !== 'trumpet') arms.push(town(w, cx, cy - r, 'home', true));
+  w.commitPath(w.planPath([arms[0], arms[1]], 0, main));
+  w.commitPath(w.planPath([arms[2], arms[3] ?? { x: cx, y: cy }], 0, side));
+  const J = wg.nearestNode({ x: cx, y: cy }, 2)!;
+  w.ichg = { node: J, kind };
+  const plan = w.planInterchange(J, kind), m0 = w.money;
+  if (!plan.ok || !w.buildInterchange()) fail(`interchange ${kind}: ${plan.reason}`);
+  if (Math.abs(m0 - w.money - plan.net!) > 1e-6) fail(`interchange ${kind}: paid ${m0 - w.money}, previewed ${plan.net}`);
+  const onMain = (e: typeof wg.edges[number]) => Math.abs(e.a.y - cy) < 1 && Math.abs(e.b.y - cy) < 1;
+  const onSide = (e: typeof wg.edges[number]) => Math.abs(e.a.x - cx) < 1 && Math.abs(e.b.x - cx) < 1;
+  for (const n of wg.nodes) {
+    const lm = new Set(n.edges.filter(onMain).map(e => e.level));
+    if (n.edges.some(e => onSide(e) && lm.has(e.level))) fail(`interchange ${kind}: node ${n.id} joins both roads at L${n.edges.find(onSide)!.level}`);
+  }
+  let pairs = 0;
+  for (const a of arms) for (const b of arms) if (a !== b) { w.queueTrip(a.building!, b.building!, 'commute'); pairs++; }
+  for (let t = 0; t < 150 * 60 && w.score < pairs; t++) w.update(DT);
+  if (w.score !== pairs) fail(`interchange ${kind}: ${w.score} of ${pairs} trips arrived`);
+}
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
   + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)}`);

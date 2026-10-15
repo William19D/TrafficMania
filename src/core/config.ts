@@ -96,14 +96,16 @@ export const LEVELS: { pop: number; batch: Record<Zone, number> }[] = [
   { pop: 2100, batch: batch(6, 1, 2, 1) },
 ];
 export const ENDLESS_POP = 300, ENDLESS_BATCH = batch(6, 1, 2, 1);
-export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 'junction';
+export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 'junction' | 'grid' | 'interchange';
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
   roundabout: { level: 2, label: 'Roundabouts' },
   oneway: { level: 2, label: 'One-way roads' },
   junction: { level: 4, label: 'Light phases, protected lefts and turn bans' },
-  viaduct: { level: 3, label: 'Viaducts L1-L5' },
+  viaduct: { level: 3, label: 'Viaducts L1-L5 and ramps' },
   tunnel: { level: 5, label: 'Tunnels' },
   high: { level: 5, label: 'Viaducts L6-L10' },
+  grid: { level: 5, label: 'Grid tool' },
+  interchange: { level: 6, label: 'Interchanges' },
 };
 
 // Gameplay tuning ($); later steps add theirs

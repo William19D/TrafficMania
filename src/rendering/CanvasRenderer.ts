@@ -196,8 +196,8 @@ export class CanvasRenderer {
     const edges = game.graph.edges;
     const nodes = game.graph.nodes;
     const ground = edges.filter((e) => !e.tunnel && e.level === 0);
-    // A node belongs to the level of its edges (doors are ground: only they may mix levels)
-    const levelNodes = (L: number): Node[] => nodes.filter((n) => (n.building ? 0 : n.edges[0]?.level ?? 0) === L);
+    // A node belongs to the level of its edges; a ramp joint to the upper one (doors are ground)
+    const levelNodes = (L: number): Node[] => nodes.filter((n) => (n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level))) === L);
     const carsAt = (L: number): void => {
       for (const car of game.cars) if (car.lane.edge.level === L) this.car(game, car);
     };
@@ -278,36 +278,36 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
     }
 
-    // Build preview: polyline of segments
+    // Build preview: polyline of segments (a grid or an interchange mixes road types, so each segment draws its own)
     if (preview && preview.segs.length) {
       const segs = preview.segs;
-      const W = roadWidth(preview.type), look = TIERS[preview.type.tier];
+      const W = (g: PathSeg): number => roadWidth(g.type), look = (g: PathSeg) => TIERS[g.type.tier];
       const draw = (g: PathSeg, color: string, width: number): void => this.seg(g.a, g.b, color, width);
       // Colored dashed outline: wider so it peeks out behind the gray outline
       ctx.setLineDash([8, 6]);
-      for (const g of segs) draw(g, preview.ok ? GREEN : RED, W + 7);
+      for (const g of segs) draw(g, preview.ok ? GREEN : RED, W(g) + 7);
       ctx.setLineDash([]);
       ctx.globalAlpha = 0.85;
       for (const g of segs) {
         if (g.tunnel) {
           ctx.setLineDash([6, 6]);
-          draw(g, look.out, W + 3);
+          draw(g, look(g).out, W(g) + 3);
           ctx.setLineDash([]);
         } else if (g.level >= 1) {
-          draw(g, BRIDGE, W + 5);
+          draw(g, BRIDGE, W(g) + 5);
         } else if (g.bridge) {
-          this.bridge(g.a, g.b, terrain, W);
+          this.bridge(g.a, g.b, terrain, W(g));
         } else {
-          draw(g, look.out, W + 3);
+          draw(g, look(g).out, W(g) + 3);
         }
       }
       for (const g of segs) {
         if (g.tunnel) ctx.setLineDash([6, 6]);
-        draw(g, look.fill, W);
+        draw(g, look(g).fill, W(g));
         ctx.setLineDash([]);
       }
-      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W);
-      for (const g of segs) if (!g.tunnel) this.markings(g.a, g.b, preview.type);
+      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W(g));
+      for (const g of segs) if (!g.tunnel) this.markings(g.a, g.b, g.type);
       ctx.globalAlpha = 1;
 
       let label = preview.reason;
@@ -318,7 +318,10 @@ export class CanvasRenderer {
       } else if (preview.ok) {
         label = fmtMoney(preview.cost);
       }
-      if (label && preview.level > 0) label += ' · L' + preview.level;
+      // levels: one (a viaduct) or a span (a ramp)
+      const lo = Math.min(...segs.map(g => g.level)), hi = Math.max(...segs.map(g => g.level));
+      if (label && hi > 0) label += lo === hi ? ` · L${hi}` : ` · L${lo}-L${hi}`;
+      if (label && preview.note) label = `${preview.note} · ${label}`;
       const last = preview.points[preview.points.length - 1] ?? segs[segs.length - 1].b;
       if (handle) {
         // Bend handle with dashed guides from the anchor (or the bent run's start) and to the end point
@@ -345,7 +348,7 @@ export class CanvasRenderer {
       ctx.stroke();
     }
 
-    if (hover && !preview) this.hoverFx(game, hover);
+    if (hover && (!preview || game.tool === 'interchange')) this.hoverFx(game, hover, preview);
 
     // No road access: red badge on the roof, and a label while the cursor is over the building
     ctx.textAlign = 'center';
@@ -462,7 +465,7 @@ export class CanvasRenderer {
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
-  private hoverFx(game: Game, p: Vec): void {
+  private hoverFx(game: Game, p: Vec, preview: PathPlan | null): void {
     const ctx = this.ctx, g = game.graph;
     const label = (s: string, x: number, y: number, color: string) => {
       ctx.textAlign = 'left';
@@ -496,11 +499,21 @@ export class CanvasRenderer {
       const place = n.control === kind ? 'Already here' : `${kind === 'light' ? 'Place traffic light' : 'Place roundabout'} · ${fmtMoney(cost)}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
-      const n = g.nearestNode(p, NODE_R + 4, game.level);
-      const pt = n ?? g.nearestEdge(p, ROAD_W, game.level)?.point;
-      if (!pt) return;
-      this.ring(pt.x, pt.y, NODE_R, ROAD_OUT, 2);
-      label('Start here', pt.x, pt.y, DARK);
+      // a node or road of another level: the road ramps from there to the dock level
+      const s = game.snapEnd(p), L = game.levelAt(s);
+      if (!s.node && !s.edge) return;
+      this.ring(s.point.x, s.point.y, NODE_R, ROAD_OUT, 2);
+      label(L === game.level ? 'Start here' : `Ramp from ${L ? `L${L}` : 'the ground'}`, s.point.x, s.point.y, DARK);
+    } else if (game.tool === 'grid') {
+      label('Click the first corner', p.x, p.y, DARK);
+    } else if (game.tool === 'interchange') {
+      // the picked junction (or the one under the cursor); its reason when no ghost can be drawn
+      const n = game.ichg?.node ?? game.junctionAt(p);
+      if (!n) { label('Click a junction of 3 or 4 roads', p.x, p.y, DARK); return; }
+      this.ring(n.x, n.y, NODE_R + 26, preview?.ok ? GREEN : RED, 2);
+      if (!preview) label('⚠ Needs a junction of 3 or 4 roads', n.x, n.y, RED);
+      else if (!preview.segs.length) label('⚠ ' + preview.reason, n.x, n.y, RED);
+      else if (!game.ichg) label('Click to pick an interchange', n.x, n.y + 18, ACCENT);
     } else if (game.tool === 'place') {
       this.ghost(game, p);
     } else if (game.tool === 'edit') {

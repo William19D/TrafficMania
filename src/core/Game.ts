@@ -16,8 +16,12 @@ import { Car, KINDS, randomKind } from '../entities/Car.ts';
 import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_BATCH, ENDLESS_POP, LEVELS, TIERS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
 import type { Feature, GameConfig, Purpose, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
+import { ICHG, ICHG_KEYS } from './Templates.ts';
+import type { Ichg } from './Templates.ts';
 
-export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place';
+export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place' | 'grid' | 'interchange';
+// Tools locked below a city level
+export const TOOL_LOCK: Partial<Record<Tool, Feature>> = { roundabout: 'roundabout', grid: 'grid', interchange: 'interchange' };
 export type GameOver = '' | 'bankrupt' | 'unhappy';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
@@ -46,14 +50,21 @@ export const levelUnlocks = (n: number): string[] => [
   ...Object.values(UNLOCKS).filter(u => u.level === n).map(u => u.label),
 ];
 export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number; type: RoadType }
-// cost in $; net: bend plans only, cost minus the full price of the replaced run
-export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number }
+// cost in $; net: bend and interchange plans, cost minus the full price of the replaced run (bend) or the refunds (interchange);
+// note: what the preview label leads with (grid size, interchange name)
+export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number; note?: string }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
+// A crossing road's arm from the junction to the cut point 'at' (edges[i] leaves nodes[i])
+interface Arm { edges: Edge[]; nodes: Node[]; at: Vec }
+// A template laid on a junction: local (u, v) -> world, the arms to cut, the rebuilt crossing road's type and the ramps' type
+interface IchgFrame { map: (p: Vec) => Vec; cuts: Arm[]; deck: RoadType; ramp: RoadType }
 export const CONTROL_LABEL: Record<Control, string> = { none: 'None', yield: 'Yield', stop: 'Stop', light: 'Light', roundabout: 'Roundabout' };
 const CONTROL_COST: Record<Control, number> = { none: 0, yield: T.SIGN_COST, stop: T.SIGN_COST, light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
 const CONTROL_UPKEEP: Record<Control, number> = { none: 0, yield: T.SIGN_UPKEEP, stop: T.SIGN_UPKEEP, light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
 const MAX_LEVEL = 10;
+// Tiers from the lowest up
+const TIER_RANK = Object.keys(TIERS) as Tier[];
 const MOUNTAIN_LEVEL = 6; // viaducts at this level or higher clear mountains
 
 export class Game {
@@ -85,6 +96,13 @@ export class Game {
   placeAngle = Math.PI / 2;
   // Type for new roads
   roadType: RoadType = { ...DEFAULT_TYPE };
+  // Grid tool block size in tiles
+  gridSize: 3 | 4 | 6 = 4;
+  // Interchange tool: the junction picked and the template shown on it
+  ichg: { node: Node; kind: Ichg } | null = null;
+  // Bumped on every build, demolish and driveway: interchange previews are cached against it
+  private version = 0;
+  private ichgCache = new Map<string, PathPlan>();
   // Run selected with the Edit tool (edges in run order), or the junction it inspects (never both)
   selected: Edge[] | null = null;
   inspect: Node | null = null;
@@ -535,13 +553,12 @@ export class Game {
   tangentAt(p: Vec, toward: Vec): Vec | null {
     const dx = toward.x - p.x, dy = toward.y - p.y, d = Math.hypot(dx, dy);
     if (!d) return null;
-    const s = this.snap(p);
+    const s = this.snapEnd(p);
     const cands: Vec[] = [];
     const push = (x: number, y: number) => { const l = Math.hypot(x, y); if (l) cands.push({ x: x / l, y: y / l }); };
     if (s.node) {
       const n = s.node;
       for (const e of n.edges) {
-        if (!n.building && e.level !== this.level) continue;
         const o = e.a === n ? e.b : e.a;
         push(n.x - o.x, n.y - o.y);
       }
@@ -564,11 +581,26 @@ export class Game {
     const hit = this.graph.nearestEdge(p, ROAD_W, level);
     if (hit) {
       for (const end of [hit.edge.a, hit.edge.b]) {
-        if (dist(hit.point, end) <= NODE_R) return { node: end, edge: null, point: { x: end.x, y: end.y } };
+        if (dist(hit.point, end) <= NODE_R && this.graph.nodeLevelOk(end, level)) return { node: end, edge: null, point: { x: end.x, y: end.y } };
       }
       return { node: null, edge: hit.edge, point: hit.point };
     }
     return { node: null, edge: null, point: { x: p.x, y: p.y } };
+  }
+
+  // Snap for the end of a path: on 'level' first, else a node (not a ramp joint) or a road of another level, where a ramp starts or ends
+  snapEnd(p: Vec, level = this.level): Snap {
+    const s = this.snap(p, level), g = this.graph;
+    if (s.node || s.edge) return s;
+    const n = g.nearestNode(p, NODE_R + 4);
+    if (n && !Number.isNaN(g.levelOf(n))) return { node: n, edge: null, point: { x: n.x, y: n.y } };
+    const hit = g.nearestEdge(p, ROAD_W);
+    return hit ? this.snap(hit.point, hit.edge.level) : s;
+  }
+
+  // Level of a snapped point: its node's or road's, else 'level' (a free point)
+  levelAt(s: Snap, level = this.level): number {
+    return s.node ? this.graph.levelOf(s.node, level) : s.edge ? s.edge.level : level;
   }
 
   // Per-segment analysis shared by planBuild and planPath.
@@ -617,12 +649,14 @@ export class Game {
     this.upkeepDay = this.upkeepPerDay();
     this.changed();
     this.syncPlans();
+    this.version++;
   }
 
   // An edited junction plan whose roads changed (an arm added, removed or turned past 15 degrees) goes back to the default
   private syncPlans(): void {
     for (const n of this.graph.nodes) if (n.plan && !planFits(n, n.plan)) { n.plan = null; this.say('Junction plan reset: its roads changed'); }
     if (this.inspect && !this.graph.nodes.includes(this.inspect)) this.inspect = null;
+    if (this.ichg && !this.graph.nodes.includes(this.ichg.node)) this.ichg = null;
   }
 
   // Build price of a road from a to b: per tile and lane at the tier's rate, x the viaduct factor, or x the bridge / tunnel factor on the
@@ -672,6 +706,7 @@ export class Game {
       }
     }
     this.syncPlans();
+    this.version++;
   }
 
   // Roads a driveway may join: ground, not a bridge or tunnel, not a driveway, an access tier
@@ -721,13 +756,23 @@ export class Game {
     return chain[chain.length - 1];
   }
 
-  // Curved / freehand road through several anchors. First and last points use the full snap;
-  // intermediate anchors snap to nodes only, so a path can pass through a junction, or the door of a building without a road.
-  // One-way roads travel in the order of 'points'.
-  planPath(points: Vec[], level = this.level, type = this.roadType): PathPlan {
+  // Curved / freehand road through several anchors. The ends snap on 'level' first, else onto a node or road of another level (snapEnd);
+  // intermediate anchors snap to nodes only (of 'level'), so a path can pass through a junction, or the door of a building without a road.
+  // Ends on two levels make a ramp: segment i of n sits at 'level' clamped to within i levels of the start and n-1-i of the end, one
+  // level per segment (a ramp is resampled to a joint per tile, and needs |end - start| + 1 segments). Doors take ground roads only.
+  // ends: fixed end levels, snapped only there; snapMid false: the anchors between stay where they are (templates, whose ramps run
+  // alongside the road they join). One-way roads travel in the order of 'points'.
+  planPath(points: Vec[], level = this.level, type = this.roadType, ends?: [number, number], snapMid = true): PathPlan {
     const plan: PathPlan = { points: [], segs: [], cost: 0, ok: false, reason: 'Too short', type: { ...type }, level };
     if (points.length < 2) return plan;
+    const end = (p: Vec, k: 0 | 1): Snap => ends ? this.snap(p, ends[k]) : this.snapEnd(p, level);
+    const la = ends?.[0] ?? this.levelAt(end(points[0], 0), level), lb = ends?.[1] ?? this.levelAt(end(points[points.length - 1], 1), level);
+    if (la !== level || lb !== level) points = points.flatMap((p, i) => {
+      const q = points[i + 1], n = q ? Math.max(1, Math.floor(dist(p, q) / TILE)) : 1;
+      return Array.from({ length: n }, (_, k) => q ? { x: p.x + (q.x - p.x) * k / n, y: p.y + (q.y - p.y) * k / n } : p);
+    });
     const mid = (p: Vec): Snap => {
+      if (!snapMid) return { node: null, edge: null, point: { x: p.x, y: p.y } };
       const n = this.graph.nearestNode(p, NODE_R + 4, level);
       if (!n && this.graph.nearestEdge(p, NODE_R, level)) return this.snap(p, level);
       return n ? { node: n, edge: null, point: { x: n.x, y: n.y } } : { node: null, edge: null, point: { x: p.x, y: p.y } };
@@ -735,7 +780,7 @@ export class Game {
     const lastIdx = points.length - 1;
     const list: Snap[] = [];
     points.forEach((p, i) => {
-      const s = i === 0 || i === lastIdx ? this.snap(p, level) : mid(p);
+      const s = i === 0 ? end(p, 0) : i === lastIdx ? end(p, 1) : mid(p);
       const prev = list[list.length - 1];
       // collapse consecutive anchors on the same node / spot (the final snap wins)
       if (prev && ((s.node && s.node === prev.node) || dist(s.point, prev.point) < 1)) {
@@ -748,23 +793,26 @@ export class Game {
     });
     // drop a trailing stub shorter than TILE/2 unless it ends on a snapped node/edge
     if (list.length > 2) {
-      const end = list[list.length - 1];
-      if (!end.node && !end.edge && dist(end.point, list[list.length - 2].point) < TILE / 2) {
+      const tail = list[list.length - 1];
+      if (!tail.node && !tail.edge && dist(tail.point, list[list.length - 2].point) < TILE / 2) {
         list.pop();
-        list[list.length - 1] = this.snap(list[list.length - 1].point, level);
+        list[list.length - 1] = end(list[list.length - 1].point, 1);
       }
     }
     plan.points = list.map(s => s.point);
     if (list.length < 2) return plan;
     if (this.badGround(list[0]) || this.badGround(list[list.length - 1])) { plan.reason = 'Invalid terrain'; return plan; }
+    const n = list.length - 1;
+    if (Math.abs(la - lb) > n - 1) { plan.reason = 'Too steep: make the ramp longer'; return plan; }
 
-    let total = 0, built = 0, blocked = false, hit = false;
+    let total = 0, built = 0, blocked = false, hit = false, door = false;
     const noAccess = !TIERS[type.tier].access && list.some(s => s.node?.building);
-    for (let i = 1; i < list.length; i++) {
-      const a = list[i - 1], b = list[i];
-      const r = this.planSeg(a, b, level, type);
+    for (let i = 1; i <= n; i++) {
+      const a = list[i - 1], b = list[i], L = Math.max(la - i + 1, lb - n + i, Math.min(la + i - 1, lb + n - i, level));
+      const r = this.planSeg(a, b, L, type);
       const seg: SegPlan = { a: a.point, b: b.point, ...r.flags, sa: a, sb: b, crossings: r.crossings, exists: r.exists };
       plan.segs.push(seg);
+      door ||= L > 0 && !!(a.node?.building || b.node?.building);
       if (r.exists) continue;
       total += dist(a.point, b.point);
       plan.cost += this.price(a.point, b.point, r.flags);
@@ -777,6 +825,7 @@ export class Game {
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
     const tunnel = (plan.segs as SegPlan[]).some(g => g.tunnel && !g.exists) ? this.lockOf('tunnel') : '';
     if (tunnel) { plan.reason = tunnel; return plan; }
+    if (door) { plan.reason = 'Buildings need a ground road'; return plan; }
     if (noAccess) { plan.reason = 'Highways give no building access'; return plan; }
     if (hit) { plan.reason = 'Blocked by a building'; return plan; }
     plan.reason = this.lockedMsg(type) || this.afford(plan.cost);
@@ -854,12 +903,13 @@ export class Game {
 
   // Switching away from Edit drops the selection at once, so a click right after the switch cannot retype it
   setTool(t: Tool): void {
-    const locked = t === 'roundabout' ? this.lockOf('roundabout') : '';
+    const f = TOOL_LOCK[t], locked = f ? this.lockOf(f) : '';
     if (locked) { this.say(locked); return; }
     if (t === 'place' && !this.placing) { this.startPlacing(); return; }
     this.tool = t;
     if (t !== 'edit') { this.selected = null; this.inspect = null; }
     if (t !== 'place') this.placing = null;
+    if (t !== 'interchange') this.ichg = null;
   }
 
   // ---- Place tool ----
@@ -981,7 +1031,8 @@ export class Game {
     g.hidden = new Set(r.edges);
     this.money += credit;
     try {
-      const plan = this.planPath(pts, run[0].level, type);
+      // a ramp or overpass keeps its top level; its ends keep theirs
+      const plan = this.planPath(pts, Math.max(...r.edges.map(e => e.level)), type);
       plan.net = plan.cost - credit;
       return plan;
     } finally {
@@ -1030,6 +1081,204 @@ export class Game {
     this.connect();
     const live = built.filter(e => g.edges.includes(e));
     this.selected = live.length ? live : null;
+    return true;
+  }
+
+  // ---- Grid tool ----
+
+  // Street grid from corner a, its first side to b (any angle), as deep as c reaches across that side; blocks of about gridSize tiles,
+  // both sides split evenly. Lines along the side first, then across; each runs through every crossing point, so a later line snaps
+  // onto the nodes of the earlier ones.
+  gridLines(a: Vec, b: Vec, c: Vec | null): { lines: Vec[][]; nu: number; nv: number } {
+    const w = dist(a, b), bs = this.gridSize * TILE;
+    if (w < TILE) return { lines: [], nu: 0, nv: 0 };
+    const ux = (b.x - a.x) / w, uy = (b.y - a.y) / w, d = c ? (c.y - a.y) * ux - (c.x - a.x) * uy : 0;
+    const nu = Math.max(1, Math.round(w / bs)), nv = Math.round(Math.abs(d) / bs);
+    const at = (i: number, j: number): Vec => {
+      const s = w * i / nu, t = nv ? d * j / nv : 0;
+      return { x: a.x + ux * s - uy * t, y: a.y + uy * s + ux * t };
+    };
+    const run = <T>(k: number, f: (m: number) => T): T[] => Array.from({ length: k + 1 }, (_, m) => f(m));
+    return { lines: [...run(nv, j => run(nu, i => at(i, j))), ...(nv ? run(nu, i => run(nv, j => at(i, j))) : [])], nu, nv };
+  }
+
+  // The whole grid as one plan (each line planned on the graph as it stands; lines that already exist are left out), all or nothing
+  planGrid(a: Vec, b: Vec, c: Vec | null): PathPlan {
+    const { lines, nu, nv } = this.gridLines(a, b, c), type = this.roadType;
+    const plan: PathPlan = {
+      points: [c ?? b], segs: [], cost: 0, ok: false, reason: lines.length ? '' : 'Too short', type: { ...type }, level: 0,
+      note: c ? `${nu} × ${nv} block${nu * nv === 1 ? '' : 's'}` : 'First side',
+    };
+    for (const l of lines) {
+      const p = this.planPath(l, 0, type, [0, 0]);
+      if (p.reason === 'Already exists') continue;
+      plan.segs.push(...p.segs);
+      plan.cost += p.cost;
+      if (!p.ok && p.reason !== 'Not enough money') plan.reason ||= p.reason;
+    }
+    plan.reason ||= this.lockOf('grid') || this.afford(plan.cost);
+    plan.ok = !plan.reason;
+    return plan;
+  }
+
+  commitGrid(a: Vec, b: Vec, c: Vec): boolean {
+    const plan = this.planGrid(a, b, c);
+    if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return false; }
+    // ponytail: checked as a whole above; live, a line only differs by snapping onto the lines laid before it
+    for (const l of this.gridLines(a, b, c).lines) {
+      const p = this.planPath(l, 0, this.roadType, [0, 0]);
+      if (p.ok) this.commitPath(p, false);
+    }
+    this.connect();
+    return true;
+  }
+
+  // ---- Interchange tool ----
+
+  // The arm from n along e out to distance len: straight (within 6px of its first direction), two-way, on the ground, through plain
+  // joints only; or why not
+  private arm(n: Node, e: Edge, len: number): Arm | string {
+    const o0 = e.a === n ? e.b : e.a, ux = (o0.x - n.x) / e.length, uy = (o0.y - n.y) / e.length, edges: Edge[] = [], nodes: Node[] = [];
+    for (let at = n, cur = e; ;) {
+      if (cur.level || cur.tunnel) return 'Interchanges go on ground junctions';
+      if (cur.type.oneWay) return 'Interchanges need two-way roads';
+      if (cur.type.tier === 'dirt') return 'Upgrade the dirt roads first';
+      const o = cur.a === at ? cur.b : cur.a;
+      if (Math.abs((o.x - n.x) * uy - (o.y - n.y) * ux) > 6) break;
+      edges.push(cur);
+      nodes.push(at);
+      if (dist(o, n) >= len) return { edges, nodes, at: distToSegment({ x: n.x + ux * len, y: n.y + uy * len }, cur.a, cur.b).point };
+      if (o.building || o.edges.length !== 2 || o.control !== 'none') break;
+      at = o;
+      cur = o.edges[0] === cur ? o.edges[1] : o.edges[0];
+    }
+    return `Needs straight roads ${Math.ceil(len / TILE)} tiles out from the junction, with no other junction`;
+  }
+
+  // Lays the template on n: the main road (highest tier; a trumpet's through road) is u, the crossing road (stem) v, picked so the frame
+  // turns like the screen's. Each quadrant maps onto its own pair of arms, so roads up to 20 degrees off square still line up.
+  private ichgFrame(n: Node, kind: Ichg): IchgFrame | string {
+    const t = ICHG[kind], es = [...n.edges];
+    if (es.length !== t.arms) return `${t.label} needs a junction of ${t.arms} roads`;
+    const dir = (e: Edge): Vec => { const o = e.a === n ? e.b : e.a; return { x: (o.x - n.x) / e.length, y: (o.y - n.y) / e.length }; };
+    const dot = (e: Edge, f: Edge): number => dir(e).x * dir(f).x + dir(e).y * dir(f).y;
+    const tilt = Math.sin(Math.PI / 9), line = -Math.cos(Math.PI / 9), tier = (e: Edge): number => TIER_RANK.indexOf(e.type.tier);
+    let main: Edge[], cross: Edge[];
+    if (t.arms === 4) {
+      es.sort((p, q) => Math.atan2(dir(p).y, dir(p).x) - Math.atan2(dir(q).y, dir(q).x));
+      const ax = [[es[0], es[2]], [es[1], es[3]]];
+      if (ax.some(([p, q]) => dot(p, q) > line) || Math.abs(dot(es[0], es[1])) > tilt) return 'The roads must cross at right angles (within 20°)';
+      const top = (x: Edge[]) => Math.max(...x.map(e => tier(e) * 4 + e.type.lanes));
+      [main, cross] = top(ax[1]) > top(ax[0]) ? [ax[1], ax[0]] : [ax[0], ax[1]];
+      if (kind === 'clover' && Math.max(...main.map(tier)) < TIER_RANK.indexOf('boulevard')) return 'A cloverleaf needs a boulevard or highway';
+    } else {
+      const k = [0, 1, 2].find(i => dot(es[(i + 1) % 3], es[(i + 2) % 3]) <= line);
+      if (k === undefined || Math.abs(dot(es[k], es[(k + 1) % 3])) > tilt) return 'Needs a straight road with a side road at right angles (within 20°)';
+      main = [es[(k + 1) % 3], es[(k + 2) % 3]];
+      cross = [es[k]];
+    }
+    const cuts: Arm[] = [];
+    for (const e of main) { const a = this.arm(n, e, t.reach); if (typeof a === 'string') return a; }
+    for (const e of cross) { const a = this.arm(n, e, t.cut); if (typeof a === 'string') return a; cuts.push(a); }
+    const vp = dir(cross[0]), vm = cross[1] ? dir(cross[1]) : { x: -vp.x, y: -vp.y };
+    const [pu, mu] = dir(main[0]).x * vp.y - dir(main[0]).y * vp.x > 0 ? [main[0], main[1]] : [main[1], main[0]];
+    const up = dir(pu), um = dir(mu);
+    const map = (p: Vec): Vec => {
+      const u = p.x >= 0 ? up : um, v = p.y >= 0 ? vp : vm, a = Math.abs(p.x), b = Math.abs(p.y);
+      return { x: n.x + u.x * a + v.x * b, y: n.y + u.y * a + v.y * b };
+    };
+    // ramps: one lane one-way, at most an avenue and never above either road, so the roads keep the right of way where ramps join
+    const low = TIER_RANK[Math.min(TIER_RANK.indexOf('avenue'), ...[...main, ...cross].map(tier))];
+    return { map, cuts, deck: { ...cross[0].type }, ramp: fitType({ tier: low, lanes: 1, oneWay: true }) };
+  }
+
+  // Refund for cutting an arm out: its edges, the last one only up to the cut point
+  private cutRefund(c: Arm): number {
+    const last = c.edges[c.edges.length - 1];
+    return c.edges.slice(0, -1).reduce((n, e) => n + this.refundOf(e), 0)
+      + this.price(c.nodes[c.nodes.length - 1], c.at, last) * this.refundX(last.day);
+  }
+
+  // Preview of a template on n: the crossing road's inner span hidden and every path planned on the graph as it stands. cost = roads and
+  // controls; net = cost minus the refunds of the span and of n's control. Cached until the graph, money or city level changes.
+  planInterchange(n: Node, kind: Ichg): PathPlan {
+    const key = `${n.id}|${kind}|${this.version}|${Math.floor(this.money)}|${this.cityLevel}`, hit = this.ichgCache.get(key);
+    if (hit) return hit;
+    if (this.ichgCache.size > 30) this.ichgCache.clear();
+    const t = ICHG[kind], f = this.lockOf('interchange') || this.ichgFrame(n, kind);
+    const plan: PathPlan = { points: [{ x: n.x, y: n.y }], segs: [], cost: 0, ok: false, reason: '', type: { ...this.roadType }, level: 2, note: t.label };
+    if (typeof f === 'string') plan.reason = f;
+    else {
+      const g = this.graph, credit = this.controlRefund(n) + f.cuts.reduce((x, c) => x + this.cutRefund(c), 0);
+      g.hidden = new Set(f.cuts.flatMap(c => c.edges));
+      try {
+        for (const p of t.paths) {
+          const pp = this.planPath(p.pts.map(f.map), p.level, p.ramp ? f.ramp : f.deck, p.ends, false);
+          plan.segs.push(...pp.segs);
+          plan.cost += pp.cost;
+          if (!pp.ok && pp.reason !== 'Not enough money') plan.reason ||= pp.reason;
+          if ((pp.segs as SegPlan[]).some(s => s.crossings.length)) plan.reason ||= 'Nearby roads are in the way';
+        }
+      } finally {
+        g.hidden = new Set();
+      }
+      plan.cost += t.controls.reduce((x, c) => x + CONTROL_COST[c.kind], 0);
+      plan.net = plan.cost - credit;
+      plan.reason ||= this.afford(plan.net);
+    }
+    plan.ok = !plan.reason;
+    this.ichgCache.set(key, plan);
+    return plan;
+  }
+
+  // Interchange tool click: a junction of 3 or 4 roads opens the picker on the first template that fits; elsewhere the picker closes
+  pickInterchange(p: Vec): void {
+    const n = this.junctionAt(p);
+    this.ichg = null;
+    if (!n) return;
+    const kinds = ICHG_KEYS.filter(k => ICHG[k].arms === n.edges.length);
+    if (!kinds.length) { this.say('Interchanges go on a junction of 3 or 4 roads'); return; }
+    this.ichg = { node: n, kind: kinds.find(k => this.planInterchange(n, k).ok) ?? kinds[0] };
+  }
+
+  // The interchange preview: the picked one, else the first template for the junction under p
+  ichgAt(p: Vec | null): PathPlan | null {
+    const n = this.ichg?.node ?? (p ? this.junctionAt(p) : null);
+    const kind = this.ichg?.kind ?? ICHG_KEYS.find(k => n && ICHG[k].arms === n.edges.length);
+    return n && kind ? this.planInterchange(n, kind) : null;
+  }
+
+  // Builds the picked template: the junction's control goes (refunded), the crossing road's span is cut out (refunded, its cars sent
+  // home), every path is planned and built on the live graph in order, then the controls go on
+  buildInterchange(): boolean {
+    const ic = this.ichg;
+    if (!ic) return false;
+    const plan = this.planInterchange(ic.node, ic.kind), f = this.ichgFrame(ic.node, ic.kind);
+    if (!plan.ok || typeof f === 'string') { this.say(plan.reason); return false; }
+    const g = this.graph, n = ic.node, t = ICHG[ic.kind];
+    n.plan = null;
+    this.setControl(n, 'none');
+    let back = 0;
+    for (const c of f.cuts) {
+      const last = c.edges[c.edges.length - 1], near = c.nodes[c.nodes.length - 1], far = last.a === near ? last.b : last.a;
+      back += this.cutRefund(c);
+      const m = dist(c.at, far) < 1 ? null : g.splitEdge(last, c.at);
+      for (const e of [...c.edges.slice(0, -1), m ? g.edgeBetween(near, m)! : last]) this.dropCars(g.removeEdge(e));
+    }
+    this.spend(-back);
+    for (const p of t.paths) {
+      const pp = this.planPath(p.pts.map(f.map), p.level, p.ramp ? f.ramp : f.deck, p.ends, false);
+      // ponytail: the preview checked every path; a live failure (a bug) leaves what was built so far
+      if (!pp.ok) { this.say(pp.reason); break; }
+      this.commitPath(pp, false);
+    }
+    for (const c of t.controls) {
+      const m = g.nearestNode(f.map(c.p), 4, c.level);
+      if (m) this.setControl(m, c.kind);
+    }
+    this.connect();
+    this.ichg = null;
+    this.say(`${t.label} built`);
     return true;
   }
 

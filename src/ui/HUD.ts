@@ -1,6 +1,8 @@
 import type { Game, Tool } from '../core/Game.ts';
-import type { Ledger } from '../core/Game.ts';
-import { CONTROL_LABEL, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import type { Ledger, PathPlan } from '../core/Game.ts';
+import { CONTROL_LABEL, TOOL_LOCK, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
+import type { Ichg } from '../core/Templates.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
 import type { Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
@@ -16,6 +18,8 @@ const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction, or a junction for its control, light phases and turn bans. Drag a road to bend it.' },
   { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
   { tool: 'place', label: 'Buildings', key: 'B', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
+  { tool: 'grid', label: 'Grid', key: '6', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
+  { tool: 'interchange', label: 'Interchange', key: '7', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
 ];
 // Zone swatch for the tray: the footprint in its colours
 const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
@@ -39,6 +43,8 @@ function tierPic(t: Tier): string {
   return `<rect x="6" y="${12 - h / 2}" width="28" height="${h}" rx="1.5" fill="${x.fill}" stroke="${x.out}"/>${line}`;
 }
 
+const GRID_SIZES = [3, 4, 6] as const;
+
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
   { s: 1, icon: 'play', lbl: '1x', tip: 'Normal speed' },
@@ -56,11 +62,14 @@ const FRIENDLY: Record<string, string> = {
   'Highways give no building access': 'Highways give no building access: join buildings with a street or avenue to a junction on the highway',
   'Blocked by a building': 'Roads cannot run through a building: go around it, or end at its door',
   'Overlaps a road': 'Buildings cannot stand on a road: move it beside the road',
+  'Too steep: make the ramp longer': 'Too steep: a ramp climbs one level per tile, make it longer',
+  'Buildings need a ground road': 'Buildings need a ground road: come down to the ground before the door',
+  'Nearby roads are in the way': 'Nearby roads are in the way: an interchange needs clear land around the junction',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings)/;
+const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
 const CONTROLS: [string, string][] = [
-  ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
+  ['Road / Light / Roundabout / Edit / Demolish / Grid / Interchange', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd> <kbd>6</kbd> <kbd>7</kbd>'],
   ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
@@ -69,6 +78,9 @@ const CONTROLS: [string, string][] = [
   ['Road type', 'Tier (dirt to highway), Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
+  ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
+  ['Street grid', '<kbd>6</kbd>: click a corner, the end of the first side, then the depth'],
+  ['Interchange', '<kbd>7</kbd>: click a junction, pick a type, then Build'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
   ['Help', '<kbd>?</kbd>'],
@@ -125,7 +137,7 @@ export class HUD {
   private helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; junction?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
   } = { msg: '' };
   // Last level the player has seen in the level-up modal, and the speed to resume when it closes
   private seenLevel: number;
@@ -171,8 +183,16 @@ export class HUD {
         <div class="pop-head"><h2>Junction</h2><button class="iconbtn" data-j="close" aria-label="Close [Esc]">${icon('close')}</button></div>
         <div class="jbody"></div>
       </div>
+      <div class="panel pop ipanel" hidden role="dialog" aria-label="Interchange">
+        <div class="pop-head"><h2>Interchange</h2><button class="iconbtn" data-i="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+        <div class="jbody ibody"></div>
+      </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        ${TOOLS.slice(0, 3).map(toolBtn).join('')}
+        ${toolBtn(TOOLS[0])}
+        ${toolBtn(TOOLS[6])}
+        <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
+          ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
+        </div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
           <div class="seg tiers" role="group" aria-label="Road tier">
@@ -197,6 +217,9 @@ export class HUD {
           <span class="elev"><b class="lv num"></b><small class="eh"></small></span>
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
+        <span class="sep"></span>
+        ${TOOLS.slice(1, 3).map(toolBtn).join('')}
+        ${toolBtn(TOOLS[7])}
         <span class="sep"></span>
         ${toolBtn(TOOLS[5])}
         <span class="sep"></span>
@@ -244,6 +267,8 @@ export class HUD {
       const off = game.buildings.filter(b => !b.connected);
       if (off.length) this.onDanger?.(off[this.dangerIdx++ % off.length]);
     };
+    root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
+    this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
     jp.onkeydown = e => {
@@ -445,10 +470,10 @@ export class HUD {
     const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.tier}|${t.lanes}|${t.oneWay}`;
     if (key === this.last.pick) return;
     this.last.pick = key;
-    const off = g.tool !== 'road' && g.tool !== 'edit';
+    const off = g.tool !== 'road' && g.tool !== 'edit' && g.tool !== 'grid';
     const box = this.q('.lanes');
     box.classList.toggle('off', off);
-    box.dataset.tip = off ? 'Lanes apply to the Road and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
+    box.dataset.tip = off ? 'Lanes apply to the Road, Grid and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
     const tier = TIERS[t.tier];
     this.q('.tname').textContent = tier.label;
     this.q('.pctx').textContent = run ? 'editing road' : `${tier.kmh} km/h`;
@@ -560,6 +585,43 @@ export class HUD {
     if (was) this.root.querySelector<HTMLElement>(`.jpanel [data-j="${was}"]`)?.focus();
   }
 
+  // ---------- interchange panel (Interchange tool on a junction) ----------
+  private onIchg(cmd: string): void {
+    const g = this.game, ic = g.ichg;
+    if (!ic) return;
+    const [k, a] = cmd.split(':');
+    if (k === 'close') g.ichg = null;
+    else if (k === 'build') g.buildInterchange();
+    else if (k === 'kind') {
+      const t = ICHG[a as Ichg];
+      if (t.arms === ic.node.edges.length) g.ichg = { ...ic, kind: a as Ichg };
+      else g.say(`${t.label} needs a junction of ${t.arms} roads`);
+    }
+  }
+
+  private updateIchg(): void {
+    const g = this.game, ic = g.ichg, panel = this.q('.ipanel');
+    const plans = ic ? ICHG_KEYS.map(k => g.planInterchange(ic.node, k)) : [];
+    const key = ic ? `${ic.node.id}|${ic.kind}|${plans.map(p => `${p.ok}|${p.reason}|${Math.round(p.net ?? 0)}`).join()}` : '';
+    if (key === this.last.ichg) return;
+    if (ic && !this.last.ichg) this.setHelp(false, false);
+    this.last.ichg = key;
+    panel.hidden = !ic;
+    if (!ic) return;
+    const cur = plans[ICHG_KEYS.indexOf(ic.kind)], t = ICHG[ic.kind];
+    const price = (p: PathPlan): string => { const d = Math.round(p.net ?? p.cost); return d >= 0 ? fmtMoney(d) : `+${fmtMoney(-d)} back`; };
+    const kinds = ICHG_KEYS.map(k => {
+      const fits = ICHG[k].arms === ic.node.edges.length;
+      return `<button class="lane wide" data-i="kind:${k}" aria-pressed="${k === ic.kind}" aria-disabled="${!fits}"`
+        + ` data-tip="${esc(fits ? ICHG[k].tip : `Needs a junction of ${ICHG[k].arms} roads`)}"><small>${ICHG[k].label}</small></button>`;
+    }).join('');
+    this.q('.ibody').innerHTML = `
+      <div class="seg" role="group" aria-label="Interchange type">${kinds}</div>
+      <p class="jnote">${esc(t.tip)}</p>
+      <p class="jnote${cur.ok ? '' : ' bad'}">${esc(cur.ok ? `${price(cur)} after the refund for the roads it replaces. Ramps and bridges add upkeep.` : FRIENDLY[cur.reason] ?? cur.reason)}</p>
+      <div class="jpre"><button class="btn primary" data-i="build"${cur.ok ? '' : ' disabled'}>Build · ${price(cur)}</button><button class="btn" data-i="close">Cancel</button></div>`;
+  }
+
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
     const g = this.game, L = this.last;
@@ -621,7 +683,7 @@ export class HUD {
       this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : ''}.`
         + (g.creative ? '' : soon.map(([n, u]) => ` Level ${n}: ${u.join(', ')}.`).join(''));
       for (const b of this.toolBtns) {
-        const lock = b.dataset.tool === 'roundabout' ? g.lockOf('roundabout') : '';
+        const f = TOOL_LOCK[b.dataset.tool as Tool], lock = f ? g.lockOf(f) : '';
         b.setAttribute('aria-disabled', String(!!lock));
         const tip = TOOLS.find(t => t.tool === b.dataset.tool)!.tip;
         b.dataset.tip = lock ? `${lock}. ${tip}` : tip;
@@ -680,6 +742,15 @@ export class HUD {
 
     this.updatePicker();
     this.updateJunction();
+    this.updateIchg();
+    const gk = `${g.tool}|${g.gridSize}`;
+    if (gk !== L.gsz) {
+      L.gsz = gk;
+      // the grid is built on the ground: its block size takes the elevation stepper's place
+      this.q('.gsz').hidden = g.tool !== 'grid';
+      this.q('.stepper').hidden = g.tool === 'grid';
+      this.root.querySelectorAll<HTMLElement>('[data-grid]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.grid) === g.gridSize)));
+    }
 
     // Trips today: arrivals and their smooth share
     const td = g.stats.today, arrived = td.smooth + td.wait + td.detour, tk = `${g.stats.arrived}|${g.stats.failed}|${g.day}`;
