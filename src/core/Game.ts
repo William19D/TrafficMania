@@ -350,7 +350,8 @@ export class Game {
 
   // A home's happiness 0..100 from its parts (kept in b.parts), each 0..1:
   // job: share of its commuters with a workplace (0 with none); shop: share of its last 24h shopping trips that arrived (none made:
-  // 1 when a shop is reachable); trips: mean SCORE of its last 24h trips (0.6 with none); without a road job = shop = 0, trips = 0.6;
+  // 1 when a shop is reachable); trips: mean SCORE of its last 24h trips (0.6 with none, 0 with no job and no shop to go to);
+  // without a road job = shop = trips = 0, so the home empties;
   // pollution: staffed factories, each fading out at POLLUTION_R; noise: the loudest road within NOISE_R by tier, louder with traffic.
   // ponytail: scans every commuter, factory and road per home each hour; a spatial grid if big cities stutter on the hour
   rateHome(b: Building, comp = this.components()): number {
@@ -360,7 +361,7 @@ export class Game {
     p.job = b.connected && mine.length ? mine.filter(c => c.work).length / mine.length : 0;
     p.shop = !b.connected ? 0 : shops.length ? shops.filter(r => r.score > 0).length / shops.length
       : +this.buildings.some(s => s.kind === 'shop' && comp.get(s.node) === comp.get(b.node));
-    p.trips = b.connected && b.recent.length ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : 0.6;
+    p.trips = b.recent.length && b.connected ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : p.job || p.shop ? 0.6 : 0;
     p.pollution = Math.min(1, this.buildings.reduce((n, o) => n + (o.kind === 'industry' ? o.staffed * Math.max(0, 1 - dist(o, b) / T.POLLUTION_R) : 0), 0));
     p.noise = 0;
     for (const e of this.graph.edges) {

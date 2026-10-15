@@ -2,7 +2,7 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
@@ -445,6 +445,9 @@ for (const kind of ['ambulance', 'car'] as const) {
   const w = blank(), F = town(w, 1000, 300, 'industry').building!;
   F.staffed = 1;
   const near = w.addBuilding(buildingAt('home', { x: F.x + 60, y: F.y }, 0)), far = w.addBuilding(buildingAt('home', { x: F.x + 600, y: F.y }, 0));
+  // both reach a shop (a home with nowhere to go scores 0 either way)
+  const S = town(w, F.x + 300, F.y + 300, 'shop');
+  for (const h of [near, far]) w.graph.addEdge(h.node, S, { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE });
   const hn = w.rateHome(near), hf = w.rateHome(far);
   if (hf - hn < 25) fail(`happiness: home by the factory ${hn.toFixed(0)}, far one ${hf.toFixed(0)}`);
   const midnight = (g: Game) => { g.time = ((g.today + 1) * 24 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
@@ -685,6 +688,12 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 30 * 60 && !w.reports.length; t++) w.update(DT);
   // granted through each driveway junction it keeps its speed: well under the free-flow time's per-junction allowance
   if (w.reports[0]?.outcome !== 'smooth' || w.reports[0].ratio > 0.9) fail(`free flow: ${w.reports[0]?.outcome} at ${w.reports[0]?.ratio.toFixed(2)}x the free-flow time`);
+}
+// No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0)
+{
+  const w = new Game({ ...SIM, difficulty: 'normal' });
+  while (!w.gameOver && w.day < 8) w.update(0.5);
+  if (w.gameOver !== 'unhappy' || w.day > TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS) fail(`no roads: '${w.gameOver}' on day ${w.day}`);
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through
