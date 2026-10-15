@@ -129,6 +129,7 @@ export const TUNING = {
   SPAWN_FAIL: 3,             // in-game hours waiting at the door -> gave up
   MAX_RETRIES: 1, MAX_CARS: 450,
   SMOOTH_X: 1.5, WAIT_SHARE: 0.4, DETOUR_X: 1.3, // outcome: time vs free-flow ideal, share of the trip stopped, length vs ideal
+  START_S: 0.6, JUNCTION_S: 0.4, // game s the free-flow ideal adds for leaving the door and for each junction on the way
   // Growth per day as a share of a home's capacity, by happiness band; below GROW_LO households move out until the home stands empty
   GROW_HI: 60, GROW_LO: 30, GROW_FAST: 0.25, GROW_SLOW: 0.1, SHRINK: 0.1,
   // Home happiness = 100 x (W_JOB job + W_SHOP shop + W_TRIPS trips - W_POLL pollution - W_NOISE noise), parts 0..1;

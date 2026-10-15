@@ -99,6 +99,7 @@ const invariants = (w: Game): void => {
       fail(`overlap on lane ${e.id}: gap ${(n.s - c.s - sep(c, n)).toFixed(2)} at t=${t}`);
     }
   }
+  for (const e of w.graph.edges) if (e.length < 1) fail(`edge ${e.id} is ${e.length.toFixed(2)}px long at t=${t}`);
   for (const n of w.graph.nodes) for (const c of n.occupants) {
     if (!live.has(c) || !c.lane.cars.includes(c)) fail(`node ${n.id} holds a car off the graph at t=${t}`);
   }
@@ -656,6 +657,34 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   expect(6, 'a longer phase');
   w.overlay = 'heat';
   expect(7, 'the heat map');
+}
+// Short link: plain junctions J1 and J2 only 32px apart (shorter than a car needs to clear J1 before J2's line) with traffic both
+// ways and from both side roads: a car waiting at the next line lets go of the box behind it, so no gridlock and every trip arrives
+{
+  const w = blank(), flat: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), P = town(w, 500, 900), Q = town(w, 532, 100, 'home', true);
+  const J1 = w.graph.addNode(500, 500), J2 = w.graph.addNode(532, 500);
+  for (const [a, b] of [[X, J1], [J1, J2], [J2, Y], [J1, P], [J2, Q]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  w.demandOff = true;
+  let n = 0;
+  for (let k = 0; k < 4; k++) for (const [a, b] of [[X, Y], [Y, X], [P, Q], [Q, P], [P, Y], [Q, X]]) { w.queueTrip(a!.building!, b!.building!, 'commute'); n++; }
+  for (let t = 0; t < 90 * 60 && w.score < n; t++) { w.update(DT); invariants(w); }
+  if (w.score !== n) fail(`short link: ${w.score} of ${n} trips arrived (${w.stats.failed} gave up)`);
+}
+// Free flow: a lone car down a street lined with homes (a driveway junction every ~40px) is a smooth run, not a long wait;
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 900, y: 500 }], 0, street));
+  w.tray.home = w.tray.office = 99;
+  for (let x = 150; x < 820; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
+  for (const x of [60, 880]) { w.startPlacing('office'); w.placeBuilding({ x, y: 540 }); }
+  const [o1, o2] = w.buildings.filter(b => b.kind === 'office');
+  if (w.graph.nodes.filter(n => n.edges.length >= 3).length < 12 || !o1?.connected || !o2?.connected) fail('free flow: homes or offices not placed');
+  w.queueTrip(o1, o2, 'commute');
+  for (let t = 0; t < 30 * 60 && !w.reports.length; t++) w.update(DT);
+  // granted through each driveway junction it keeps its speed: well under the free-flow time's per-junction allowance
+  if (w.reports[0]?.outcome !== 'smooth' || w.reports[0].ratio > 0.9) fail(`free flow: ${w.reports[0]?.outcome} at ${w.reports[0]?.ratio.toFixed(2)}x the free-flow time`);
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

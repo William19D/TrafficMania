@@ -528,12 +528,14 @@ export class Game {
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       b.pending.splice(i, 1);
       const ideal = findPath(this.graph, b.node, trip.to.node, null, true) ?? path;
-      trip.ideal = trip.idealLen = trip.driven = trip.stopped = trip.jamS = 0;
+      trip.idealLen = trip.driven = trip.stopped = trip.jamS = 0;
       trip.jam = null;
+      // free flow: the drive at the limits, plus pulling out of the door and each junction's turn or grant
+      trip.ideal = T.START_S;
       for (let j = 1; j < ideal.length; j++) {
         const x = this.graph.edgeBetween(ideal[j - 1], ideal[j])!;
         trip.idealLen += x.length;
-        trip.ideal += x.length / TIERS[x.type.tier].limit / KINDS[kind].v;
+        trip.ideal += x.length / TIERS[x.type.tier].limit / KINDS[kind].v + (j < ideal.length - 1 && this.graph.needsControl(ideal[j]) ? T.JUNCTION_S : 0);
       }
       trip.departed = this.time;
       const car = new Car(lane, trip, kind);
@@ -730,8 +732,10 @@ export class Game {
         // a road node within DRIVE_SNAP is joined rather than split beside: a stretch shorter than a truck between two junctions
         // locks both (don't block the box). ponytail: that stub runs at an angle, the place ghost still previews it square to the road
         const snap = [h.e.a, h.e.b].filter(n => !n.building && dist(h.point, n) <= T.DRIVE_SNAP).sort((p, q) => dist(h.point, p) - dist(h.point, q))[0];
-        if (!snap && [h.e.a, h.e.b].some(n => n.building && dist(h.point, n) <= NODE_R)) continue;
-        for (const end of snap ? [snap, null] : [null]) {
+        // never split beside a door: that cuts a zero-length stub off a road ending there
+        const byDoor = [h.e.a, h.e.b].some(n => n.building && dist(h.point, n) <= NODE_R);
+        if (!snap && byDoor) continue;
+        for (const end of snap ? (byDoor ? [snap] : [snap, null]) : [null]) {
           const p = end ?? h.point, terr = segmentCrosses(this.terrain, door, p);
           if (terr.water || terr.mountain || this.hitsBuilding(door, p, DEFAULT_TYPE)) continue;
           if (g.crossings(door, p, new Set(end ? [end] : []), new Set([h.e]), 0).length) continue;

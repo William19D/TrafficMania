@@ -141,7 +141,8 @@ export class Car {
     }
 
     let target = this.top(lane.edge);
-    if (needs && remaining < 60) target = Math.min(target, TURN_SPEED);
+    // approach a junction slowly until granted; once granted only the corner speed below applies (roundabouts: the ring)
+    if (needs && remaining < 60 && (this.granted !== node || node.control === 'roundabout')) target = Math.min(target, TURN_SPEED);
     if (nextLane) {
       // Corner speed: top speed (the slower tier of the two) * cos(turn angle) at the node, floored at TURN_SPEED,
       // braked down to by the node box; so a car also slows down before a slower tier
@@ -157,8 +158,10 @@ export class Car {
     this.trip.driven += this.speed * dt;
     if (this.speed < 1) this.trip.stopped += dt;
 
-    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that)
-    if (this.clearing && this.s - this.len / 2 > NODE_R) { this.clearing.occupants.delete(this); this.clearing = null; }
+    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that), or once we wait at the
+    // next junction: on a link shorter than ~NODE_R + stopDist + the car, holding the box there gridlocks the two junctions.
+    // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
+    if (this.clearing && (this.s - this.len / 2 > NODE_R || (this.queued && this.speed < 1))) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
