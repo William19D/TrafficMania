@@ -1,25 +1,55 @@
-import type { Game, Tool, Reward, Inventory } from '../core/Game.ts';
-import { DAY_SECONDS } from '../core/Game.ts';
-import type { RoadType } from '../network/RoadGraph.ts';
+import type { Game, Overlay, Tool } from '../core/Game.ts';
+import type { Ledger, PathPlan } from '../core/Game.ts';
+import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import type { Sample } from '../core/Metrics.ts';
+import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
+import type { Ichg } from '../core/Templates.ts';
+import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
+import type { Purpose, Tier, Zone } from '../core/config.ts';
+import type { Car, Kind } from '../entities/Car.ts';
+import type { TripReport } from '../entities/Trip.ts';
+import type { Vec } from '../util/geom.ts';
+import type { Control, RoadType } from '../network/RoadGraph.ts';
+import type { Move, Preset } from '../network/Junction.ts';
+import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
+import { KEY_TOOLS } from './Input.ts';
 
-type ResKey = 'asphalt' | 'bridges' | 'tunnels';
-const RES: { k: ResKey; icon: string; tip: string }[] = [
-  { k: 'asphalt', icon: 'asphalt', tip: 'Asphalt: 1 per road tile (more lanes cost more). Demolish refunds it.' },
-  { k: 'bridges', icon: 'bridge', tip: 'Bridges: 1 per water crossing or viaduct.' },
-  { k: 'tunnels', icon: 'tunnel', tip: 'Tunnels: 1 per ground road through a mountain.' },
-];
+// Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
+const TOOLS: Record<Tool, { label: string; tip: string }> = {
+  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. Esc cancels.' },
+  grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
+  light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
+  place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
+  edit: { label: 'Edit', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it.' },
+  demolish: { label: 'Demolish', tip: 'Click a road, sign, light or roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
+};
+const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
+// Zone swatch for the tray: the footprint in its colours
+const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
+const count = (n: number): string => n === Infinity ? '∞' : String(n);
 
-const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
-  { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
-  { tool: 'light', label: 'Light', key: '2', tip: 'Click an intersection (3+ roads). Uses 1 light.' },
-  { tool: 'roundabout', label: 'Roundabout', key: '3', tip: 'Click an intersection. Lets 3 cars through at once. Uses 1.' },
-  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction. Drag a road to bend it.' },
-  { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it and get a refund.' },
-];
+const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
+const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Price ×${n}`;
+const TIER_KEYS = Object.keys(TIERS) as Tier[];
+// Avenue · 50 km/h · 1-2 lanes · $90/tile
+const tierTip = (t: Tier): string => {
+  const x = TIERS[t], l = x.lanes;
+  return `${x.label} · ${x.kmh} km/h · ${l[0]}${l.length > 1 ? `-${l[l.length - 1]}` : ''} lane${l[l.length - 1] > 1 ? 's' : ''} · ${fmtMoney(x.cost)}/tile`
+    + (x.access ? '' : ' · no building access');
+};
+// Dock swatch of a tier: a short band, taller up the hierarchy, with the tier's centre marking
+function tierPic(t: Tier): string {
+  const h = 8 + 2 * TIER_KEYS.indexOf(t), x = TIERS[t];
+  const line = x.line === 'yellow' ? '<path d="M8 12h24" stroke="#E6C84B"/>'
+    : x.line === 'median' ? '<path d="M8 12h24" stroke="#BFD8A0" stroke-width="2.5"/>'
+    : x.line === 'double' ? '<path d="M8 11h24M8 13h24" stroke="#A3A39F" stroke-width="1"/>' : '';
+  return `<rect x="6" y="${12 - h / 2}" width="28" height="${h}" rx="1.5" fill="${x.fill}" stroke="${x.out}"/>${line}`;
+}
 
-const ONEWAY_TIP = 'One-way: half the asphalt, cars only drive in the direction you build';
-const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Asphalt ×${n}`;
+const GRID_SIZES = [3, 4, 6] as const;
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -28,58 +58,120 @@ const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: 
   { s: 4, icon: 'faster', lbl: '4x', tip: 'Fastest' },
 ];
 
-// [singular, plural, icon]
-const NOUN: Record<keyof Inventory, [string, string, string]> = {
-  asphalt: ['asphalt', 'asphalt', 'asphalt'],
-  bridges: ['bridge', 'bridges', 'bridge'],
-  tunnels: ['tunnel', 'tunnels', 'tunnel'],
-  lights: ['traffic light', 'traffic lights', 'light'],
-  roundabouts: ['roundabout', 'roundabouts', 'roundabout'],
-};
-
 // Game messages rewritten to say what to do
 const FRIENDLY: Record<string, string> = {
-  'Not enough asphalt': 'Not enough asphalt: demolish a road or wait for the weekly reward',
-  'Not enough bridges': 'Not enough bridges: lower the road to Ground (L0) or demolish a bridge',
-  'Not enough tunnels': 'Not enough tunnels: raise the road to L6+ to pass over the mountain',
+  'Not enough money': 'Not enough money: wait for income or demolish a road built today for a full refund',
   'Too low for the mountain': 'Too low: raise to L6+ or use Ground (L0) to dig a tunnel',
   'Already exists': 'That road already exists: start or end somewhere new',
   'Invalid terrain': 'Roads cannot start or end in water or on a mountain',
   'Place on an intersection': 'Click a junction where 3 or more roads meet',
-  'No traffic lights left': 'No traffic lights left: earn more in the weekly reward',
-  'No roundabouts left': 'No roundabouts left: earn more in the weekly reward',
+  'Highways give no building access': 'Highways give no building access: join buildings with a street or avenue to a junction on the highway',
+  'Blocked by a building': 'Roads cannot run through a building: go around it, or end at its door',
+  'Overlaps a road': 'Buildings cannot stand on a road: move it beside the road',
+  'Too steep: make the ramp longer': 'Too steep: a ramp climbs one level per tile, make it longer',
+  'Buildings need a ground road': 'Buildings need a ground road: come down to the ground before the door',
+  'Nearby roads are in the way': 'Nearby roads are in the way: an interchange needs clear land around the junction',
 };
-const ERROR_RE = /^(Not enough|Too low|Invalid|Already|Place on|No .* left)/;
+const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
-const CONTROLS: [string, string][] = [
-  ['Road / Light / Roundabout / Edit / Demolish', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd>'],
+const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
+export const CONTROLS: [string, string][] = [
+  [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
+  ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
-  ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
-  ['Road type', 'Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
+  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
+  ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
+  ['Street grid', `${kbd('grid')}: click a corner, the end of the first side, then the depth`],
+  ['Interchange', `${kbd('interchange')}: click a junction, pick a type, then Build`],
+  ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
+  ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, turn bans`],
+  ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
+  ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
+  ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
+  ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
   ['Zoom / pan', 'wheel / right- or middle-drag'],
-  ['Reward choice', '<kbd>1</kbd> / <kbd>2</kbd>, then <kbd>Enter</kbd>'],
   ['Help', '<kbd>?</kbd>'],
 ];
 
 const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
 
-// Dock picture of a road type: white band, gray outline, lane separators, yellow centre line or a one-way arrow
-function roadPic(t: RoadType): string {
-  const n = t.lanes * (t.oneWay ? 1 : 2), lw = 5, h = n * lw, y0 = 12 - h / 2;
-  let s = `<rect x="2" y="${y0}" width="36" height="${h}" rx="1.5" fill="#fff" stroke="#9E9E9A"/>`;
-  for (let k = 1; k < n; k++) {
-    const y = y0 + k * lw, mid = !t.oneWay && k === t.lanes;
-    s += `<path d="M4 ${y}h32" stroke="${mid ? '#E6C84B' : '#C9C9C5'}"${mid ? '' : ' stroke-dasharray="3 2"'}/>`;
-  }
-  if (t.oneWay) s += '<path d="M14 12h12M22 8l4 4-4 4" stroke="#9E9E9A" fill="none"/>';
-  return s;
-}
+// Junction panel
+const CONTROL_KEYS = Object.keys(CONTROL_LABEL) as Control[];
+const CONTROL_TIP: Record<Control, string> = {
+  none: 'No control: one car at a time, first come first served',
+  yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
+  stop: 'All-way stop: every car stops at the line, then one at a time',
+  light: 'Traffic light: phases you can edit, protected lefts',
+  roundabout: 'Roundabout: up to 3 cars at once, no stopping when it is clear',
+};
+const MOVES = ['Left', 'Straight', 'Right'];
+const PRESETS: [Preset, string, string][] = [
+  ['two', '2 phases', 'One phase per axis, lefts give way to oncoming traffic'],
+  ['lefts', 'Protected lefts', '4 phases: per axis a protected-left phase, then straight and right'],
+  ['each', 'One at a time', 'Each approach gets its own phase'],
+];
+const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
+const compass = (a: number): string => COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8];
+// Rush hours tinted on the clock bar
+const RUSH = new Set([7, 8, 9, 16, 17, 18, 19]);
+const pad = (n: number) => String(n).padStart(2, '0');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+
+// ---------- analysis: trip reports, the car card, metrics ----------
+// Where a trip goes, out and back
+const DEST: Record<Purpose, [string, string]> = { commute: ['work', 'home'], shop: ['the shop', 'home'], freight: ['the shop', 'the factory'] };
+const tripName = (p: Purpose, back: boolean): string =>
+  back ? (p === 'freight' ? 'Empty truck back' : 'Trip home') : { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery' }[p];
+const JAM_AT: Record<Control | 'road', string> = {
+  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
+};
+const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
+// A trip report in the resident's voice; a stop under a quarter hour is not worth naming
+function tripLine(r: TripReport): string {
+  const to = DEST[r.purpose][+r.back], x = (n: number) => `${n.toFixed(1)}x`;
+  const jam = r.jam && r.jamS >= HOUR / 4 ? `, stuck ${fmtMin(r.jamS)} ${JAM_AT[r.jamAt]}` : '';
+  switch (r.outcome) {
+    case 'smooth': return `Smooth run to ${to}, ${fmtMin(r.seconds)}`;
+    case 'wait': return r.door > HOUR ? `Waited ${fmtMin(r.door)} at the door to get on the road`
+      : `${tripName(r.purpose, r.back)} took ${x(r.ratio)} as long as on empty roads${jam}`;
+    case 'detour': return `Detour to ${to}: drove ${x(r.stretch)} the shortest route`;
+    case 'gaveup': return `Gave up driving to ${to}${jam || ': waited too long at the door'}`;
+    case 'noroute': return `No road to ${to}`;
+  }
+}
+// A clickable report line: jumps to where the trip got stuck, else to where it started
+const tripBtn = (r: TripReport): string => {
+  const p = r.jam ?? r.from;
+  return `<button class="tline o-${r.outcome}" data-jump="${Math.round(p.x)},${Math.round(p.y)}" data-tip="Day ${r.day}, ${pad(Math.floor(r.hour))}:00. Click to look">${esc(tripLine(r))}</button>`;
+};
+// Metrics charts: series, label, value format; zero: the axis starts at 0; max: at least this top
+const CHARTS: { k: keyof Sample; label: string; fmt: (v: number) => string; zero?: boolean; max?: number }[] = [
+  { k: 'waiting', label: 'Waiting cars', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'trip', label: 'Average trip', fmt: n => fmtMin(n / 60 * HOUR), zero: true },
+  { k: 'through', label: 'Trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'failed', label: 'Failed trips per hour', fmt: n => String(Math.round(n)), zero: true },
+  { k: 'money', label: 'Money', fmt: fmtMoney },
+  { k: 'pop', label: 'Population', fmt: n => Math.round(n).toLocaleString('en-US'), zero: true },
+  { k: 'happy', label: 'Happiness', fmt: n => `${Math.round(n)}%`, zero: true, max: 100 },
+];
+function spark(v: number[], zero = false, max = -Infinity): [string, number, number] {
+  const lo = Math.min(zero ? 0 : Infinity, ...v), hi = Math.max(max, ...v), k = hi - lo || 1, n = v.length - 1;
+  const pts = v.map((y, i) => `${(i / n * 100).toFixed(1)},${(23 - (y - lo) / k * 22).toFixed(1)}`).join(' ');
+  return [`<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`, lo, hi];
+}
+// Legend panel per overlay (the car colours without one)
+const LEGEND: Record<Overlay, string> = {
+  none: Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join(''),
+  heat: '<b>Traffic</b><span class="grad"></span><span class="ends"><small>flowing</small><small>jammed</small></span><span>Discs: cars waiting at a junction</span>',
+  noise: '<b>Noise and pollution</b><span><i style="background:#8E7CC3"></i>Road noise</span><span><i style="background:#9A6B2F"></i>Factory pollution</span>'
+    + '<span><i class="dot" style="background:#4CC26A"></i>Happy home</span><span><i class="dot" style="background:#FFB020"></i>Content</span><span><i class="dot" style="background:#E5484D"></i>Moving out</span>',
+};
+const OVERLAYS: Overlay[] = ['none', 'heat', 'noise'];
 
 // Restart a CSS animation class
 function flash(el: Element, cls: string, others: string[] = []): void {
@@ -88,62 +180,73 @@ function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.add(cls);
 }
 
-function rewardRows(r: Reward): string {
-  return (Object.keys(r) as (keyof Inventory)[])
-    .filter(k => (r[k] ?? 0) > 0)
-    .map(k => {
-      const n = r[k]!;
-      return `<span class="row">${icon(NOUN[k][2], 'big')}<b class="num">+${n}</b><span>${NOUN[k][n === 1 ? 0 : 1]}</span></span>`;
-    })
-    .join('');
-}
-
-function toolBtn(t: (typeof TOOLS)[number]): string {
-  const stock = t.tool === 'light' || t.tool === 'roundabout' ? '<span class="stock num"></span>' : '';
-  return `<button class="tool${t.tool === 'demolish' ? ' destroy' : ''}" data-tool="${t.tool}" aria-pressed="false" data-tip="${t.tip}" data-key="${t.key}">`
-    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span>${stock}</button>`;
+function toolBtn(t: Tool): string {
+  const k = keyOf(t);
+  return `<button class="tool${t === 'demolish' ? ' destroy' : ''}" data-tool="${t}" aria-pressed="false" data-tip="${TOOLS[t].tip}" data-key="${k}">`
+    + `<span class="kb" aria-hidden="true">${k}</span>${icon(t)}<span class="lbl">${TOOLS[t].label}</span>`
+    + `${icon('lock', 'lock')}${t === 'place' ? '<b class="badge num" hidden></b>' : ''}</button>`;
 }
 
 interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<typeof setTimeout> }
 
 export class HUD {
-  private chips = {} as Record<ResKey, HTMLElement>;
   private toolBtns: HTMLButtonElement[];
   private speedBtns: HTMLButtonElement[];
-  private dots: HTMLElement[];
+  private cells: HTMLElement[];
   private tip: HTMLElement;
   private tipFor: HTMLElement | null = null;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
   private toasts: Toast[] = [];
-  private sel = 0;
-  private helpOpen = false;
+  helpOpen = false;
   private last: {
-    inv: Partial<Inventory>; score?: number; speed?: number; tool?: Tool; level?: number;
-    week?: number; day?: number; dayFrac?: number; msg: string; danger?: number; pick?: string;
-    reward: Reward[] | null; over: boolean;
-  } = { inv: {}, msg: '', reward: null, over: false };
+    money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
+    clock?: number; msg: string; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
+  } = { msg: '' };
+  // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
+  private show = { metrics: false, feed: false };
+  private carFor: Car | null = null;
+  private feedAt = 0;
+  // Last level the player has seen in the level-up modal, and the speed to resume when it closes
+  private seenLevel: number;
+  private resume: 0 | 1 | 2 | 4 = 1;
   onTutorial: (() => void) | null = null;
-  // Called with the most overcrowded city when the warning chip is clicked
-  onDanger: ((city: Game['cities'][number]) => void) | null = null;
+  // Game over: play the same map again, or go to the main menu; the menu button (pause menu)
+  onRestart: (() => void) | null = null;
+  onMenu: (() => void) | null = null;
+  onPause: (() => void) | null = null;
+  // Moves the camera there: the next building without a road (warning chip), a trip report's spot
+  onJump: ((p: Vec) => void) | null = null;
+  private dangerIdx = 0;
+  // Junction panel: what a turn click edits (light signals of phase jPhase, or bans)
+  private jMode: 'signals' | 'bans' = 'signals';
+  private jPhase = 0;
 
-  constructor(private root: HTMLElement, private game: Game) {
+  // signal: aborted when this game's HUD is replaced, removing its window, document and root listeners
+  constructor(private root: HTMLElement, private game: Game, signal?: AbortSignal) {
+    this.seenLevel = game.cityLevel;
     root.innerHTML = `
+      <div class="topl">
       <div class="panel res" role="group" aria-label="Resources">
-        ${RES.map(r => `<div class="chip" data-res="${r.k}" data-tip="${r.tip}" tabindex="0">${icon(r.icon)}<b class="num"></b><span class="delta" aria-hidden="true"></span></div>`).join('')}
-        <div class="chip danger" hidden tabindex="0" role="button" data-tip="A city has too many waiting cars. Click to jump to it.">${icon('warning')}<b><span class="long">Overcrowding </span><span class="pct num"></span></b></div>
+        <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
+        <div class="chip people" tabindex="0" data-tip="">${icon('people')}<span class="pp"><span><b class="pv num"></b><small class="pn num"></small></span><span class="pbar"><i></i></span></span></div>
+        <div class="chip happy" tabindex="0" data-tip="">${icon('smile')}<b class="hv num"></b></div>
+        <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
+        <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
+        <div class="chip danger alarm" hidden tabindex="0" data-tip="">${icon('warning')}<b class="atxt"></b></div>
       </div>
       <div class="panel status">
         <div class="seg" role="group" aria-label="Game speed">
           ${SPEEDS.map(s => `<button class="speed" data-speed="${s.s}" aria-pressed="false" aria-label="${s.tip}" data-tip="${s.tip}"${s.key ? ` data-key="${s.key}"` : ''}>${icon(s.icon)}<small>${s.lbl}</small></button>`).join('')}
         </div>
         <span class="sep"></span>
-        <div class="trips" tabindex="0" data-tip="Trips completed: cars that reached their destination.">${icon('car')}<b class="score num">0</b></div>
+        <div class="trips" tabindex="0" data-tip="">${icon('car')}<b class="score num">0</b><small class="smooth num"></small></div>
         <span class="sep"></span>
-        <div class="week" tabindex="0" data-tip="">
-          <span class="wk"></span>
-          <span class="dots">${'<i></i>'.repeat(7)}</span>
-          ${icon('gift')}
+        <div class="clock" tabindex="0" data-tip="">
+          <span class="ck num"></span>
+          <span class="hours">${Array.from({ length: 24 }, (_, h) => `<i${RUSH.has(h) ? ' class="rush"' : ''}></i>`).join('')}</span>
         </div>
+      </div>
       </div>
       <button class="panel helpbtn" data-action="help" aria-label="Controls" aria-expanded="false" data-tip="Controls" data-key="?">${icon('help')}</button>
       <div class="panel pop" hidden role="dialog" aria-label="Controls">
@@ -151,16 +254,55 @@ export class HUD {
         <table>${CONTROLS.map(([a, b]) => `<tr><th scope="row">${a}</th><td>${b}</td></tr>`).join('')}</table>
         <button class="btn" data-action="tutorial">Replay tutorial</button>
       </div>
+      <div class="panel views" role="group" aria-label="Analysis">
+        <button class="iconbtn" data-view="heat" aria-pressed="false" aria-label="Traffic heat map" data-tip="Traffic heat map: green roads flow, red ones are jammed; discs show cars waiting at junctions" data-key="C">${icon('heat')}</button>
+        <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
+        <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
+        <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
+        <button class="iconbtn" data-view="menu" aria-label="Menu" data-tip="Menu: save, load, quit" data-key="Esc">${icon('menu')}</button>
+      </div>
+      <div class="rcol">
+        <div class="panel pop cpanel" hidden role="dialog" aria-label="Followed car">
+          <div class="pop-head"><h2 class="ctitle"></h2><button class="iconbtn" data-v="car" aria-label="Stop following [Esc]">${icon('close')}</button></div>
+          <div class="jbody cbody"></div>
+        </div>
+        <div class="panel pop bpanel" hidden role="dialog" aria-label="Building">
+          <div class="pop-head"><h2 class="btitle"></h2><button class="iconbtn" data-v="building" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody bbody"></div>
+        </div>
+        <div class="panel pop jpanel" hidden role="dialog" aria-label="Junction">
+          <div class="pop-head"><h2>Junction</h2><button class="iconbtn" data-j="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody"></div>
+        </div>
+        <div class="panel pop ipanel" hidden role="dialog" aria-label="Interchange">
+          <div class="pop-head"><h2>Interchange</h2><button class="iconbtn" data-i="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+          <div class="jbody ibody"></div>
+        </div>
+        <div class="panel pop fpanel" hidden role="dialog" aria-label="Trip reports">
+          <div class="pop-head"><h2>Trip reports</h2><button class="iconbtn" data-v="feed" aria-label="Close [T]">${icon('close')}</button></div>
+          <div class="jbody fbody"></div>
+        </div>
+        <div class="panel pop mpanel" hidden role="dialog" aria-label="Metrics">
+          <div class="pop-head"><h2>Metrics</h2><button class="iconbtn" data-v="metrics" aria-label="Close [M]">${icon('close')}</button></div>
+          <div class="jbody mbody"></div>
+        </div>
+      </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        ${TOOLS.slice(0, 3).map(toolBtn).join('')}
+        ${toolBtn('road')}
+        ${toolBtn('grid')}
+        <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
+          ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
+        </div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
-          <svg class="pic rpic" viewBox="0 0 40 24" aria-hidden="true"></svg>
-          <span class="plabel"><b>Lanes</b><small class="pctx">per direction</small></span>
+          <div class="seg tiers" role="group" aria-label="Road tier">
+            ${TIER_KEYS.map(t => `<button class="lane tier" data-tier="${t}" aria-pressed="false" aria-label="${TIERS[t].label}" data-tip="${tierTip(t)}"><svg class="pic" viewBox="0 0 40 24" aria-hidden="true">${tierPic(t)}</svg>${icon('lock', 'lock')}</button>`).join('')}
+          </div>
+          <span class="plabel"><b class="tname">Street</b><small class="pctx">per direction</small></span>
           <div class="seg" role="group" aria-label="Lanes per direction">
             ${[1, 2, 3].map(n => `<button class="lane" data-lanes="${n}" aria-pressed="false" data-tip="${laneTip(n)}"><b>${n}</b></button>`).join('')}
           </div>
-          <button class="lane wide" data-action="oneway" aria-pressed="false" data-tip="${ONEWAY_TIP}">${icon('oneway')}<small>One-way</small></button>
+          <button class="lane wide" data-action="oneway" aria-pressed="false" data-tip="${ONEWAY_TIP}">${icon('oneway')}<small>One-way</small>${icon('lock', 'lock')}</button>
           <button class="lane wide" data-action="flip" hidden data-tip="Reverse direction">${icon('flip')}<small>Flip</small></button>
         </div>
         <span class="sep"></span>
@@ -176,25 +318,42 @@ export class HUD {
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
         <span class="sep"></span>
-        ${toolBtn(TOOLS[3])}
-        ${toolBtn(TOOLS[4])}
+        ${toolBtn('light')}
+        ${toolBtn('roundabout')}
+        ${toolBtn('interchange')}
+        <span class="sep"></span>
+        ${toolBtn('place')}
+        <span class="sep"></span>
+        ${toolBtn('edit')}
+        ${toolBtn('demolish')}
+      </div>
+      <div class="leftcol">
+        <div class="panel tray" role="group" aria-label="Buildings to place">
+          <small class="tray-h">To place</small>
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: click, then click the map near a road">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+        </div>
+        <div class="panel legend" role="group" aria-label="Map legend">${LEGEND.none}</div>
       </div>
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
       <div class="tip" role="tooltip" hidden></div>`;
-    for (const r of RES) this.chips[r.k] = this.q(`[data-res="${r.k}"]`);
     this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
-    this.dots = Array.from(root.querySelectorAll<HTMLElement>('.dots i'));
+    this.cells = Array.from(root.querySelectorAll<HTMLElement>('.hours i'));
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
     for (const b of this.toolBtns) b.onclick = () => game.setTool(b.dataset.tool as Tool);
+    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => game.startPlacing(b.dataset.zone as Zone); });
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
     const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
     root.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       b.onclick = () => setType({ ...cur(), lanes: Number(b.dataset.lanes) as RoadType['lanes'] });
+    });
+    // Tier: lanes and one-way are clamped to the new tier (fitType)
+    root.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach(b => {
+      b.onclick = () => setType({ ...cur(), tier: b.dataset.tier as Tier });
     });
     this.q('[data-action="oneway"]').onclick = () => setType({ ...cur(), oneWay: !cur().oneWay });
     this.q('[data-action="flip"]').onclick = () => { if (game.selected) game.flip(game.selected); };
@@ -204,17 +363,43 @@ export class HUD {
     this.q('[data-action="close-help"]').onclick = () => this.setHelp(false);
     this.q('[data-action="tutorial"]').onclick = () => { this.setHelp(false); this.onTutorial?.(); };
     const jump = () => {
-      const worst = game.cities.reduce((w, c) => (c.overcrowd > (w?.overcrowd ?? 0) ? c : w), null as Game['cities'][number] | null);
-      if (worst) this.onDanger?.(worst);
+      const off = game.buildings.filter(b => !b.connected);
+      if (off.length) this.onJump?.(off[this.dangerIdx++ % off.length]);
+    };
+    // Analysis: overlays and panels; a trip line jumps the camera (and stops a follow, which would pull it back)
+    this.q('.views').onclick = e => {
+      const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
+      if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
+      else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+      else if (v === 'menu') this.onPause?.();
+    };
+    this.q('.rcol').addEventListener('click', e => {
+      const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
+      if (v === 'car') game.follow = null;
+      else if (v === 'building') game.picked = null;
+      else if (v === 'metrics' || v === 'feed') this.show[v] = false;
+      if (j) {
+        const [x, y] = j.split(',').map(Number);
+        game.follow = null;
+        this.onJump?.({ x, y });
+      }
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
+    this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
+    const jp = this.q('.jpanel');
+    jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
+    jp.onkeydown = e => {
+      const t = (e.target as Element).closest<HTMLElement>('g[data-j]');
+      if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); this.onJunction(t.dataset.j!); }
     };
     this.q('.danger').onclick = jump;
     this.q('.danger').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } };
     document.addEventListener('pointerdown', e => {
       if (this.helpOpen && !(e.target as Element).closest('.pop, .helpbtn')) this.setHelp(false, false);
-    });
+    }, { signal });
     // capture phase on window: runs before Input's listener, so modal keys never reach the tools
-    window.addEventListener('keydown', e => this.onKey(e), true);
-    this.bindTips();
+    window.addEventListener('keydown', e => this.onKey(e), { capture: true, signal });
+    this.bindTips(signal);
   }
 
   private q<T extends HTMLElement = HTMLElement>(s: string): T {
@@ -224,22 +409,24 @@ export class HUD {
   // ---------- keyboard ----------
   private onKey(e: KeyboardEvent): void {
     const g = this.game;
-    if (g.gameOver || g.pendingReward) {
+    if (g.gameOver || g.pendingLevel) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (/^[1-5]$/.test(e.key)) {
-        if (!g.gameOver && (e.key === '1' || e.key === '2')) this.selectCard(Number(e.key) - 1, true);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (g.gameOver) location.reload();
-        else g.applyReward(this.sel);
-      }
+      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else this.closeLevel(); }
       return;
     }
     if (e.key === 'Escape') {
       this.hideTip();
       this.setHelp(false);
-    } else if ((e.key === '?' || e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    } else if (e.ctrlKey || e.metaKey || e.altKey) {
+      return;
+    } else if (e.key === '?' || e.key === 'h' || e.key === 'H') {
       this.setHelp(!this.helpOpen);
+    } else if (e.key === 'c' || e.key === 'C') {
+      g.overlay = OVERLAYS[(OVERLAYS.indexOf(g.overlay) + 1) % OVERLAYS.length];
+    } else if (e.key === 'm' || e.key === 'M') {
+      this.show.metrics = !this.show.metrics;
+    } else if (e.key === 't' || e.key === 'T') {
+      this.show.feed = !this.show.feed;
     }
   }
 
@@ -255,7 +442,7 @@ export class HUD {
   }
 
   // ---------- tooltips: one shared .tip ----------
-  private bindTips(): void {
+  private bindTips(signal?: AbortSignal): void {
     const target = (e: Event) => (e.target as Element).closest<HTMLElement>('[data-tip]');
     this.root.addEventListener('pointerover', e => {
       if (e.pointerType === 'touch') return;
@@ -265,17 +452,17 @@ export class HUD {
       if (!el?.dataset.tip) return;
       this.tipFor = el;
       this.tipTimer = setTimeout(() => this.showTip(el), 300);
-    });
+    }, { signal });
     this.root.addEventListener('pointerout', e => {
       const to = e.relatedTarget as Node | null;
       if (this.tipFor && to && this.tipFor.contains(to)) return;
       this.hideTip();
-    });
+    }, { signal });
     this.root.addEventListener('focusin', e => {
       const el = target(e);
       if (el?.dataset.tip && (e.target as Element).matches(':focus-visible')) this.showTip(el);
-    });
-    this.root.addEventListener('focusout', () => this.hideTip());
+    }, { signal });
+    this.root.addEventListener('focusout', () => this.hideTip(), { signal });
     // touch: long-press a dock button shows its tooltip for 2.5 s
     let press: ReturnType<typeof setTimeout> | undefined;
     this.root.addEventListener('pointerdown', e => {
@@ -283,10 +470,10 @@ export class HUD {
       const el = target(e);
       if (!el?.closest('.dock')) return;
       press = setTimeout(() => { this.showTip(el, true); setTimeout(() => this.hideTip(), 2500); }, 500);
-    });
+    }, { signal });
     const stop = () => clearTimeout(press);
-    this.root.addEventListener('pointerup', stop);
-    this.root.addEventListener('pointercancel', stop);
+    this.root.addEventListener('pointerup', stop, { signal });
+    this.root.addEventListener('pointercancel', stop, { signal });
   }
 
   private showTip(el: HTMLElement, touch = false): void {
@@ -339,55 +526,64 @@ export class HUD {
   }
 
   // ---------- modals ----------
-  private selectCard(k: number, focus = false): void {
-    this.sel = k;
-    this.root.querySelectorAll<HTMLButtonElement>('.rcard').forEach((b, i) => {
-      b.setAttribute('aria-pressed', String(i === k));
-      if (i === k && focus) b.focus();
-    });
+  // Level-up modal closed: the game runs again at the speed it had
+  private closeLevel(): void {
+    this.seenLevel = this.game.pendingLevel;
+    this.game.pendingLevel = 0;
+    this.game.speed = this.resume || 1;
   }
 
   private renderModal(): void {
     const g = this.game, modal = this.q('.modal');
-    const open = g.gameOver || !!g.pendingReward;
+    const open = !!g.gameOver || !!g.pendingLevel;
     this.hideTip();
     this.setHelp(false, false);
     // keep Tab inside the modal
     for (const el of Array.from(this.root.children)) if (el !== modal) el.toggleAttribute('inert', open);
     modal.hidden = !open;
     if (g.gameOver) {
-      const city = g.cities.find(c => c.overcrowd >= 1);
+      const d = DIFFICULTY[g.cfg.difficulty], broke = g.gameOver === 'bankrupt';
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title" class="bad">${icon('warning')} Overcrowded!</h2>
-          ${city ? `<p class="sub">${esc(city.name)} has too many waiting cars.</p>` : ''}
+          <h2 id="m-title" class="bad">${icon('warning')} ${broke ? 'Bankrupt' : 'The residents left'}</h2>
+          <p class="sub">${broke ? `The city was in debt at ${d.debtDays} midnights in a row.` : `City happiness stayed under ${d.failHappy}% for ${T.FAIL_DAYS} midnights in a row.`}</p>
           <div class="stats">
-            <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.score}</b></div>
-            <div>${icon('week', 'big')}<span>Weeks</span><b class="num">${g.week}</b></div>
+            <div>${icon('calendar', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
+            <div>${icon('star', 'big')}<span>Level</span><b class="num">${g.cityLevel}</b></div>
+            <div>${icon('people', 'big')}<span>Population</span><b class="num">${Math.round(g.population).toLocaleString('en-US')}</b></div>
+            <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.stats.arrived.toLocaleString('en-US')}</b></div>
+            <div>${icon('smile', 'big')}<span>Smooth trips</span><b class="num">${g.stats.arrived ? Math.round(100 * g.stats.smooth / g.stats.arrived) : 0}%</b></div>
+            <div>${icon('money', 'big')}<span>Money</span><b class="num">${fmtMoney(g.money)}</b></div>
           </div>
-          <div class="actions"><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
+          <div class="actions"><button class="btn" data-action="to-menu">Main menu</button><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
         </div>`;
       const b = this.q<HTMLButtonElement>('[data-action="restart"]');
-      b.onclick = () => location.reload();
+      b.onclick = () => this.onRestart?.();
+      this.q('[data-action="to-menu"]').onclick = () => this.onMenu?.();
       b.focus();
-    } else if (g.pendingReward) {
+    } else if (g.pendingLevel) {
+      // every level reached since the last modal (several at once merge): unlocks, the batch and the grants
+      if (g.speed) this.resume = g.speed;
+      g.speed = 0;
+      const lv: number[] = [];
+      for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
+      const unlocks = lv.flatMap(levelUnlocks), batch = Object.fromEntries(ZONE_KEYS.map(z => [z, 0])) as Record<Zone, number>;
+      for (const n of lv) { const b = levelBatch(n); for (const z of ZONE_KEYS) batch[z] += b[z]; }
+      const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0), won = lv.includes(LEVELS.length);
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title">${icon('gift')} Week ${g.week - 1} complete</h2>
-          <p class="sub">Choose one upgrade</p>
-          <div class="cards">${g.pendingReward.map((r, k) => `
-            <button class="rcard" data-i="${k}" aria-pressed="false"><span class="kb" aria-hidden="true">${k + 1}</span>${icon('check', 'selmark')}${rewardRows(r)}</button>`).join('')}
+          <h2 id="m-title">${icon('star')} ${won ? 'City complete!' : `Level ${g.pendingLevel}!`}</h2>
+          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents bring another batch.` : '. New buildings wait in the tray: place them beside your roads so the city keeps growing.'}</p>
+          <div class="lvl-grid">
+            <div><h3>New buildings</h3>${ZONE_KEYS.filter(z => batch[z]).map(z => `<p>${zonePic(z)}${ZONES[z].label} <b class="num">×${batch[z]}</b></p>`).join('')}</div>
+            <div><h3>Unlocked</h3>${unlocks.length ? unlocks.map(u => `<p>${icon('check')}${esc(u)}</p>`).join('') : '<p class="muted">Nothing new this time</p>'}
+              <p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
           </div>
-          <div class="actions"><button class="btn primary" data-action="confirm">Confirm <kbd>Enter</kbd></button></div>
+          <div class="actions"><button class="btn primary" data-action="continue">Continue <kbd>Enter</kbd></button></div>
         </div>`;
-      modal.querySelectorAll<HTMLButtonElement>('.rcard').forEach(b => {
-        const k = Number(b.dataset.i);
-        b.onfocus = () => this.selectCard(k);
-        b.onclick = () => this.selectCard(k);
-        b.ondblclick = () => g.applyReward(k);
-      });
-      this.q('[data-action="confirm"]').onclick = () => g.applyReward(this.sel);
-      this.selectCard(0, true);
+      const b = this.q<HTMLButtonElement>('[data-action="continue"]');
+      b.onclick = () => this.closeLevel();
+      b.focus();
     } else {
       modal.innerHTML = '';
     }
@@ -397,68 +593,282 @@ export class HUD {
   private updatePicker(): void {
     const g = this.game, run = g.selected;
     const t = run ? g.typeOf(run) : g.roadType;
-    const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.lanes}|${t.oneWay}`;
+    const key = `${g.tool}|${run ? run.map(e => e.id).join(',') : '-'}|${t.tier}|${t.lanes}|${t.oneWay}`;
     if (key === this.last.pick) return;
     this.last.pick = key;
-    const off = g.tool !== 'road' && g.tool !== 'edit';
+    const off = g.tool !== 'road' && g.tool !== 'edit' && g.tool !== 'grid';
     const box = this.q('.lanes');
     box.classList.toggle('off', off);
-    box.dataset.tip = off ? 'Lanes apply to the Road and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
-    this.q('.pctx').textContent = run ? 'editing road' : 'per direction';
-    this.q('.rpic').innerHTML = roadPic(t);
-    // asphalt to pay (or get back) if the selected run switched to type n
+    box.dataset.tip = off ? 'Lanes apply to the Road, Grid and Edit tools' : run ? 'Editing the selected road' : 'Road type for new roads';
+    const tier = TIERS[t.tier];
+    this.q('.tname').textContent = tier.label;
+    this.q('.pctx').textContent = run ? 'editing road' : `${tier.kmh} km/h`;
+    // $ to pay (or get back) if the selected run switched to type n
     const delta = (n: RoadType) => {
       if (!run) return '';
-      const d = g.retypeDelta(run, n);
-      return d > 0 ? ` · costs ${d}` : d < 0 ? ` · refunds ${-d}` : '';
+      const d = Math.round(g.retypeDelta(run, n));
+      return d > 0 ? ` · costs ${fmtMoney(d)}` : d < 0 ? ` · refunds ${fmtMoney(-d)}` : '';
     };
+    box.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach(b => {
+      const k = b.dataset.tier as Tier, locked = !g.tierUnlocked(k);
+      b.disabled = off;
+      b.setAttribute('aria-pressed', String(t.tier === k));
+      // locked tiers stay clickable so Game toasts 'Unlocks at level N'
+      b.setAttribute('aria-disabled', String(locked));
+      b.dataset.tip = tierTip(k) + (locked ? ` · unlocks at level ${TIERS[k].level}` : delta({ ...t, tier: k }));
+    });
     box.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       const n = Number(b.dataset.lanes) as RoadType['lanes'];
-      b.disabled = off;
+      b.disabled = off || !tier.lanes.includes(n);
       b.setAttribute('aria-pressed', String(t.lanes === n));
       b.dataset.tip = laneTip(n) + delta({ ...t, lanes: n });
     });
     const ow = this.q<HTMLButtonElement>('[data-action="oneway"]');
-    ow.disabled = off;
+    const owLock = g.lockOf('oneway');
+    ow.disabled = off || !tier.oneWay;
     ow.setAttribute('aria-pressed', String(t.oneWay));
-    ow.dataset.tip = ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
+    ow.setAttribute('aria-disabled', String(!!owLock));
+    ow.dataset.tip = owLock || ONEWAY_TIP + delta({ ...t, oneWay: !t.oneWay });
     this.q('[data-action="flip"]').hidden = !(run && t.oneWay);
+  }
+
+  // ---------- junction panel (Edit tool on a junction) ----------
+  private onJunction(cmd: string): void {
+    const g = this.game, n = g.inspect;
+    if (!n) return;
+    const [k, a, b] = cmd.split(':'), i = Number(a);
+    if (k === 'close') g.inspect = null;
+    else if (k === 'ctl') g.setControl(n, a as Control);
+    else if (k === 'mode') this.jMode = a as 'signals' | 'bans';
+    else if (k === 'ph') this.jPhase = i;
+    else if (k === 'mv') {
+      const m = Number(b) as Move;
+      if (n.control === 'light' && this.jMode === 'signals') g.editPlan(n, p => cycleSig(p, this.jPhase, i, m));
+      else g.editPlan(n, p => toggleBan(p, i, m));
+    } else if (k === 'sec') g.editPlan(n, p => setSeconds(p, i, p.phases[i].seconds + Number(b)));
+    else if (k === 'add') g.editPlan(n, p => { addPhase(p); this.jPhase = p.phases.length - 1; });
+    else if (k === 'del') g.editPlan(n, p => removePhase(p, i));
+    else if (k === 'pre') g.editPlan(n, p => applyPreset(p, a as Preset));
+  }
+
+  private updateJunction(): void {
+    const g = this.game, n = g.inspect, panel = this.q('.jpanel');
+    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
+    if (key === this.last.junction) return;
+    if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jMode = 'signals'; this.jPhase = 0; this.setHelp(false, false); }
+    this.last.junction = key;
+    panel.hidden = !n;
+    if (!n) return;
+    const p = planOf(n), light = n.control === 'light', lock = g.lockOf('junction');
+    this.jPhase = Math.min(this.jPhase, p.phases.length - 1);
+    const sigs = light && this.jMode === 'signals', ph = p.phases[this.jPhase];
+    const main = n.control === 'yield' ? mainEdges(n).map(e => approachOf(p, n, e)) : [];
+    const price = (k: Control) => {
+      const d = Math.round(g.controlPrice(k) - g.controlRefund(n));
+      return d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free';
+    };
+    const ctl = CONTROL_KEYS.map(k => {
+      const kl = k === 'roundabout' ? g.lockOf('roundabout') : '';
+      return `<button class="lane wide" data-j="ctl:${k}" aria-pressed="${n.control === k}" aria-disabled="${!!kl}"`
+        + ` data-tip="${kl || `${CONTROL_TIP[k]}${n.control === k ? '' : ` · ${price(k)}`}`}"><small>${CONTROL_LABEL[k]}</small></button>`;
+    }).join('');
+    // Diagram: one arm per approach, three turn buttons beside its incoming lane (left farthest out)
+    const arms = p.approaches.map((a, i) => {
+      const ux = Math.cos(a), uy = Math.sin(a), rx = uy * 8, ry = -ux * 8;
+      const turns = [42, 31, 20].map((r, m) => {
+        const x = ux * r + rx, y = uy * r + ry, ban = p.ban[i][m], s = ph?.sig[i][m] ?? 0;
+        const cls = sigs ? (ban ? 'off' : `s${s}`) : ban ? 'ban' : 'ok';
+        const state = sigs ? (ban ? 'banned' : ['red', 'yield', 'green'][s]) : ban ? 'banned' : 'allowed';
+        return `<g data-j="mv:${i}:${m}" class="${cls}" role="button" tabindex="0" aria-label="${MOVES[m]} from the ${compass(a)} arm: ${state}">`
+          + `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.2"/><text x="${x.toFixed(1)}" y="${(y + 2.3).toFixed(1)}">${MOVES[m][0]}</text></g>`;
+      }).join('');
+      return [`<line class="arm${main.includes(i) ? ' main' : ''}" x1="0" y1="0" x2="${(ux * 50).toFixed(1)}" y2="${(uy * 50).toFixed(1)}"/>`, turns];
+    });
+    // all arms first, then the turn buttons on top
+    const svg = arms.map(x => x[0]).join('') + arms.map(x => x[1]).join('');
+    const note = lock ? `${lock}.`
+      : sigs ? `Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.`
+      : 'Click a turn to ban or allow it. Cars reroute around banned turns.';
+    const phases = !sigs ? '' : `<div class="jph">${p.phases.map((x, i) => `
+      <div class="row${i === n.phase ? ' now' : ''}">
+        <button class="lane wide" data-j="ph:${i}" aria-pressed="${i === this.jPhase}" data-tip="${i === n.phase ? 'Running now. Click to edit' : 'Click to edit this phase'}"><small>Phase ${i + 1}</small></button>
+        <button class="iconbtn" data-j="sec:${i}:-1" aria-label="Phase ${i + 1} shorter" ${x.seconds <= PHASE_MIN ? 'disabled' : ''}><b>−</b></button>
+        <b class="num">${x.seconds}s</b>
+        <button class="iconbtn" data-j="sec:${i}:1" aria-label="Phase ${i + 1} longer" ${x.seconds >= PHASE_MAX ? 'disabled' : ''}><b>+</b></button>
+        <button class="iconbtn" data-j="del:${i}" aria-label="Remove phase ${i + 1}" ${p.phases.length < 2 ? 'disabled' : ''}>${icon('close')}</button>
+      </div>`).join('')}
+      <button class="btn" data-j="add" ${p.phases.length >= MAX_PHASES ? 'disabled' : ''}>Add phase</button>
+      <div class="jpre"><small>Presets</small>${PRESETS.map(([k, l, t]) => `<button class="btn" data-j="pre:${k}" data-tip="${t}">${l}</button>`).join('')}</div>
+    </div>`;
+    const was = (document.activeElement as Element | null)?.closest<HTMLElement>('.jpanel [data-j]')?.dataset.j;
+    this.q('.jpanel .jbody').innerHTML = `
+      <div class="seg jctl" role="group" aria-label="Control">${ctl}</div>
+      ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
+      ${light ? `<div class="seg jmode" role="group" aria-label="Turn clicks edit"><button class="lane wide" data-j="mode:signals" aria-pressed="${sigs}"><small>Signals</small></button><button class="lane wide" data-j="mode:bans" aria-pressed="${!sigs}"><small>Turn bans</small></button></div>` : ''}
+      <svg class="jsvg${lock ? ' locked' : ''}" viewBox="-54 -54 108 108" role="group" aria-label="Turns at this junction">${svg}<circle class="hub" r="6"/></svg>
+      <p class="jnote">${esc(note)}</p>
+      ${lock ? '' : phases}`;
+    if (was) this.root.querySelector<HTMLElement>(`.jpanel [data-j="${was}"]`)?.focus();
+  }
+
+  // ---------- interchange panel (Interchange tool on a junction) ----------
+  private onIchg(cmd: string): void {
+    const g = this.game, ic = g.ichg;
+    if (!ic) return;
+    const [k, a] = cmd.split(':');
+    if (k === 'close') g.ichg = null;
+    else if (k === 'build') g.buildInterchange();
+    else if (k === 'kind') {
+      const t = ICHG[a as Ichg];
+      if (t.arms === ic.node.edges.length) g.ichg = { ...ic, kind: a as Ichg };
+      else g.say(`${t.label} needs a junction of ${t.arms} roads`);
+    }
+  }
+
+  private updateIchg(): void {
+    const g = this.game, ic = g.ichg, panel = this.q('.ipanel');
+    const plans = ic ? ICHG_KEYS.map(k => g.planInterchange(ic.node, k)) : [];
+    const key = ic ? `${ic.node.id}|${ic.kind}|${plans.map(p => `${p.ok}|${p.reason}|${Math.round(p.net ?? 0)}`).join()}` : '';
+    if (key === this.last.ichg) return;
+    if (ic && !this.last.ichg) this.setHelp(false, false);
+    this.last.ichg = key;
+    panel.hidden = !ic;
+    if (!ic) return;
+    const cur = plans[ICHG_KEYS.indexOf(ic.kind)], t = ICHG[ic.kind];
+    const price = (p: PathPlan): string => { const d = Math.round(p.net ?? p.cost); return d >= 0 ? fmtMoney(d) : `+${fmtMoney(-d)} back`; };
+    const kinds = ICHG_KEYS.map(k => {
+      const fits = ICHG[k].arms === ic.node.edges.length;
+      return `<button class="lane wide" data-i="kind:${k}" aria-pressed="${k === ic.kind}" aria-disabled="${!fits}"`
+        + ` data-tip="${esc(fits ? ICHG[k].tip : `Needs a junction of ${ICHG[k].arms} roads`)}"><small>${ICHG[k].label}</small></button>`;
+    }).join('');
+    this.q('.ibody').innerHTML = `
+      <div class="seg" role="group" aria-label="Interchange type">${kinds}</div>
+      <p class="jnote">${esc(t.tip)}</p>
+      <p class="jnote${cur.ok ? '' : ' bad'}">${esc(cur.ok ? `${price(cur)} after the refund for the roads it replaces. Ramps and bridges add upkeep.` : FRIENDLY[cur.reason] ?? cur.reason)}</p>
+      <div class="jpre"><button class="btn primary" data-i="build"${cur.ok ? '' : ' disabled'}>Build · ${price(cur)}</button><button class="btn" data-i="close">Cancel</button></div>`;
+  }
+
+  // ---------- analysis panels ----------
+  private updateViews(): void {
+    const g = this.game, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}`;
+    if (key === this.last.views) return;
+    this.last.views = key;
+    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
+    this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
+    this.q('.legend').innerHTML = LEGEND[g.overlay];
+    this.q('.mpanel').hidden = !this.show.metrics;
+    this.q('.fpanel').hidden = !this.show.feed;
+    this.last.metrics = this.last.feed = undefined;
+  }
+
+  // Followed car: trip, from -> to, time so far against the free-flow time, speed, stops
+  private updateCar(): void {
+    const g = this.game, c = g.follow, panel = this.q('.cpanel');
+    if (!c) { if (this.carFor) { this.carFor = null; this.last.car = ''; panel.hidden = true; } return; }
+    const t = c.trip, el = g.time - t.departed, tier = TIERS[c.lane.edge.type.tier], kmh = Math.round(c.speed * tier.kmh / tier.limit);
+    const key = `${Math.round(el / HOUR * 60)}|${kmh}|${Math.round(t.stopped / HOUR * 60)}`;
+    if (c === this.carFor && key === this.last.car) return;
+    this.carFor = c;
+    this.last.car = key;
+    panel.hidden = false;
+    this.q('.ctitle').innerHTML = `<i class="cdot" style="background:${PURPOSES[t.purpose].color}"></i>${tripName(t.purpose, t.back)}`;
+    const slow = t.ideal && el > T.SMOOTH_X * t.ideal;
+    const jam = t.jamS >= HOUR / 4 ? `longest ${fmtMin(t.jamS)} ${JAM_AT[jamAt(t.jam)]}` : '';
+    this.q('.cbody').innerHTML = `
+      <p class="jnote">${ZONES[t.from.kind].label} → ${ZONES[t.to.kind].label} · ${KIND_LABEL[c.kind]}</p>
+      <div class="kv"><span>Driving</span><b class="num${slow ? ' bad' : ''}">${fmtMin(el)}</b><small>${fmtMin(t.ideal)} on empty roads</small></div>
+      <div class="kv"><span>Speed</span><b class="num">${kmh} km/h</b><small>${tier.label}, ${tier.kmh} km/h</small></div>
+      <div class="kv"><span>Stopped</span><b class="num">${fmtMin(t.stopped)}</b><small>${jam}</small></div>
+      <p class="jnote">The camera follows it; the dashed line is its route. Esc stops.</p>`;
+  }
+
+  // Building card: residents and happiness parts (home), jobs, staff and goods (workplaces), its last 5 trips
+  private updateBuilding(): void {
+    const g = this.game, b = g.picked, panel = this.q('.bpanel');
+    const mine = b ? g.reports.filter(r => r.from === b || r.to === b).slice(-5).reverse() : [];
+    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${mine.map(r => r.seconds).join()}` : '';
+    if (key === this.last.bld) return;
+    this.last.bld = key;
+    panel.hidden = !b;
+    if (!b) return;
+    const z = ZONES[b.kind], pc = (x: number) => `${Math.round(100 * x)}%`;
+    const bar = (label: string, v: number, bad = false) =>
+      `<div class="pbar2${bad ? ' bad' : ''}"><span>${label}</span><i><i style="width:${pc(Math.min(1, v))}"></i></i><b class="num">${pc(v)}</b></div>`;
+    let body = '';
+    if (b.kind === 'home') {
+      const mineC = g.commuters.filter(c => c.home === b), p = b.parts;
+      body = `<p class="jnote">${Math.round(b.residents)} / ${z.residents} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
+        + bar('Jobs', p.job) + bar('Shops', p.shop) + bar('Trips', p.trips) + bar('Pollution', p.pollution, true) + bar('Noise', p.noise, true);
+    } else {
+      body = `<p class="jnote">${z.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
+    }
+    if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
+    this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
+    this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
+  }
+
+  // Trip feed: today's outcomes, then the last 30 reports, newest first
+  private updateFeed(): void {
+    const g = this.game, n = g.stats.arrived + g.stats.failed, key = `${n}|${g.day}`;
+    if (!this.show.feed || key === this.last.feed || (this.last.feed !== undefined && performance.now() - this.feedAt < 500)) return;
+    this.last.feed = key;
+    this.feedAt = performance.now();
+    const td = g.stats.today;
+    this.q('.fbody').innerHTML = `
+      <p class="jnote">Today: <b class="o-smooth">${td.smooth} smooth</b> · <b class="o-wait">${td.wait} long waits</b> · <b class="o-detour">${td.detour} detours</b>`
+      + ` · <b class="o-gaveup">${td.gaveup} gave up</b> · <b class="o-noroute">${td.noroute} no road</b></p>`
+      + (g.reports.length ? `<div class="flist">${g.reports.slice(-30).reverse().map(tripBtn).join('')}</div>` : '<p class="jnote">No trips yet: they show up here as cars arrive.</p>');
+  }
+
+  // Metrics: one sparkline per series over the whole run, redrawn once per sample
+  private updateMetrics(): void {
+    const g = this.game, m = g.metrics, s = m.samples, key = `${s.length}|${m.every}|${s[s.length - 1]?.day}|${s[s.length - 1]?.hour}`;
+    if (!this.show.metrics || key === this.last.metrics) return;
+    this.last.metrics = key;
+    if (s.length < 2) { this.q('.mbody').innerHTML = '<p class="jnote">Collecting: a point is added every in-game hour.</p>'; return; }
+    const rows = CHARTS.filter(c => c.k !== 'money' || !g.creative).map(c => {
+      const v = s.map(x => x[c.k]), [svg, lo, hi] = spark(v, c.zero, c.max), now = c.fmt(v[v.length - 1]);
+      return `<div class="mrow" role="img" aria-label="${c.label}: now ${now}, from ${c.fmt(lo)} to ${c.fmt(hi)}">`
+        + `<span>${c.label}</span><b class="num">${now}</b><small class="num">${c.fmt(lo)} – ${c.fmt(hi)}</small>${svg}</div>`;
+    }).join('');
+    this.q('.mbody').innerHTML = `<p class="jnote">From day ${s[0].day} ${pad(s[0].hour)}:00 to now, a point every ${m.every === 1 ? 'hour' : `${m.every} hours`}.</p>${rows}`;
   }
 
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
-    const g = this.game, inv = g.inventory, L = this.last;
+    const g = this.game, L = this.last;
 
-    for (const { k } of RES) {
-      const v = inv[k], prev = L.inv[k];
-      if (v === prev) continue;
-      L.inv[k] = v;
-      const c = this.chips[k];
-      (c.querySelector('.num') as HTMLElement).textContent = String(v);
-      c.classList.toggle('zero', v <= 0);
-      c.classList.toggle('low', v > 0 && (k === 'asphalt' ? v < 10 : v === 1));
-      if (prev !== undefined) {
-        const d = v - prev;
-        (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${d}` : `−${-d}`;
+    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business income (yesterday's,
+    // or today's so far on the first day) - the network's upkeep; grants are one-off
+    const money = Math.round(g.money);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business - g.upkeepDay);
+    if (money !== L.money || net !== L.net) {
+      const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
+      L.money = money;
+      L.net = net;
+      (c.querySelector('.num') as HTMLElement).textContent = fmtMoney(money);
+      const n = c.querySelector('.net') as HTMLElement;
+      n.textContent = `${net >= 0 ? '+' : ''}${fmtMoney(net)}/day`;
+      n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
+      c.classList.toggle('debt', money < 0);
+      const y = g.ledger.yesterday, t = g.ledger.today;
+      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
+        + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '');
+      c.dataset.tip = `Money. Residents pay ${fmtMoney(g.taxPerDay())}/day in taxes (more when they are happy); workers, shoppers and goods`
+        + ` arriving pay business income. Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
+        + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
+        + (g.creative ? '' : ` In debt at ${DIFFICULTY[g.cfg.difficulty].debtDays} midnights in a row = bankrupt.`);
+      if (prev !== undefined && Number.isFinite(d) && d !== 0) {
+        (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${fmtMoney(d)}` : `−${fmtMoney(-d)}`;
         flash(c, d > 0 ? 'gain' : 'spend', ['gain', 'spend']);
       }
-    }
-
-    for (const k of ['lights', 'roundabouts'] as const) {
-      const v = inv[k];
-      if (v === L.inv[k]) continue;
-      L.inv[k] = v;
-      const b = this.toolBtns.find(x => x.dataset.tool === (k === 'lights' ? 'light' : 'roundabout'))!;
-      (b.querySelector('.stock') as HTMLElement).textContent = String(v);
-      b.classList.toggle('zero', v <= 0);
-      b.setAttribute('aria-label', `${k === 'lights' ? 'Traffic light' : 'Roundabout'}, ${v} left`);
     }
 
     if (g.speed !== L.speed) {
       L.speed = g.speed;
       for (const b of this.speedBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === g.speed));
       this.q('.status').classList.toggle('paused', g.speed === 0);
-      L.week = undefined; // relabel Week / Paused below
+      L.clock = undefined; // relabel the clock / Paused below
     }
 
     const toolChanged = g.tool !== L.tool;
@@ -466,9 +876,54 @@ export class HUD {
       L.tool = g.tool;
       for (const b of this.toolBtns) b.setAttribute('aria-pressed', String(b.dataset.tool === g.tool));
       document.body.dataset.tool = g.tool;
-      // same feedback for click and keys 2/3
-      if (g.tool === 'light' && inv.lights <= 0) this.toast('No traffic lights left');
-      if (g.tool === 'roundabout' && inv.roundabouts <= 0) this.toast('No roundabouts left');
+    }
+
+    // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
+    const pop = Math.round(g.population), next = levelPop(g.cityLevel + 1), prev = levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
+    if (pk !== L.pop) {
+      L.pop = pk;
+      this.q('.pv').textContent = pop.toLocaleString('en-US');
+      this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
+      this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
+      this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Happy homes fill up; unhappy ones empty out.`;
+    }
+    if (g.cityLevel !== L.city) {
+      const up = L.city !== undefined;
+      L.city = g.cityLevel;
+      this.q('.lvn').textContent = String(g.cityLevel);
+      const soon = [g.cityLevel + 1, g.cityLevel + 2].map(n => [n, levelUnlocks(n)] as const).filter(([, u]) => u.length);
+      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : ''}.`
+        + (g.creative ? '' : soon.map(([n, u]) => ` Level ${n}: ${u.join(', ')}.`).join(''));
+      for (const b of this.toolBtns) {
+        const f = TOOL_LOCK[b.dataset.tool as Tool], lock = f ? g.lockOf(f) : '';
+        b.setAttribute('aria-disabled', String(!!lock));
+        const tip = TOOLS[b.dataset.tool as Tool].tip;
+        b.dataset.tip = lock ? `${lock}. ${tip}` : tip;
+      }
+      L.pick = undefined;
+      L.level = undefined;
+      if (up) flash(this.q('.lvl'), 'bump');
+    }
+
+    // Tray: one card per zone with buildings left; the dock badge counts them all
+    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}`;
+    if (yk !== L.tray) {
+      const before = L.trayN;
+      L.tray = yk;
+      let total = 0;
+      this.root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => {
+        const z = b.dataset.zone as Zone, n = g.tray[z];
+        total += n;
+        b.hidden = n < 1;
+        b.setAttribute('aria-pressed', String(g.placing === z));
+        (b.querySelector('.zn') as HTMLElement).textContent = `×${count(n)}`;
+      });
+      this.q('.tray').hidden = total < 1;
+      const badge = this.q('.badge');
+      badge.hidden = total < 1;
+      badge.textContent = count(total);
+      L.trayN = total;
+      if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
     }
 
     if (toolChanged || g.level !== L.level) {
@@ -481,9 +936,11 @@ export class HUD {
       st.classList.toggle('off', off);
       st.dataset.tip = off ? 'Elevation applies to the Road tool' : ROAD_TIP;
       this.q<HTMLButtonElement>('[data-action="level-down"]').disabled = off || lv <= 0;
+      // ponytail: a locked next level stays clickable so Game toasts 'Unlocks at level N'
+      this.q('[data-action="level-up"]').setAttribute('aria-disabled', String(!!g.lockOf(lv + 1 >= 6 ? 'high' : 'viaduct')));
       this.q<HTMLButtonElement>('[data-action="level-up"]').disabled = off || lv >= 10;
       this.q('.lv').textContent = lv === 0 ? 'Ground' : `L${lv}`;
-      this.q('.eh').textContent = lv === 0 ? 'Ground · tunnels through mountains' : lv < 6 ? 'Viaduct · 1 bridge' : 'Viaduct · clears mountains';
+      this.q('.eh').textContent = lv === 0 ? 'Ground · tunnels through mountains' : lv < 6 ? `Viaduct · price ×${(T.VIADUCT_X + T.VIADUCT_LEVEL_X * lv).toFixed(1)}` : 'Viaduct · clears mountains';
       const y = String(lv === 0 ? 22 : 20 - lv * 1.6);
       const deck = st.querySelector('.deck')!;
       deck.setAttribute('y1', y);
@@ -496,37 +953,83 @@ export class HUD {
     }
 
     this.updatePicker();
+    this.updateJunction();
+    this.updateIchg();
+    this.updateViews();
+    this.updateCar();
+    this.updateBuilding();
+    this.updateFeed();
+    this.updateMetrics();
+    const gk = `${g.tool}|${g.gridSize}`;
+    if (gk !== L.gsz) {
+      L.gsz = gk;
+      // the grid is built on the ground: its block size takes the elevation stepper's place
+      this.q('.gsz').hidden = g.tool !== 'grid';
+      this.q('.stepper').hidden = g.tool === 'grid';
+      this.root.querySelectorAll<HTMLElement>('[data-grid]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.grid) === g.gridSize)));
+    }
 
-    if (g.score !== L.score) {
-      const up = L.score !== undefined && g.score > L.score;
-      L.score = g.score;
+    // Trips today: arrivals and their smooth share
+    const td = g.stats.today, arrived = td.smooth + td.wait + td.detour, tk = `${g.stats.arrived}|${g.stats.failed}|${g.day}`;
+    if (tk !== L.trips) {
+      const up = L.arrived !== undefined && g.stats.arrived > L.arrived;
+      L.trips = tk;
+      L.arrived = g.stats.arrived;
       const s = this.q('.score');
-      s.textContent = String(g.score);
+      s.textContent = String(arrived);
+      this.q('.smooth').textContent = arrived ? ` · ${Math.round(100 * td.smooth / arrived)}% smooth` : '';
+      this.q('.trips').dataset.tip = `Trips today: ${arrived} arrived (${td.smooth} smooth, ${td.wait} long waits, ${td.detour} detours), `
+        + `${td.gaveup} gave up, ${td.noroute} found no road. All time: ${g.stats.arrived} arrived.`;
       if (up) flash(s, 'bump');
     }
 
-    if (g.week !== L.week || g.day !== L.day) {
-      L.week = g.week;
-      L.day = g.day;
-      L.dayFrac = undefined;
-      this.q('.wk').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Week </span><span class="short">W</span>${g.week}`;
-      this.dots.forEach((d, i) => { d.className = i + 1 < g.day ? 'past' : i + 1 === g.day ? 'now' : ''; });
-      this.q('.week').dataset.tip = `Week ${g.week}, day ${g.day} of 7. At the end of the week you choose a reward.`;
-    }
-    const frac = Math.round(((g.time % DAY_SECONDS) / DAY_SECONDS) * 20) / 20;
-    if (frac !== L.dayFrac) {
-      L.dayFrac = frac;
-      this.dots[g.day - 1]?.style.setProperty('--p', String(frac));
+    // Clock in 10-minute steps: Day 4 · 08:20, past hours filled, the current one filling up
+    const tick = Math.floor(g.clock * 6);
+    if (tick !== L.clock) {
+      L.clock = tick;
+      const h = Math.floor(g.hour), m = Math.floor((g.hour - h) * 6) * 10, time = `${pad(h)}:${pad(m)}`;
+      this.q('.ck').innerHTML = g.speed === 0 ? 'Paused' : `<span class="long">Day </span><span class="short">D</span>${g.day} · ${time}`;
+      this.cells.forEach((c, i) => { c.classList.toggle('past', i < h); c.classList.toggle('now', i === h); });
+      this.cells[h].style.setProperty('--p', String(m / 60));
+      this.q('.clock').dataset.tip = `Day ${g.day}, ${time}. Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift;`
+        + ' shoppers go out from mid-morning to the evening. Taxes and upkeep are paid by the hour.';
     }
 
-    let danger = 0;
-    for (const c of g.cities) danger = Math.max(danger, c.overcrowd);
-    const pct = Math.ceil(danger * 20) * 5; // ceil: any overcrowd > 0 shows the chip
-    if (pct !== L.danger) {
-      L.danger = pct;
+    // City happiness: smile 60+, neutral 30-60, frown under 30 (shape and colour), the weighted parts in the tooltip
+    const hp = Math.round(g.happiness), cp = g.cityParts, pc = (x: number) => `${Math.round(100 * x)}%`;
+    const hk = `${hp}|${Object.values(cp).map(pc).join()}`;
+    if (hk !== L.happy) {
+      L.happy = hk;
+      const c = this.q('.happy'), face = hp >= T.GROW_HI ? 'smile' : hp >= T.GROW_LO ? 'neutral' : 'frown';
+      c.querySelector('.ico')!.outerHTML = icon(face);
+      c.classList.toggle('good', face === 'smile');
+      c.classList.toggle('bad', face === 'frown');
+      this.q('.hv').textContent = `${hp}%`;
+      c.dataset.tip = `City happiness ${hp}%, averaged over a day. Jobs ${pc(cp.job)}, shops ${pc(cp.shop)}, trips ${pc(cp.trips)},`
+        + ` pollution ${pc(cp.pollution)}, noise ${pc(cp.noise)}. Happy homes fill up and pay more taxes; under ${T.GROW_LO}% people move out.`
+        + (g.creative ? '' : ` Under ${DIFFICULTY[g.cfg.difficulty].failHappy}% for ${T.FAIL_DAYS} midnights in a row from day ${T.FAIL_FROM_DAY}, the residents leave.`);
+    }
+
+    // Career fail countdown: Debt: 2 days to bankruptcy / Unhappy: 1 day left
+    const a = g.alarm, ak = a ? `${a.kind}|${a.days}` : '';
+    if (ak !== L.alarm) {
+      L.alarm = ak;
+      const c = this.q('.alarm'), s = a && a.days > 1 ? 's' : '';
+      c.hidden = !a;
+      if (a) {
+        this.q('.atxt').textContent = a.kind === 'bankrupt' ? `Debt: ${a.days} day${s} to bankruptcy` : `Unhappy: ${a.days} day${s} left`;
+        c.dataset.tip = a.kind === 'bankrupt'
+          ? 'Below $0 at midnight counts toward bankruptcy. Earn more (grow the city, get trips through) or demolish roads you do not need.'
+          : 'Happiness is too low. Give homes jobs and shops they can reach, smooth trips, and keep factories and loud roads away from them.';
+      }
+    }
+
+    const off = g.buildings.reduce((n, b) => n + +!b.connected, 0);
+    if (off !== L.danger) {
+      L.danger = off;
       const chip = this.q('.danger');
-      chip.hidden = pct === 0;
-      (chip.querySelector('.pct') as HTMLElement).textContent = `${pct}%`;
+      chip.hidden = off === 0;
+      (chip.querySelector('.cnt') as HTMLElement).textContent = `${off} building${off > 1 ? 's' : ''}`;
     }
 
     // ponytail: change detection on the text, so an identical message repeated before it clears is not re-toasted
@@ -535,9 +1038,9 @@ export class HUD {
       if (g.message) this.toast(g.message);
     }
 
-    if (g.pendingReward !== L.reward || g.gameOver !== L.over) {
-      L.reward = g.pendingReward;
-      L.over = g.gameOver;
+    const mk = `${g.gameOver}|${g.pendingLevel}`;
+    if (mk !== L.modal) {
+      L.modal = mk;
       this.renderModal();
     }
   }

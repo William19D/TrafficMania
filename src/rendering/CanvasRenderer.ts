@@ -1,12 +1,15 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
+import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
-import { ROAD_W, NODE_R, CAR_W, TILE, LANE_W, lightGroup, roadWidth, laneFactor } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, CAR_W, LANE_W, roadWidth } from '../network/RoadGraph.ts';
+import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
-import { CITY_R } from '../entities/City.ts';
+import type { Building } from '../entities/Building.ts';
+import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
+import { CONTROL_LABEL, fmtMoney } from '../core/Game.ts';
 
-const LAND = '#ECEAE4';
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
 const YELLOW = '#E6C84B';
@@ -21,15 +24,24 @@ const ACCENT = '#2F6FED';
 const BRAKE_ON = '#FF2A2A';
 const BRAKE_OFF = '#8C2A2A';
 const AMBER = '#FFB020';
-
-// Fixed house offsets around a city square (above and to the sides, away from the label below)
-const HOUSES: [number, number][] = [
-  [-34, -18], [-30, 2], [30, -22], [34, -2], [-14, -36], [14, -38], [-36, 18], [36, 16],
-];
+const NOISE = '#8E7CC3';
+const SMOG = '#9A6B2F';
+// Heat map: free flow -> slow -> jammed
+const HEAT: [number, number, number][] = [[0x4C, 0xC2, 0x6A], [0xE0, 0xA1, 0x00], [0xE5, 0x48, 0x4D]];
+export const heatColor = (h: number): string => {
+  const x = 2 * Math.max(0, Math.min(1, h)), i = Math.min(1, Math.floor(x)), f = x - i, a = HEAT[i], b = HEAT[i + 1];
+  return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join()})`;
+};
+// Home happiness dot under an overlay: the happiness chip's bands
+const happyColor = (h: number): string => h >= TUNING.GROW_HI ? GREEN : h >= TUNING.GROW_LO ? AMBER : RED;
 
 export class CanvasRenderer {
   cam: { x: number; y: number; zoom: number };
   private ctx: CanvasRenderingContext2D;
+  // Land colour of the current biome, for the roundabout islands
+  private land = BIOMES.temperate.land;
+  // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
+  private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -42,6 +54,13 @@ export class CanvasRenderer {
     };
     this.resize();
     addEventListener('resize', () => this.resize());
+  }
+
+  // A new game (its map may have another size): the whole map in view
+  reset(): void {
+    this.cam = { x: WORLD.w / 2, y: WORLD.h / 2, zoom: Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * 0.95 };
+    this.route = { car: null, nodes: [] };
+    this.clamp();
   }
 
   resize(): void {
@@ -61,6 +80,8 @@ export class CanvasRenderer {
   // Keeps the zoom in range and the world on screen (at most MARGIN of empty land past its border)
   private clamp(): void {
     const MARGIN = 120;
+    // a page loaded hidden has a 0x0 viewport: Infinity - Infinity would turn the camera into NaN for good
+    if (!innerWidth || !innerHeight) return;
     this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom));
     const hw = innerWidth / 2 / this.cam.zoom, hh = innerHeight / 2 / this.cam.zoom;
     const axis = (v: number, size: number, half: number): number =>
@@ -105,11 +126,24 @@ export class CanvasRenderer {
   render(game: Game, preview: PathPlan | null, anchor: Vec | null, handle: Vec | null, hover: Vec | null = null): void {
     const ctx = this.ctx;
     const dpr = devicePixelRatio || 1;
+    // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
+    if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
+    // Follow camera: centred on the car, zoomed in to at least 1.2 when the follow starts
+    const fc = game.follow;
+    if (fc) {
+      const p = game.graph.carPos(fc);
+      if (this.route.car !== fc) { this.route = { car: fc, nodes: [] }; this.cam.zoom = Math.max(this.cam.zoom, 1.2); }
+      this.cam.x = p.x;
+      this.cam.y = p.y;
+      this.clamp();
+    }
     const z = this.cam.zoom;
 
     // Background: flat land (in screen coordinates)
+    const biome = BIOMES[game.terrain.biome];
+    this.land = biome.land;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = LAND;
+    ctx.fillStyle = biome.land;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (innerWidth / 2 - this.cam.x * z), dpr * (innerHeight / 2 - this.cam.y * z));
@@ -127,7 +161,7 @@ export class CanvasRenderer {
 
     // Ground patches: soft, no outline
     for (const p of terrain.patches) {
-      const col = p.kind === 'sand' ? '#E6DCC0' : '#D7E3B5';
+      const col = biome.patch[p.kind === 'sand' ? 0 : 1];
       this.polyline(p.poly, true);
       ctx.fillStyle = col;
       ctx.fill();
@@ -157,7 +191,7 @@ export class CanvasRenderer {
       ctx.fillStyle = 'rgba(0,0,0,.10)';
       ctx.fill();
       ctx.restore();
-      for (const [s, col] of [[1, '#8C8C88'], [0.78, '#6E6E6A'], [0.5, '#5B5B58']] as const) {
+      for (const [s, col] of [[1, biome.bands[0]], [0.78, biome.bands[1]], [0.5, biome.bands[2]]] as const) {
         this.mountainPoly(m, s);
         ctx.fillStyle = col;
         ctx.fill();
@@ -182,17 +216,19 @@ export class CanvasRenderer {
     terrain.trees.forEach((t, i) => {
       const r = 4 + (i % 3) * 0.5;
       this.circle(t.x + 1, t.y + 1, r, 'rgba(0,0,0,.08)');
-      this.circle(t.x, t.y, r, '#7FAE5A');
-      ctx.strokeStyle = '#5E8A42';
+      this.circle(t.x, t.y, r, biome.tree);
+      ctx.strokeStyle = biome.treeOut;
       ctx.lineWidth = 1;
       ctx.stroke();
     });
 
+    if (game.overlay === 'noise') this.noiseMap(game);
+
     const edges = game.graph.edges;
     const nodes = game.graph.nodes;
     const ground = edges.filter((e) => !e.tunnel && e.level === 0);
-    // A non-city node belongs to the level of its edges (only cities mix levels)
-    const levelNodes = (L: number): Node[] => nodes.filter((n) => !n.city && (n.edges[0]?.level ?? 0) === L);
+    // A node belongs to the level of its edges; a ramp joint to the upper one (doors are ground)
+    const levelNodes = (L: number): Node[] => nodes.filter((n) => (n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level))) === L);
     const carsAt = (L: number): void => {
       for (const car of game.cars) if (car.lane.edge.level === L) this.car(game, car);
     };
@@ -224,22 +260,27 @@ export class CanvasRenderer {
     for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain, e.width);
 
     // A single white ribbon: full outline pass, then fill pass
-    const joints = nodes.filter((n) => !n.city && n.edges.some((e) => !e.tunnel && e.level === 0));
-    const pass = (color: string, extra: number): void => {
+    const joints = nodes.filter((n) => n.edges.some((e) => !e.tunnel && e.level === 0));
+    // Colours per tier; a joint takes the tier of its widest road
+    const pass = (key: 'out' | 'fill', extra: number): void => {
       // Bridges keep their blue deck as the outline
-      for (const e of ground) if (!(extra && e.bridge)) this.line(e, color, e.width + extra);
+      for (const e of ground) if (!(extra && e.bridge)) this.line(e, TIERS[e.type.tier][key], e.width + extra);
       for (const n of joints) {
+        const j = jointEdge(n, 0), color = TIERS[j?.type.tier ?? 'street'][key];
         if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, (jointW(n, 0) + extra) / 2, color);
+        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, color);
       }
     };
-    pass(ROAD_OUT, 3);
-    pass(ROAD_FILL, 0);
+    pass('out', 3);
+    pass('fill', 0);
 
-    // Lane markings: yellow centre line, lane separators, one-way chevrons
-    for (const e of ground) this.markings(e.a, e.b, e.type);
+    // Lane markings: centre line / median, lane separators, shoulders, one-way chevrons; driveways stay plain
+    for (const e of ground) if (!e.drive) this.markings(e.a, e.b, e.type);
+    if (game.overlay === 'heat') this.heatMap(ground, levelNodes(0));
 
     this.controls(levelNodes(0));
+    // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
+    for (const b of game.buildings) this.building(b, game.time);
     carsAt(0);
 
     // Elevated layers, lowest first: each covers the roads and cars below it
@@ -250,67 +291,32 @@ export class CanvasRenderer {
       const nodesL = levelNodes(L);
       halo(L);
       this.viaduct(L, layer, nodesL);
+      if (game.overlay === 'heat') this.heatMap(layer, nodesL);
       this.controls(nodesL);
       carsAt(L);
     }
 
-    // Cities: small houses, then the flat rounded block
-    game.cities.forEach((c, ci) => {
-      const n = 3 + (ci % 3);
-      for (let k = 0; k < n; k++) {
-        const [ox, oy] = HOUSES[(ci * 3 + k) % HOUSES.length];
-        ctx.beginPath();
-        ctx.roundRect(c.x + ox - 5, c.y + oy - 4, 10, 8, 2);
-        ctx.fillStyle = lighten(c.color, 0.45);
-        ctx.fill();
-        ctx.strokeStyle = darken(c.color, 0.25);
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-    });
-    for (const c of game.cities) {
-      const R = CITY_R;
-      ctx.beginPath();
-      ctx.roundRect(c.x - R + 4, c.y - R + 5, 2 * R, 2 * R, 7);
-      ctx.fillStyle = 'rgba(0,0,0,.12)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.roundRect(c.x - R, c.y - R, 2 * R, 2 * R, 7);
-      ctx.fillStyle = c.color;
-      ctx.fill();
-      ctx.strokeStyle = darken(c.color, 0.25);
-      ctx.lineWidth = 2;
+    // Junction open in the Edit panel
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
+    if (game.picked) this.outlineB(game.picked, ACCENT, 6);
+
+    // Followed car: its route ahead as a dashed accent line, and a ring around it
+    if (fc) {
+      if (fc.path) this.route.nodes = fc.path;
+      const p = game.graph.carPos(fc);
+      ctx.globalAlpha = 0.8;
+      ctx.setLineDash([6, 5]);
+      this.polyline([p, ...this.route.nodes]);
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 3;
       ctx.stroke();
-      ctx.beginPath();
-      ctx.roundRect(c.x - R + 5, c.y - R + 5, R - 7, R - 7, 3);
-      ctx.fillStyle = 'rgba(255,255,255,.22)';
-      ctx.fill();
-
-      // Pending trips: small squares in the destination color
-      c.pending.forEach((d, i) => {
-        const a = -Math.PI / 2 + (i * Math.PI) / 6;
-        const px = c.x + Math.cos(a) * (R + 12);
-        const py = c.y + Math.sin(a) * (R + 12);
-        ctx.beginPath();
-        ctx.roundRect(px - 3.5, py - 3.5, 7, 7, 2);
-        ctx.fillStyle = d.color;
-        ctx.fill();
-        ctx.strokeStyle = CAR_OUT;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      });
-
-      if (c.overcrowd > 0) {
-        ctx.beginPath();
-        ctx.arc(c.x, c.y, R + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * c.overcrowd);
-        ctx.strokeStyle = RED;
-        ctx.lineWidth = 4;
-        ctx.stroke();
-      }
+      ctx.setLineDash([]);
+      this.ring(p.x, p.y, 14, ACCENT, 2.5);
+      ctx.globalAlpha = 1;
     }
 
     // Tutorial targets: pulsing accent ring + static outer ring
-    if (game.tutorialActive && game.tutorialTargets.length) {
+    if (game.tutorialTargets.length) {
       const r = 30 + 4 * Math.sin(performance.now() / 250);
       for (const t of game.tutorialTargets) {
         ctx.globalAlpha = 0.9;
@@ -321,49 +327,50 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
     }
 
-    // Build preview: polyline of segments
+    // Build preview: polyline of segments (a grid or an interchange mixes road types, so each segment draws its own)
     if (preview && preview.segs.length) {
       const segs = preview.segs;
-      const W = roadWidth(preview.type);
+      const W = (g: PathSeg): number => roadWidth(g.type), look = (g: PathSeg) => TIERS[g.type.tier];
       const draw = (g: PathSeg, color: string, width: number): void => this.seg(g.a, g.b, color, width);
       // Colored dashed outline: wider so it peeks out behind the gray outline
       ctx.setLineDash([8, 6]);
-      for (const g of segs) draw(g, preview.ok ? GREEN : RED, W + 7);
+      for (const g of segs) draw(g, preview.ok ? GREEN : RED, W(g) + 7);
       ctx.setLineDash([]);
       ctx.globalAlpha = 0.85;
       for (const g of segs) {
         if (g.tunnel) {
           ctx.setLineDash([6, 6]);
-          draw(g, ROAD_OUT, W + 3);
+          draw(g, look(g).out, W(g) + 3);
           ctx.setLineDash([]);
         } else if (g.level >= 1) {
-          draw(g, BRIDGE, W + 5);
+          draw(g, BRIDGE, W(g) + 5);
         } else if (g.bridge) {
-          this.bridge(g.a, g.b, terrain, W);
+          this.bridge(g.a, g.b, terrain, W(g));
         } else {
-          draw(g, ROAD_OUT, W + 3);
+          draw(g, look(g).out, W(g) + 3);
         }
       }
       for (const g of segs) {
         if (g.tunnel) ctx.setLineDash([6, 6]);
-        draw(g, ROAD_FILL, W);
+        draw(g, look(g).fill, W(g));
         ctx.setLineDash([]);
       }
-      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W);
-      for (const g of segs) if (!g.tunnel) this.markings(g.a, g.b, preview.type);
+      for (const g of segs) if (g.level >= 1) this.rails(g.a, g.b, W(g));
+      for (const g of segs) if (!g.tunnel) this.markings(g.a, g.b, g.type);
       ctx.globalAlpha = 1;
 
       let label = preview.reason;
       if (preview.ok && preview.net !== undefined) {
-        // Bend: price of the new curve minus the refund of the old run
-        const n = preview.net;
-        label = n > 0 ? `${n} asphalt` : n < 0 ? `+${-n} asphalt back` : 'free';
+        // Bend: price of the new curve minus the old run's price
+        const n = Math.round(preview.net);
+        label = n > 0 ? fmtMoney(n) : n < 0 ? `+${fmtMoney(-n)} back` : 'free';
       } else if (preview.ok) {
-        label = `${preview.cost.asphalt} asphalt`;
-        if (preview.cost.bridges) label += ` +${preview.cost.bridges} bridge${preview.cost.bridges > 1 ? 's' : ''}`;
-        if (preview.cost.tunnels) label += ` +${preview.cost.tunnels} tunnel${preview.cost.tunnels > 1 ? 's' : ''}`;
+        label = fmtMoney(preview.cost);
       }
-      if (label && preview.level > 0) label += ' · L' + preview.level;
+      // levels: one (a viaduct) or a span (a ramp)
+      const lo = Math.min(...segs.map(g => g.level)), hi = Math.max(...segs.map(g => g.level));
+      if (label && hi > 0) label += lo === hi ? ` · L${hi}` : ` · L${lo}-L${hi}`;
+      if (label && preview.note) label = `${preview.note} · ${label}`;
       const last = preview.points[preview.points.length - 1] ?? segs[segs.length - 1].b;
       if (handle) {
         // Bend handle with dashed guides from the anchor (or the bent run's start) and to the end point
@@ -390,71 +397,124 @@ export class CanvasRenderer {
       ctx.stroke();
     }
 
-    if (hover && !preview) this.hoverFx(game, hover);
+    if (hover && (!preview || game.tool === 'interchange')) this.hoverFx(game, hover, preview);
 
-    // City labels
+    // No road access: red badge on the roof, and a label while the cursor is over the building
     ctx.textAlign = 'center';
-    for (const c of game.cities) {
-      ctx.textBaseline = 'top';
-      this.text(c.name, c.x, c.y + CITY_R + 20, 'bold 13px system-ui', DARK);
-      if (c.overcrowd > 0) {
-        ctx.textBaseline = 'bottom';
-        this.text('Overcrowded!', c.x, c.y - CITY_R - 20, 'bold 12px system-ui', RED);
+    ctx.textBaseline = 'middle';
+    for (const b of game.buildings) {
+      const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
+      if (b.connected) {
+        // homes: a red dot while households are moving out (every home's happiness under an overlay), residents and happiness under the cursor
+        if (b.kind !== 'home') continue;
+        if (b.happy < TUNING.GROW_LO || game.overlay !== 'none') { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, happyColor(b.happy)); }
+        if (over) this.text(b.residents < 1 ? `Abandoned · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${ZONES.home.residents} residents · ${Math.round(b.happy)}% happy`,
+          b.x, top, 'bold 11px system-ui', b.happy < TUNING.GROW_LO ? RED : DARK);
+        continue;
       }
+      this.circle(b.x, b.y, 6, RED);
+      ctx.font = 'bold 9px system-ui';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText('!', b.x, b.y + 0.5);
+      if (over) this.text('No road access', b.x, top, 'bold 11px system-ui', RED);
     }
 
     this.offscreenMarkers(game, dpr);
   }
 
-  // Screen-edge markers for overcrowded cities outside the view: arrow in the city colour, red progress ring, name
+  // Screen-edge markers for buildings without a road outside the view: zone-coloured square, red arrow toward it
   private offscreenMarkers(game: Game, dpr: number): void {
     const ctx = this.ctx;
     // ponytail: fixed insets for the HUD bars (top chips, bottom dock); measure the DOM if the layout changes
-    const T = 70, B = 110, X = 24, R = 16;
+    const T = 70, B = 110, X = 24, R = 12;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    for (const c of game.cities) {
-      if (c.overcrowd <= 0) continue;
-      const s = this.worldToScreen(c);
+    for (const b of game.buildings) {
+      if (b.connected) continue;
+      const s = this.worldToScreen(b);
       if (s.x > X && s.x < innerWidth - X && s.y > T && s.y < innerHeight - B) continue;
       const x = Math.max(X + R, Math.min(innerWidth - X - R, s.x));
       const y = Math.max(T + R, Math.min(innerHeight - B - R, s.y));
-      const a = Math.atan2(s.y - y, s.x - x);
+      const z = ZONES[b.kind];
       ctx.save();
       ctx.translate(x, y);
-      // pulsing red ring = overcrowding progress
-      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(performance.now() / 150);
       this.circle(0, 0, R + 1, '#FFFFFF');
+      this.ring(0, 0, R + 1, RED, 2);
       ctx.beginPath();
-      ctx.arc(0, 0, R + 1, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * c.overcrowd);
-      ctx.strokeStyle = RED;
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      ctx.beginPath();
-      ctx.roundRect(-8, -8, 16, 16, 4);
-      ctx.fillStyle = c.color;
+      ctx.roundRect(-6, -6, 12, 12, 3);
+      ctx.fillStyle = z.fill;
       ctx.fill();
-      ctx.strokeStyle = darken(c.color, 0.25);
+      ctx.strokeStyle = z.out;
       ctx.lineWidth = 1.5;
       ctx.stroke();
-      // arrow head pointing at the city
-      ctx.rotate(a);
+      ctx.rotate(Math.atan2(s.y - y, s.x - x));
       ctx.beginPath();
-      ctx.moveTo(R + 12, 0);
-      ctx.lineTo(R + 3, -6);
-      ctx.lineTo(R + 3, 6);
+      ctx.moveTo(R + 10, 0);
+      ctx.lineTo(R + 3, -5);
+      ctx.lineTo(R + 3, 5);
       ctx.closePath();
       ctx.fillStyle = RED;
       ctx.fill();
       ctx.restore();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = y > innerHeight / 2 ? 'bottom' : 'top';
-      this.text(c.name, x, y > innerHeight / 2 ? y - R - 4 : y + R + 4, 'bold 11px system-ui', RED);
     }
   }
 
+  // Flat rounded footprint with a soft shadow, a roof inset and a zone detail (home ridge, shop awning, office windows,
+  // factory sawtooth and chimney); a white door notch on the front. Pending trips are dots on the roof in their purpose colour;
+  // a building without a road gets a dashed red outline.
+  private building(b: Building, time: number): void {
+    const ctx = this.ctx, z = ZONES[b.kind], h = b.h / 2, w = b.w / 2;
+    const rect = (x: number, y: number, rw: number, rh: number, r: number, fill: string | null, out: string | null = null, lw = 1) => {
+      ctx.beginPath();
+      ctx.roundRect(x, y, rw, rh, r);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (out) { ctx.strokeStyle = out; ctx.lineWidth = lw; ctx.stroke(); }
+    };
+    // local frame: +x toward the door (depth h), y across the front (width w)
+    const frame = (dx: number, dy: number) => { ctx.save(); ctx.translate(b.x + dx, b.y + dy); ctx.rotate(b.angle); };
+    frame(3, 4);
+    rect(-h, -w, 2 * h, 2 * w, 4, 'rgba(0,0,0,.12)');
+    ctx.restore();
+    frame(0, 0);
+    // an empty home (everyone moved out) fades
+    if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = 0.45;
+    rect(-h, -w, 2 * h, 2 * w, 4, z.fill, z.out, 1.5);
+    rect(-h + 3, -w + 3, 2 * h - 6, 2 * w - 6, 2.5, z.roof);
+    ctx.strokeStyle = z.out;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (b.kind === 'home') {
+      ctx.moveTo(-1, -w + 3); ctx.lineTo(-1, w - 3);
+    } else if (b.kind === 'industry') {
+      for (let y = -w + 10; y < w - 4; y += 9) { ctx.moveTo(-h + 5, y); ctx.lineTo(h - 5, y + 4); }
+    }
+    ctx.stroke();
+    if (b.kind === 'shop') for (let y = -w + 1; y < w - 1; y += 6) rect(h - 6, y, 5, 3, 0, '#FFFFFF');
+    if (b.kind === 'office') for (let x = -h + 7; x < h - 5; x += 7) for (let y = -w + 7; y < w - 5; y += 7) rect(x, y, 3, 3, 0.5, z.out);
+    if (b.kind === 'industry') {
+      // smoke drifts off the chimney only while the factory has workers
+      if (b.staffed > 0) for (let i = 0; i < 3; i++) {
+        const t = (time * 0.4 + i / 3) % 1;
+        ctx.globalAlpha = 0.5 * (1 - t);
+        this.circle(-h + 8 - t * 14, -w + 8 - t * 6, 3 + t * 4, '#D6D6D2');
+      }
+      ctx.globalAlpha = 1;
+      this.circle(-h + 8, -w + 8, 4.5, '#8A8A86');
+      ctx.strokeStyle = '#5E5E5A';
+      ctx.stroke();
+    }
+    rect(h - 2, -3.5, 4, 7, 1, '#FFFFFF', z.out);
+    b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => rect(-h + 4, -w + 4 + i * 6, 4, 4, 1, PURPOSES[t.purpose].color, CAR_OUT, 0.75));
+    // a ghost (place tool) has no door node yet
+    if (b.node && !b.connected) {
+      ctx.setLineDash([4, 3]);
+      rect(-h - 3, -w - 3, 2 * h + 6, 2 * w + 6, 6, null, RED, 1.5);
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
-  private hoverFx(game: Game, p: Vec): void {
+  private hoverFx(game: Game, p: Vec, preview: PathPlan | null): void {
     const ctx = this.ctx, g = game.graph;
     const label = (s: string, x: number, y: number, color: string) => {
       ctx.textAlign = 'left';
@@ -465,7 +525,7 @@ export class CanvasRenderer {
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
         this.ring(n.x, n.y, NODE_R + 6, RED, 3);
-        label(n.control === 'light' ? 'Remove light · +1 light' : 'Remove roundabout · +1 roundabout', n.x, n.y, RED);
+        label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
       const hit = g.nearestEdge(p, ROAD_W, game.level) ?? g.nearestEdge(p, ROAD_W);
@@ -475,28 +535,57 @@ export class CanvasRenderer {
       ctx.globalAlpha = 0.6;
       this.line(e, RED, e.width + 6);
       ctx.globalAlpha = 1;
-      this.line(e, ROAD_FILL, e.width);
-      // floor, matching the refund in Game.demolishAt
-      let s = `Demolish · +${Math.floor((e.length / TILE) * laneFactor(e.type))} asphalt`;
-      if (e.refund.bridges) s += ` +${e.refund.bridges} bridge`;
-      if (e.refund.tunnels) s += ` +${e.refund.tunnels} tunnel`;
-      label(s, hit.point.x, hit.point.y, RED);
+      this.line(e, TIERS[e.type.tier].fill, e.width);
+      label(`Demolish · +${fmtMoney(game.refundOf(e))}`, hit.point.x, hit.point.y, RED);
     } else if (game.tool === 'light' || game.tool === 'roundabout') {
       const n = g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
-      const stock = game.inventory[kind === 'light' ? 'lights' : 'roundabouts'];
-      const reason = n.city || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
-        : stock <= 0 && n.control !== kind ? `No ${kind === 'light' ? 'traffic lights' : 'roundabouts'} left` : null;
+      const cost = game.controlPrice(kind) - game.controlRefund(n);
+      const reason = n.building || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
+        : n.control !== kind && cost > game.money ? 'Not enough money' : null;
       this.ring(n.x, n.y, NODE_R + 6, reason ? RED : GREEN, 3);
-      label(reason ? '⚠ ' + reason : kind === 'light' ? 'Place traffic light' : 'Place roundabout', n.x, n.y, reason ? RED : '#2E8B4A');
+      const place = n.control === kind ? 'Already here' : `${kind === 'light' ? 'Place traffic light' : 'Place roundabout'} · ${fmtMoney(cost)}`;
+      label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
-      const n = g.nearestNode(p, NODE_R + 4, game.level);
-      const pt = n ?? g.nearestEdge(p, ROAD_W, game.level)?.point;
-      if (!pt) return;
-      this.ring(pt.x, pt.y, NODE_R, ROAD_OUT, 2);
-      label('Start here', pt.x, pt.y, DARK);
+      // a node or road of another level: the road ramps from there to the dock level
+      const s = game.snapEnd(p), L = game.levelAt(s);
+      if (!s.node && !s.edge) return;
+      this.ring(s.point.x, s.point.y, NODE_R, ROAD_OUT, 2);
+      label(L === game.level ? 'Start here' : `Ramp from ${L ? `L${L}` : 'the ground'}`, s.point.x, s.point.y, DARK);
+    } else if (game.tool === 'grid') {
+      label('Click the first corner', p.x, p.y, DARK);
+    } else if (game.tool === 'interchange') {
+      // the picked junction (or the one under the cursor); its reason when no ghost can be drawn
+      const n = game.ichg?.node ?? game.junctionAt(p);
+      if (!n) { label('Click a junction of 3 or 4 roads', p.x, p.y, DARK); return; }
+      this.ring(n.x, n.y, NODE_R + 26, preview?.ok ? GREEN : RED, 2);
+      if (!preview) label('⚠ Needs a junction of 3 or 4 roads', n.x, n.y, RED);
+      else if (!preview.segs.length) label('⚠ ' + preview.reason, n.x, n.y, RED);
+      else if (!game.ichg) label('Click to pick an interchange', n.x, n.y + 18, ACCENT);
+    } else if (game.tool === 'place') {
+      this.ghost(game, p);
     } else if (game.tool === 'edit') {
+      // same order as Game.select: car, junction, building, road
+      const c = game.carAt(p);
+      if (c) {
+        const q = g.carPos(c);
+        this.ring(q.x, q.y, 14, ACCENT, 2);
+        label('Click to follow this car', q.x, q.y, ACCENT);
+        return;
+      }
+      const j = game.junctionAt(p);
+      if (j) {
+        this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
+        label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
+        return;
+      }
+      const b = game.buildings.find(x => x.contains(p, 2));
+      if (b) {
+        this.outlineB(b, ACCENT, 4);
+        label(`${ZONES[b.kind].label}: click for details`, p.x, p.y, ACCENT);
+        return;
+      }
       const run = game.runAt(p);
       if (!run) return;
       ctx.globalAlpha = 0.25;
@@ -506,25 +595,133 @@ export class CanvasRenderer {
     }
   }
 
-  // Centre line (two-way), dashed separators between same-direction lanes, chevrons a->b (one-way)
+  // Rounded outline pad px around a building's footprint
+  private outlineB(b: Building, color: string, pad: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.beginPath();
+    ctx.roundRect(-b.h / 2 - pad, -b.w / 2 - pad, b.h + 2 * pad, b.w + 2 * pad, 4 + pad);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Heat map over one level: each road stroked green -> amber -> red by its heat; junctions with waiting cars get a disc sized and
+  // coloured by their delay (8 s and more = red)
+  private heatMap(edges: Edge[], nodes: Node[]): void {
+    const ctx = this.ctx;
+    ctx.globalAlpha = 0.75;
+    for (const e of edges) if (!e.tunnel) this.line(e, heatColor(e.heat), e.width + 4);
+    for (const n of nodes) {
+      if (n.delay < 0.5) continue;
+      this.circle(n.x, n.y, NODE_R * 0.6 + Math.min(18, 2 * n.delay), heatColor(n.delay / 8));
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Noise and pollution, under the roads: a purple band NOISE_R either side of each road by its tier's noise (one path per tier, so
+  // joints do not darken), and a brown haze fading out at POLLUTION_R round each factory while it has workers
+  private noiseMap(game: Game): void {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = NOISE;
+    for (const t of Object.keys(TIERS) as RoadType['tier'][]) {
+      const es = game.graph.edges.filter(e => e.type.tier === t && !e.drive && !e.tunnel);
+      if (!es.length) continue;
+      ctx.beginPath();
+      for (const e of es) { ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); }
+      ctx.globalAlpha = 0.25 * TIERS[t].noise;
+      for (const w of [2, 1]) { ctx.lineWidth = w * TUNING.NOISE_R; ctx.stroke(); }
+    }
+    ctx.globalAlpha = 1;
+    for (const b of game.buildings) {
+      if (b.kind !== 'industry' || b.staffed <= 0) continue;
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, TUNING.POLLUTION_R);
+      g.addColorStop(0, SMOG + Math.round(0x66 * b.staffed).toString(16).padStart(2, '0'));
+      g.addColorStop(1, SMOG + '00');
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, TUNING.POLLUTION_R, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+
+  // Place tool: the held building, faded, with a green / red footprint outline, its door, the driveway it would get, a dashed
+  // pollution ring for a factory, and a label: the reason it cannot go there, else what its residents will dislike, else its name
+  private ghost(game: Game, p: Vec): void {
+    const plan = game.planPlace(p);
+    if (!plan) return;
+    const ctx = this.ctx, b = plan.b, col = plan.ok ? GREEN : RED, door = b.door();
+    if (b.kind === 'industry') {
+      ctx.setLineDash([6, 6]);
+      ctx.globalAlpha = 0.6;
+      this.ring(b.x, b.y, TUNING.POLLUTION_R, ZONES.industry.out, 1.5);
+      ctx.setLineDash([]);
+    }
+    if (plan.road) {
+      ctx.setLineDash([3, 3]);
+      ctx.globalAlpha = 0.8;
+      this.seg(door, plan.road, ROAD_OUT, 2);
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 0.6;
+    this.building(b, game.time);
+    ctx.globalAlpha = 1;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.beginPath();
+    ctx.roundRect(-b.h / 2 - 2, -b.w / 2 - 2, b.h + 4, b.w + 4, 5);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+    this.circle(door.x, door.y, 3.5, '#FFFFFF');
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const y = b.y - Math.max(b.w, b.h) / 2 - 10;
+    if (!plan.ok) this.text(plan.reason, b.x, y, 'bold 12px system-ui', RED);
+    else if (plan.warn) this.text(plan.warn, b.x, y, 'bold 12px system-ui', '#A86A00');
+    else this.text(ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
+  }
+
+  // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between
+  // same-direction lanes, solid shoulder lines (highway), chevrons a->b (one-way)
   private markings(a: Vec, b: Vec, t: RoadType): void {
     const ctx = this.ctx;
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
-    if (!t.oneWay) this.seg(a, b, YELLOW, 1.2);
+    const tier = TIERS[t.tier], m = t.oneWay ? 0 : tier.median / 2;
+    const at = (o: number, f: (p: Vec, q: Vec) => void) => f({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o });
+    ctx.lineCap = 'butt';
+    if (!t.oneWay && tier.line === 'yellow') this.seg(a, b, YELLOW, 1.2);
+    else if (!t.oneWay && tier.line === 'median') this.seg(a, b, '#BFD8A0', tier.median - 2);
+    else if (!t.oneWay && tier.line === 'double') for (const o of [1.2, -1.2]) at(o, (p, q) => this.seg(p, q, '#A3A39F', 1));
+    if (tier.shoulder >= 3) {
+      const o = roadWidth(t) / 2 - tier.shoulder;
+      for (const s of [o, -o]) at(s, (p, q) => this.seg(p, q, '#C9C9C5', 1));
+    }
     const offs: number[] = [];
     for (let k = 1; k < t.lanes; k++) {
       if (t.oneWay) offs.push((k - t.lanes / 2) * LANE_W);
-      else offs.push(k * LANE_W, -k * LANE_W);
+      else offs.push(k * LANE_W + m, -k * LANE_W - m);
     }
     if (offs.length) {
       ctx.setLineDash([6, 6]);
-      ctx.lineCap = 'butt';
-      for (const o of offs) this.seg({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o }, '#C9C9C5', 1);
+      for (const o of offs) at(o, (p, q) => this.seg(p, q, '#C9C9C5', 1));
       ctx.setLineDash([]);
-      ctx.lineCap = 'round';
     }
+    ctx.lineCap = 'round';
     if (!t.oneWay) return;
     ctx.beginPath();
     for (let s = Math.min(20, len / 2); s < len; s += 40) {
@@ -616,7 +813,7 @@ export class CanvasRenderer {
     for (const n of nodes) {
       if (n.control === 'roundabout') {
         // Central island in the land color
-        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, LAND);
+        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, this.land);
         ctx.strokeStyle = ROAD_OUT;
         ctx.lineWidth = 1.5;
         ctx.stroke();
@@ -639,6 +836,8 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
       ctx.lineCap = 'round';
       if (n.control === 'light') this.drawLights(n);
+      else if (n.control === 'yield' || n.control === 'stop') this.drawSigns(n);
+      if (n.plan) this.drawBans(n);
     }
   }
 
@@ -674,18 +873,20 @@ export class CanvasRenderer {
       }
     }
 
-    const joint = (color: string, extra: number): void => {
+    // color null: the tier fill of the joint's widest road
+    const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, (jointW(n, level) + extra) / 2, color);
+        const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
+        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, c, ROAD_W + extra);
+        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
     for (const e of edges) this.line(e, BRIDGE, e.width + 5);
     joint(BRIDGE, 5);
-    for (const e of edges) this.line(e, ROAD_FILL, e.width);
+    for (const e of edges) this.line(e, TIERS[e.type.tier].fill, e.width);
     for (const e of edges) this.rails(e.a, e.b, e.width);
-    // White joints after the railings keep junctions open
-    joint(ROAD_FILL, 0);
+    // Joints after the railings keep junctions open
+    joint(null, 0);
     for (const e of edges) this.markings(e.a, e.b, e.type);
   }
 
@@ -717,7 +918,7 @@ export class CanvasRenderer {
     };
     const glass = 'rgba(255,255,255,.6)';
     if (k === 'truck') {
-      // Cargo box in the destination colour, darker cab in front
+      // Cargo box in the purpose colour, darker cab in front
       body(-h, L - 7, car.color);
       body(h - 6, 6, darken(car.color, 0.3));
       ctx.fillStyle = glass;
@@ -735,7 +936,7 @@ export class CanvasRenderer {
       ctx.fillRect(h - 4.5, y + 1, 2.5, w - 2);
       if (k === 'bus') for (let x = -h + 2; x < h - 7; x += 4) { ctx.fillRect(x, y + 0.5, 2.5, 1.5); ctx.fillRect(x, -y - 2, 2.5, 1.5); }
       if (k === 'ambulance') {
-        // Destination stripe and a light bar flashing red / blue
+        // Purpose stripe and a light bar flashing red / blue
         ctx.fillStyle = car.color;
         ctx.fillRect(-h + 1, -1.5, L - 7, 3);
         const on = (game.time * 4 | 0) % 2;
@@ -824,37 +1025,67 @@ export class CanvasRenderer {
     ctx.fill();
   }
 
-  // One traffic light per approach, right of the incoming lane: green if its group has the active phase
+  // Spot d px out along e from n, right of the lane coming in (traffic flows toward the node, -u; its right is (uy, -ux))
+  private spot(n: Node, e: Edge, d: number): [number, number] {
+    const off = e.width / 2 + 3, [ux, uy] = this.dir(n, e);
+    return [n.x + ux * d + uy * off, n.y + uy * d - ux * off];
+  }
+
+  // One traffic light per approach: green while any of its movements may go, amber in the last second before all turn red
+  // (cosmetic: the sim has no amber)
   private drawLights(n: Node): void {
-    const ctx = this.ctx;
+    const ctx = this.ctx, p = planOf(n), ph = p.phases[n.phase] ?? p.phases[0], next = p.phases[(n.phase + 1) % p.phases.length];
     for (const e of n.edges) {
-      const off = e.width / 2 + 3;
-      const [ux, uy] = this.dir(n, e);
-      // Traffic flows toward the node (-u); its right is (uy, -ux)
-      const px = n.x + ux * (NODE_R + 6) + uy * off;
-      const py = n.y + uy * (NODE_R + 6) - ux * off;
+      const a = approachOf(p, n, e), go = ph.sig[a].some(x => x > 0);
+      const amber = go && ph.seconds - n.phaseTimer < 1 && !next.sig[a].some(x => x > 0);
+      const [px, py] = this.spot(n, e, NODE_R + 6);
       ctx.beginPath();
       ctx.roundRect(px - 3.5, py - 3.5, 7, 7, 1.5);
       ctx.fillStyle = DARK;
       ctx.fill();
-      this.circle(px, py, 1.2, lightGroup(n, e) === n.phase ? GREEN : RED);
+      this.circle(px, py, 1.2, amber ? AMBER : go ? GREEN : RED);
+    }
+  }
+
+  // Yield: a give-way triangle on every side-road approach; stop: a red octagon on every approach
+  private drawSigns(n: Node): void {
+    const ctx = this.ctx, main = n.control === 'yield' ? mainEdges(n) : [];
+    for (const e of n.edges) {
+      if (main.includes(e)) continue;
+      const [px, py] = this.spot(n, e, NODE_R + 6);
+      ctx.beginPath();
+      if (n.control === 'stop') for (let i = 0; i < 8; i++) ctx.lineTo(px + 3.6 * Math.cos((i + 0.5) * Math.PI / 4), py + 3.6 * Math.sin((i + 0.5) * Math.PI / 4));
+      else { ctx.moveTo(px - 3.8, py - 2.6); ctx.lineTo(px + 3.8, py - 2.6); ctx.lineTo(px, py + 3.8); }
+      ctx.closePath();
+      ctx.fillStyle = n.control === 'stop' ? RED : '#FFFFFF';
+      ctx.fill();
+      ctx.strokeStyle = n.control === 'stop' ? '#FFFFFF' : RED;
+      ctx.lineWidth = n.control === 'stop' ? 0.8 : 1.3;
+      ctx.stroke();
+    }
+  }
+
+  // A small red no-turn glyph on each approach with a banned movement
+  private drawBans(n: Node): void {
+    const ctx = this.ctx, p = n.plan!;
+    for (const e of n.edges) {
+      if (!p.ban[approachOf(p, n, e)].some(Boolean)) continue;
+      const [px, py] = this.spot(n, e, NODE_R + 15);
+      this.circle(px, py, 3.4, '#FFFFFF');
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(px - 2.2, py - 2.2);
+      ctx.lineTo(px + 2.2, py + 2.2);
+      ctx.stroke();
     }
   }
 }
 
-// Joint disc width: the widest non-tunnel road of that level meeting at the node
-function jointW(n: Node, level: number): number {
-  return n.edges.reduce((w, e) => (!e.tunnel && e.level === level ? Math.max(w, e.width) : w), 0) || ROAD_W;
-}
-
-// Mixes a #RRGGBB color toward white by the given factor
-function lighten(hex: string, k: number): string {
-  const v = parseInt(hex.slice(1), 16);
-  const ch = (s: number): number => {
-    const c = (v >> s) & 255;
-    return Math.round(c + (255 - c) * k);
-  };
-  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+// Joint disc: the widest non-tunnel road of that level meeting at the node sets its width and tier colour
+function jointEdge(n: Node, level: number): Edge | null {
+  return n.edges.reduce<Edge | null>((w, e) => (!e.tunnel && e.level === level && e.width > (w?.width ?? 0) ? e : w), null);
 }
 
 // Darkens a #RRGGBB color by the given factor

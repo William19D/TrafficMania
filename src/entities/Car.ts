@@ -1,23 +1,28 @@
 import { CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
-import type { RoadGraph, Lane, Node } from '../network/RoadGraph.ts';
+import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
+import { PURPOSES, TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
-import type { City } from './City.ts';
+import type { Building } from './Building.ts';
+import type { Trip } from './Trip.ts';
+import { random } from '../util/rng.ts';
 
 export const MAX_SPEED = 110, ACCEL = 80, BRAKE = 180, TURN_SPEED = 45;
 // Deadlock breaker: seconds stopped before rerouting around the next edge, and before giving up the trip
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
-// Vehicle kinds: length, top speed and acceleration factors, spawn weight. Ambulances jump node queues (RoadGraph.update).
+// Vehicle kinds: length, top speed and acceleration factors, spawn weight for passenger trips (trucks only carry freight, so 0).
+// Ambulances jump node queues (RoadGraph.update).
 export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
 export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
   car: { len: CAR_LEN, v: 1, a: 1, w: 0.72 },
-  truck: { len: 24, v: 0.75, a: 0.55, w: 0.1 },
+  truck: { len: 24, v: 0.75, a: 0.55, w: 0 },
   bus: { len: 26, v: 0.7, a: 0.5, w: 0.06 },
   moto: { len: 10, v: 1.1, a: 1.4, w: 0.09 },
   ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
 };
+const W = Object.values(KINDS).reduce((n, k) => n + k.w, 0);
 export const randomKind = (): Kind => {
-  let r = Math.random();
+  let r = random() * W;
   for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
   return 'car';
 };
@@ -54,17 +59,22 @@ export class Car {
   acc: number;
   react: number;
 
-  constructor(public lane: Lane, public dest: City, public origin: City, public kind: Kind = 'car') {
+  constructor(public lane: Lane, public trip: Trip, public kind: Kind = 'car') {
     const k = KINDS[kind];
     this.len = k.len;
-    this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * Math.random());
-    this.acc = ACCEL * k.a * (0.85 + 0.3 * Math.random());
-    this.react = 0.2 * Math.random();
+    this.vmax = MAX_SPEED * k.v * (0.9 + 0.2 * random());
+    this.acc = ACCEL * k.a * (0.85 + 0.3 * random());
+    this.react = 0.2 * random();
   }
 
-  get color(): string {
-    return this.dest.color;
+  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit
+  top(e: Edge): number {
+    return this.vmax * TIERS[e.type.tier].limit / MAX_SPEED;
   }
+
+  get dest(): Building { return this.trip.to; }
+  get origin(): Building { return this.trip.from; }
+  get color(): string { return PURPOSES[this.trip.purpose].color; }
 
   update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
     let lane = this.lane;
@@ -74,15 +84,16 @@ export class Car {
 
     const w = this.wait;
     this.wait = this.speed < 1 ? w + dt : 0;
+    if (this.wait > this.trip.jamS) { this.trip.jamS = this.wait; this.trip.jam = node; }
     if (this.wait > GIVE_UP_S) return 'stuck';
 
     // Recompute route from the node we are heading to; U-turn back down our own edge only when nothing else leads there
     if (!isDest && (!this.path || this.path[0] !== node)) {
-      this.path = findPath(graph, node, this.dest.node, lane.edge) ?? findPath(graph, node, this.dest.node);
+      this.path = findPath(graph, node, this.dest.node, lane.edge, false, lane.edge) ?? findPath(graph, node, this.dest.node, null, false, lane.edge);
       if (!this.path) return 'lost';
     } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
       // ponytail: blames the next edge; a jam on our own lane can only be escaped by giving up
-      const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!));
+      const p = findPath(graph, node, this.dest.node, graph.edgeBetween(node, this.path![1]!), false, lane.edge);
       if (p) this.path = p;
     }
 
@@ -120,7 +131,7 @@ export class Car {
       gap = Math.min(gap, remaining - NODE_R - 3);
     } else if (!isDest && this.path) {
       // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
-      // ponytail: 150px horizon covers the fastest driver's braking + reaction headway; widen it if KINDS get faster
+      // ponytail: 150px horizon covers the fastest driver's braking + reaction headway on a highway (~145px); widen it if KINDS or TIERS get faster
       for (let j = 0, d = remaining; j + 1 < this.path.length && d < 150; j++) {
         const n = this.path[j + 1]!;
         d += graph.edgeBetween(this.path[j]!, n)?.length ?? Infinity;
@@ -129,21 +140,28 @@ export class Car {
       }
     }
 
-    let target = needs && remaining < 60 ? TURN_SPEED : this.vmax;
+    let target = this.top(lane.edge);
+    // approach a junction slowly until granted; once granted only the corner speed below applies (roundabouts: the ring)
+    if (needs && remaining < 60 && (this.granted !== node || node.control === 'roundabout')) target = Math.min(target, TURN_SPEED);
     if (nextLane) {
-      // Corner speed: vmax * cos(turn angle) at the node, floored at TURN_SPEED, braked down to by the node box
+      // Corner speed: top speed (the slower tier of the two) * cos(turn angle) at the node, floored at TURN_SPEED,
+      // braked down to by the node box; so a car also slows down before a slower tier
       // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
       const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
-      const v = Math.max(TURN_SPEED, this.vmax * cos);
+      const v = Math.max(TURN_SPEED, Math.min(this.top(lane.edge), this.top(nextLane.edge)) * cos);
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
     this.brake = target < this.speed || this.speed < 1;
     this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
+    this.trip.driven += this.speed * dt;
+    if (this.speed < 1) this.trip.stopped += dt;
 
-    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that)
-    if (this.clearing && this.s - this.len / 2 > NODE_R) { this.clearing.occupants.delete(this); this.clearing = null; }
+    // Release the intersection we just crossed once our rear is out of it (fits() leaves room for that), or once we wait at the
+    // next junction: on a link shorter than ~NODE_R + stopDist + the car, holding the box there gridlocks the two junctions.
+    // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
+    if (this.clearing && (this.s - this.len / 2 > NODE_R || (this.queued && this.speed < 1))) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
@@ -175,7 +193,7 @@ export class Car {
     if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
     const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
     const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - sep(this, ahead) : Infinity;
-    const slow = !!ahead && ahead.speed < this.vmax * 0.6 && gap < 4 * CAR_LEN;
+    const slow = !!ahead && ahead.speed < this.top(lane.edge) * 0.6 && gap < 4 * CAR_LEN;
     const brake = (v: number) => v * v / (2 * BRAKE);
     for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
       if (!to) continue;
