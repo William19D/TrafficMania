@@ -223,16 +223,16 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 **C:** Help `?` plus Menu `≡` (pause menu).
 
 **D, dock**, left to right. Locked tools show a `lock` icon, are `aria-disabled`, and a click toasts `Unlocks at level N`:
-- `Road [1]`, `Grid [6]`
+- `Road [1]`, `Grid [2]`
 - tier picker: 5 small swatch buttons (dirt beige, street, avenue, boulevard with a green median, highway gray), tooltip `Avenue · 50 km/h · 1-2 lanes · $90/tile`
 - lanes 1/2/3 (disabled outside the tier's range) | One-way | Flip
 - elevation stepper (as today)
-- `Light [2]`, `Roundabout [3]`, `Interchange [7]`
+- `Light [3]`, `Roundabout [4]`, `Interchange [5]`
 - `Buildings [B]`, with a badge of unplaced count that pulses on level-up
-- `Edit [4]`, `Demolish [5]`
+- `Edit [6]`, `Demolish [7]`
 - `Heat map [C]` (a toggle, `aria-pressed`)
 
-Other keys: `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The tool keys 1-5 keep today's meaning.
+Other keys: `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
 
 **E toasts** and **F tutorial** as today. New error texts go into `FRIENDLY`:
 - `Not enough money` -> "Not enough money: wait for taxes or demolish a road built today for a full refund"
@@ -419,3 +419,19 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - `HUD.ts` CONTROLS table, `style.css` responsive pass (section 5 of hud-design), `docs/hud-design.md` updated to this HUD, `README.md` rewritten for the new genre, `src/ui/icons.ts` (money, people, smile/neutral/frown, star, clock, chart, list, heat, home, shop, office, factory, grid, interchange, lock, menu, save, eye, dice).
 - Assert: the tutorial's `done` predicates are pure reads (`simcheck` runs each against a scripted game).
 - Must keep working: everything, verified by `tsc`, `build`, `simcheck`, and a manual run through the menu, one career day and the tutorial.
+- As built:
+  - **Tutorial.** `tutorialSteps(g)` (exported for simcheck) has the 9 steps in the order above: welcome, homes to the office, the first commute, place a home, the shop on a road's middle (trip reports `T`), a light (`3`), Edit (`6`) the light and give a phase more seconds, the heat map (`C`), then money and levels.
+    - `hint` is now a selector list that pulses several controls, for example the Buildings button and the tray, or the money and people chips.
+    - The map targets point at the middle of the longest road.
+    - Deviation: `Game.lockOf('junction')` is lifted while `tutorialActive`, so step 7 works at level 1. It is the only lock the tutorial lifts.
+    - The bend step went, and the bend is explained in step 2. With it went `Game.lastBuild`.
+  - **Keys.** Deviation: the number keys follow the dock order (`Input.KEY_TOOLS`): Road 1, Grid 2, Light 3, Roundabout 4, Interchange 5, Edit 6, Demolish 7, Buildings `B`. The dock badges, tooltips and the `CONTROLS` table derive from it.
+  - **HUD.** `TOOLS` is a record keyed by tool. Locked tier swatches and One-way show the lock icon like the tools.
+  - **Responsive.** Below 1280px the resources row and the status bar stack in one `.topl` column (a wrapped row used to run under the status bar). With a right-column panel open, the tutorial card steps left of it. On phones the card hides the left column and caps the panel column above itself.
+  - **Fixes.**
+    - The junction panel rendered into the car card's body (`.jbody` matched the first panel), so it showed empty.
+    - A driveway now joins a road node within `DRIVE_SNAP` (30px) instead of splitting the road beside it. Homes placed facing each other made a 13px stretch between two junctions, and don't-block-the-box locked every car on it until they gave up.
+  - **Icons.** The `week` icon is `calendar`. The remaining items of the spec's icon list already existed.
+  - **Docs.** The README and `docs/hud-design.md` are rewritten for this game. The old screenshots went, and new ones are in `docs/screenshots` (overview, junction, analysis, tutorial).
+  - **simcheck.** It checks that every `done` predicate leaves `serialize(game)` unchanged and plays the tasks through on a scripted level-1 town. It also checks facing homes: no road stretch under `DRIVE_SNAP`, and both commutes arrive.
+  - **Known gap.** Short trips on empty roads often grade `wait`: the free-flow `ideal` leaves out pulling away from the door and the turns, so `SMOOTH_X` 1.5 is tight under about 10 s.
