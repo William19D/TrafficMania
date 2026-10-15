@@ -25,24 +25,24 @@ export const DIFFICULTY: Record<Difficulty, {
 // Terrain mix and palette per biome. rivers: null = the difficulty's count. Water is the same everywhere.
 // patch: [sand, grass] colours; bands: mountain contour fills, outer to inner.
 export const BIOMES: Record<Biome, {
-  label: string; land: string; patch: [string, string]; tree: string; treeOut: string; bands: [string, string, string];
+  label: string; land: string; patch: [string, string]; tree: string; bands: [string, string, string];
   trees: Range; lakes: Range; lakeR: Range; rivers: Range | null; mountains: number;
 }> = {
   temperate: {
-    label: 'Temperate', land: '#ECEAE4', patch: ['#E6DCC0', '#D7E3B5'], tree: '#7FAE5A', treeOut: '#5E8A42',
+    label: 'Temperate', land: '#E6ECD8', patch: ['#EEE1C0', '#CFE3A8'], tree: '#79B257',
     bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [120, 200], lakes: [0, 2], lakeR: [70, 130], rivers: null, mountains: 0,
   },
   desert: {
-    label: 'Desert', land: '#EFE6D2', patch: ['#E6D3A8', '#EADBB6'], tree: '#A7B36A', treeOut: '#7F8A4C',
+    label: 'Desert', land: '#F2E6CB', patch: ['#EBD2A0', '#E0DDAE'], tree: '#A3B266',
     bands: ['#C9A882', '#B08D68', '#94735A'], trees: [20, 40], lakes: [1, 2], lakeR: [45, 80], rivers: [0, 1], mountains: 0,
   },
   alpine: {
-    label: 'Alpine', land: '#E8EBE6', patch: ['#F2F3F1', '#DCE5D6'], tree: '#5E8F5A', treeOut: '#456D42',
+    label: 'Alpine', land: '#E3EBE1', patch: ['#F5F7F7', '#D3E3C8'], tree: '#5E8F5A',
     bands: ['#8E9296', '#6F7377', '#F4F5F6'], trees: [200, 280], lakes: [1, 3], lakeR: [60, 110], rivers: null, mountains: 3,
   },
   // ponytail: islands are the land left between many large lakes and wide channels; a real sea mask if coastlines matter
   archipelago: {
-    label: 'Archipelago', land: '#EDEBE1', patch: ['#EFE3C4', '#D2E2B0'], tree: '#79AE5E', treeOut: '#58884A',
+    label: 'Archipelago', land: '#E7EDD6', patch: ['#F0E2BC', '#CDE3A6'], tree: '#74B25A',
     bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [90, 150], lakes: [6, 9], lakeR: [130, 230], rivers: [2, 3], mountains: -2,
   },
 };

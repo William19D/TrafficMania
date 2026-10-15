@@ -508,3 +508,26 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - If a road crossing splits the stub, the inner piece becomes an ordinary road with upkeep and refund. Only the piece at the gate stays free.
   - Imports do not change a factory's output, and visitors do not count toward a shop's customers for happiness. They only bring money and traffic.
   - `linkedExits()` walks the graph every frame (renderer) and on every spend.
+
+**P8a Richer graphics: buildings, terrain, props.**
+- Report: the graphics were too simple. Keep the flat Trafficity look, but add detail, colour and life.
+- Buildings (`src/rendering/BuildingArt.ts`): every building is a small model drawn in its local frame and cached as a sprite per kind, variant and scale bucket (`artS`: 1/2/4/8 px per world px from zoom x dpr). The renderer then draws it with one rotated `drawImage`. There are `VARIANTS` (32) looks per kind. `variant(x, y)` hashes the position in 16px cells, so a street is not copy-pasted, a reload shows the same street, and a moved building takes the look of its new spot. The variant's bits set the shape and its rng sets the colours.
+  - **Home**: a lawn lot with a hedge or a white picket fence, a front path with a bush or flower bed on each side, and a pitched roof in one of 8 colours: back slope darker, front lighter, a ridge line and faint tile rows. Some variants have a hip roof, a chimney or solar panels.
+  - **Shop**: a paved lot, a flat blue roof with AC units and a skylight, a coloured sign board with white lettering, and a striped awning with a scalloped edge. Planters sit at the front corners.
+  - **Office**: a paved plaza with corner trees, and a tower whose glass curtain wall (a mullion grid) peeks out around the roof. It has 2-5 floors. The tallest has a helipad, the others a water tank and AC units.
+  - **Factory**: a saw-tooth roof (lit slope, shaded slope, glazed edge), a round chimney, and a yard with a shipping container, a tank or crates on each side of the drive.
+  - `look(kind, v)` gives the body (the part that stands up) and its height. The shadow is the convex hull of the body and its copy offset down-right by that height, so offices cast long shadows and homes short ones. Smoke puffs drift downwind off a staffed factory's chimney, drawn live.
+- Terrain (`src/rendering/Scenery.ts`): `paintTerrain` draws the static ground once per map and ground scale onto a world-sized canvas. The renderer blits it every frame. The ground scale is ceil(zoom x dpr), capped at 12M px (ponytail: soft past about 2.5x zoom on a small map, tile it if close-ups matter).
+  - **Patches and lakes** are smooth blobs (quadratic curves through the midpoints) instead of 12-gons. Patches get a lighter or darker inner blob.
+  - **Shores** are drawn layer by layer over every lake and river: a sandy bank, a line of foam, the water, a lighter shallow band and a deeper middle.
+  - **Ground detail**: grass tufts, flower clusters and pebbles, with density per biome, plus scree at the foot of each mountain.
+  - **Trees**: each map tree gets one or two decorative neighbours, so clusters read as groves. Roads and buildings draw over trees, so the extras need no sim change. Species by biome: round (three lobes and a highlight), conifer (layered star), snowy conifer, palm, blossom and autumn. Desert is mostly palms, alpine is conifers and snowy conifers, and archipelago mixes palms in. Trees have soft shadows and are drawn top to bottom.
+  - **Water glints**: `shimmer` draws dashed light lines that drift around each lake and down each river. It is the only animated terrain, a few strokes a frame.
+  - **Biome palettes** are livelier: temperate land `#E6ECD8`, desert `#F2E6CB`, alpine `#E3EBE1`, archipelago `#E7EDD6`, plus greener grass patches. `BIOMES.treeOut` is gone.
+- Exits: each exit has a highway sign beside its inbound lane: a green board on two legs with a white border, a blue `H` shield, the direction and "HIGHWAY EXIT".
+- Cost: a frame renders in about 0.5-0.7 ms of script on a 30-building street (1280x720). A ground rebuild (new map or new zoom bucket) takes about 25 ms.
+- simcheck: every variant's body and chimney stand inside the footprint, offices come in at least 3 heights, and a street of 10 buildings 50px apart shows at least 5 looks.
+- Known gaps:
+  - Zooming back and forth across a whole-number zoom x dpr step repaints the ground each time, about 25 ms of hitch.
+  - Shadows fall the same way at every hour; there is no day/night lighting.
+  - Building looks do not change as a home fills up or a business grows.

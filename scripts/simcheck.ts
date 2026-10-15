@@ -12,12 +12,13 @@ import type { Trip } from '../src/entities/Trip.ts';
 import { Car, GIVE_UP_S, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING, ZONES } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
+import { VARIANTS, look, variant } from '../src/rendering/BuildingArt.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -878,6 +879,17 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const w = new Game({ ...SIM, difficulty: 'normal' });
   while (!w.gameOver && w.day < 8) w.update(0.5);
   if (w.gameOver !== 'unhappy' || w.day > TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS) fail(`no roads: '${w.gameOver}' on day ${w.day}`);
+}
+// Building art: every variant's body and chimney stand inside the footprint, offices come in several heights, and a street of
+// ten buildings 50px apart shows at least five looks
+{
+  for (const kind of ['home', 'shop', 'office', 'industry'] as const) for (let v = 0; v < VARIANTS; v++) {
+    const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2, { body: [x, y, w, h], chimney: c } = look(kind, v);
+    if (x < -H || y < -W || x + w > H || y + h > W || (c && (Math.abs(c.x) > H || Math.abs(c.y) > W))) fail(`art: ${kind} variant ${v} spills out of its footprint`);
+  }
+  if (new Set(Array.from({ length: VARIANTS }, (_, v) => look('office', v).height)).size < 3) fail('art: offices all one height');
+  const street = new Set(Array.from({ length: 10 }, (_, i) => variant(300 + i * 50, 640)));
+  if (street.size < 5 || variant(321.5, 77) !== variant(321.5, 77)) fail(`art: a street shows ${street.size} looks`);
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

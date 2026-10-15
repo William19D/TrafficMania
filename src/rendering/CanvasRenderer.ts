@@ -1,7 +1,6 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
-import type { Mountain } from '../world/MapGenerator.ts';
 import { ROAD_W, NODE_R, CAR_W, LANE_W, roadWidth } from '../network/RoadGraph.ts';
 import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
@@ -9,6 +8,8 @@ import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
+import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
+import { paintTerrain, shimmer } from './Scenery.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -42,6 +43,9 @@ export class CanvasRenderer {
   private land = BIOMES.temperate.land;
   // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
   private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
+  // Cached ground of the current map at s px per world px; building sprites' scale
+  private ground: { t: Game['terrain']; s: number; c: HTMLCanvasElement } | null = null;
+  private artS = 1;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -139,88 +143,30 @@ export class CanvasRenderer {
     }
     const z = this.cam.zoom;
 
-    // Background: flat land (in screen coordinates)
-    const biome = BIOMES[game.terrain.biome];
+    // Background: flat land (in screen coordinates), then the cached ground of the map and the water's glints
+    const biome = BIOMES[game.terrain.biome], terrain = game.terrain;
     this.land = biome.land;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = biome.land;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    // sprite and ground scale buckets: whole px per world px, rounded up so a close-up stays sharp
+    this.artS = Math.min(8, 2 ** Math.ceil(Math.log2(Math.max(1, z * dpr))));
+    // ponytail: the ground is one world-sized canvas capped at 12M px (soft past ~2.5x zoom on a small map); tile it if close-ups matter
+    const gs = Math.min(Math.ceil(z * dpr), Math.floor(Math.sqrt(12e6 / (WORLD.w * WORLD.h)) * 100) / 100);
+    if (this.ground?.t !== terrain || this.ground.s !== gs) this.ground = { t: terrain, s: gs, c: paintTerrain(terrain, gs) };
 
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (innerWidth / 2 - this.cam.x * z), dpr * (innerHeight / 2 - this.cam.y * z));
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
+    ctx.drawImage(this.ground.c, 0, 0, this.ground.c.width / gs, this.ground.c.height / gs);
+    shimmer(ctx, terrain, performance.now() / 1000);
 
     // World border, almost invisible
     ctx.strokeStyle = '#DDDBD4';
     ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, WORLD.w, WORLD.h);
-
-    const terrain = game.terrain;
-
-    // Ground patches: soft, no outline
-    for (const p of terrain.patches) {
-      const col = biome.patch[p.kind === 'sand' ? 0 : 1];
-      this.polyline(p.poly, true);
-      ctx.fillStyle = col;
-      ctx.fill();
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 24;
-      ctx.stroke();
-    }
-
-    // Lakes: outer fill (stroked to round it off) + lighter inset
-    for (const l of terrain.lakes) {
-      this.polyline(l, true);
-      ctx.fillStyle = '#A9C1EC';
-      ctx.fill();
-      ctx.strokeStyle = '#A9C1EC';
-      ctx.lineWidth = 12;
-      ctx.stroke();
-      this.polyline(l, true);
-      ctx.fillStyle = '#BFD3F3';
-      ctx.fill();
-    }
-
-    // Mountains: soft shadow + contour-line bands
-    for (const m of game.terrain.mountains) {
-      ctx.save();
-      ctx.translate(6, 7);
-      this.mountainPoly(m, 1);
-      ctx.fillStyle = 'rgba(0,0,0,.10)';
-      ctx.fill();
-      ctx.restore();
-      for (const [s, col] of [[1, biome.bands[0]], [0.78, biome.bands[1]], [0.5, biome.bands[2]]] as const) {
-        this.mountainPoly(m, s);
-        ctx.fillStyle = col;
-        ctx.fill();
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 10;
-        ctx.stroke();
-      }
-    }
-
-    // Rivers: two flat strokes, no hard outline
-    for (const r of game.terrain.rivers) {
-      this.polyline(r.points);
-      ctx.strokeStyle = '#A9C1EC';
-      ctx.lineWidth = r.width;
-      ctx.stroke();
-      ctx.strokeStyle = '#BFD3F3';
-      ctx.lineWidth = Math.max(8, r.width - 12);
-      ctx.stroke();
-    }
-
-    // Trees, under the roads; size varies by index
-    terrain.trees.forEach((t, i) => {
-      const r = 4 + (i % 3) * 0.5;
-      this.circle(t.x + 1, t.y + 1, r, 'rgba(0,0,0,.08)');
-      this.circle(t.x, t.y, r, biome.tree);
-      ctx.strokeStyle = biome.treeOut;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    });
 
     if (game.overlay === 'noise') this.noiseMap(game);
 
@@ -462,59 +408,58 @@ export class CanvasRenderer {
     }
   }
 
-  // Flat rounded footprint with a soft shadow, a roof inset and a zone detail (home ridge, shop awning, office windows,
-  // factory sawtooth and chimney); a white door notch on the front. Pending trips are dots on the roof in their purpose colour;
-  // a building without a road gets a dashed red outline.
+  // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
+  // saw-tooth factory with a yard), its variant from its position, with a shadow as long as it is tall and smoke off a
+  // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
+  // dashed red outline.
   private building(b: Building, time: number): void {
-    const ctx = this.ctx, z = ZONES[b.kind], h = b.h / 2, w = b.w / 2;
-    const rect = (x: number, y: number, rw: number, rh: number, r: number, fill: string | null, out: string | null = null, lw = 1) => {
-      ctx.beginPath();
-      ctx.roundRect(x, y, rw, rh, r);
-      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-      if (out) { ctx.strokeStyle = out; ctx.lineWidth = lw; ctx.stroke(); }
-    };
-    // local frame: +x toward the door (depth h), y across the front (width w)
-    const frame = (dx: number, dy: number) => { ctx.save(); ctx.translate(b.x + dx, b.y + dy); ctx.rotate(b.angle); };
-    frame(3, 4);
-    rect(-h, -w, 2 * h, 2 * w, 4, 'rgba(0,0,0,.12)');
-    ctx.restore();
-    frame(0, 0);
+    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.kind, v), alpha = ctx.globalAlpha;
+    const c = Math.cos(b.angle), sn = Math.sin(b.angle), toWorld = (x: number, y: number): Vec => ({ x: b.x + x * c - y * sn, y: b.y + x * sn + y * c });
+    // shadow: the body swept down-right by its height (the hull of the body and its offset copy)
+    const [bx, by, bw, bh] = L.body, o = L.height;
+    const corners = [[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]].map(([x, y]) => toWorld(x, y));
+    this.polyline(hull([...corners, ...corners.map(p => ({ x: p.x + o * 0.7, y: p.y + o }))]), true);
+    ctx.fillStyle = 'rgba(30,40,60,.16)';
+    ctx.fill();
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
     // an empty home (everyone moved out) fades
-    if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = 0.45;
-    rect(-h, -w, 2 * h, 2 * w, 4, z.fill, z.out, 1.5);
-    rect(-h + 3, -w + 3, 2 * h - 6, 2 * w - 6, 2.5, z.roof);
-    ctx.strokeStyle = z.out;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    if (b.kind === 'home') {
-      ctx.moveTo(-1, -w + 3); ctx.lineTo(-1, w - 3);
-    } else if (b.kind === 'industry') {
-      for (let y = -w + 10; y < w - 4; y += 9) { ctx.moveTo(-h + 5, y); ctx.lineTo(h - 5, y + 4); }
-    }
-    ctx.stroke();
-    if (b.kind === 'shop') for (let y = -w + 1; y < w - 1; y += 6) rect(h - 6, y, 5, 3, 0, '#FFFFFF');
-    if (b.kind === 'office') for (let x = -h + 7; x < h - 5; x += 7) for (let y = -w + 7; y < w - 5; y += 7) rect(x, y, 3, 3, 0.5, z.out);
-    if (b.kind === 'industry') {
-      // smoke drifts off the chimney only while the factory has workers
-      if (b.staffed > 0) for (let i = 0; i < 3; i++) {
-        const t = (time * 0.4 + i / 3) % 1;
-        ctx.globalAlpha = 0.5 * (1 - t);
-        this.circle(-h + 8 - t * 14, -w + 8 - t * 6, 3 + t * 4, '#D6D6D2');
-      }
-      ctx.globalAlpha = 1;
-      this.circle(-h + 8, -w + 8, 4.5, '#8A8A86');
-      ctx.strokeStyle = '#5E5E5A';
+    if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = alpha * 0.45;
+    const img = sprite(b.kind, v, this.artS);
+    ctx.drawImage(img, -h - PAD, -w - PAD, img.width / this.artS, img.height / this.artS);
+    b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => {
+      ctx.beginPath();
+      ctx.roundRect(-h + 4, -w + 4 + i * 6, 4, 4, 1);
+      ctx.fillStyle = PURPOSES[t.purpose].color;
+      ctx.fill();
+      ctx.strokeStyle = CAR_OUT;
+      ctx.lineWidth = 0.75;
       ctx.stroke();
-    }
-    rect(h - 2, -3.5, 4, 7, 1, '#FFFFFF', z.out);
-    b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => rect(-h + 4, -w + 4 + i * 6, 4, 4, 1, PURPOSES[t.purpose].color, CAR_OUT, 0.75));
+    });
     // a ghost (place tool) has no door node yet
     if (b.node && !b.connected) {
       ctx.setLineDash([4, 3]);
-      rect(-h - 3, -w - 3, 2 * h + 6, 2 * w + 6, 6, null, RED, 1.5);
+      ctx.beginPath();
+      ctx.roundRect(-h - 3, -w - 3, 2 * h + 6, 2 * w + 6, 6);
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
       ctx.setLineDash([]);
     }
     ctx.restore();
+    // smoke drifts downwind off the chimney only while the factory has workers
+    if (L.chimney && b.staffed > 0) {
+      const ch = toWorld(L.chimney.x, L.chimney.y);
+      for (let i = 0; i < 4; i++) {
+        const t = (time * 0.35 + i / 4) % 1;
+        const x = ch.x + t * 24 + Math.sin(t * 6 + i) * 2, y = ch.y - t * 14, r = 2.8 + t * 6;
+        ctx.globalAlpha = alpha * 0.75 * (1 - t) * Math.min(1, t * 6);
+        this.circle(x, y, r, i % 2 ? '#C4C2BD' : '#B5B3AE');
+        this.circle(x - r * 0.3, y - r * 0.3, r * 0.55, '#DEDCD7');
+      }
+      ctx.globalAlpha = alpha;
+    }
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
@@ -638,21 +583,48 @@ export class CanvasRenderer {
         ctx.fillStyle = k > 0 ? GREEN : '#2F8F5B';
         ctx.fill();
       }
-      // sign beside the inbound lane, square to the screen
-      const s = at(30, w / 2 + 22), name = ['WEST', 'NORTH', 'EAST', 'SOUTH'][(Math.round(b.angle / (Math.PI / 2)) + 4) % 4];
-      this.seg(s, { x: s.x, y: s.y + 12 }, '#6E6E6A', 2);
+      // highway sign beside the inbound lane, square to the screen: green board on two legs, a blue shield and the direction
+      const s = at(36, w / 2 + 30), name = ['WEST', 'NORTH', 'EAST', 'SOUTH'][(Math.round(b.angle / (Math.PI / 2)) + 4) % 4];
+      for (const k of [-18, 18]) this.seg({ x: s.x + k, y: s.y + 8 }, { x: s.x + k + 1, y: s.y + 16 }, '#6E6E6A', 1.6);
+      const board = (dx: number, dy: number, fill: string, r = 3.5): void => {
+        ctx.beginPath();
+        ctx.roundRect(s.x - 32 + dx, s.y - 11 + dy, 64 - 2 * dx, 22 - 2 * dy, r);
+        ctx.fillStyle = fill;
+        ctx.fill();
+      };
+      ctx.save();
+      ctx.translate(2, 3);
+      board(0, 0, 'rgba(0,0,0,.18)');
+      ctx.restore();
+      board(0, 0, '#1E7A4A');
       ctx.beginPath();
-      ctx.roundRect(s.x - 25, s.y - 9, 50, 15, 3);
-      ctx.fillStyle = ZONES.gate.fill;
+      ctx.roundRect(s.x - 30.5, s.y - 9.5, 61, 19, 2.5);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // shield: flat top, pointed bottom
+      const hx = s.x - 21, hy = s.y;
+      ctx.beginPath();
+      ctx.moveTo(hx - 5.5, hy - 6);
+      ctx.lineTo(hx + 5.5, hy - 6);
+      ctx.lineTo(hx + 5.5, hy + 1);
+      ctx.quadraticCurveTo(hx + 5.5, hy + 5, hx, hy + 7);
+      ctx.quadraticCurveTo(hx - 5.5, hy + 5, hx - 5.5, hy + 1);
+      ctx.closePath();
+      ctx.fillStyle = '#2F5FB3';
       ctx.fill();
       ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 0.9;
       ctx.stroke();
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = 'bold 8px system-ui';
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(`${name} EXIT`, s.x, s.y - 1);
+      ctx.font = 'bold 6px system-ui';
+      ctx.fillText('H', hx, hy - 0.5);
+      ctx.font = 'bold 8px system-ui';
+      ctx.fillText(name, s.x + 6, s.y - 3);
+      ctx.font = '5.5px system-ui';
+      ctx.fillText('HIGHWAY EXIT', s.x + 6, s.y + 5);
       if (linked.has(b)) continue;
       const o = e.a === d ? e.b : e.a;
       ctx.setLineDash([5, 4]);
@@ -809,11 +781,6 @@ export class CanvasRenderer {
     ctx.beginPath();
     pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     if (close) ctx.closePath();
-  }
-
-  // Mountain polygon scaled around its center
-  private mountainPoly(m: Mountain, s: number): void {
-    this.polyline(m.poly.map((p) => ({ x: m.x + (p.x - m.x) * s, y: m.y + (p.y - m.y) * s })), true);
   }
 
   // Tunnel portal at p, facing q: dark rounded block with a lighter inner arch
@@ -989,7 +956,7 @@ export class CanvasRenderer {
     if (k === 'truck') {
       // Cargo box in the purpose colour, darker cab in front
       body(-h, L - 7, car.color);
-      body(h - 6, 6, darken(car.color, 0.3));
+      body(h - 6, 6, shade(car.color, -0.3));
       ctx.fillStyle = glass;
       ctx.fillRect(h - 2.5, y + 1, 1.5, w - 2);
     } else if (k === 'moto') {
@@ -1157,9 +1124,13 @@ function jointEdge(n: Node, level: number): Edge | null {
   return n.edges.reduce<Edge | null>((w, e) => (!e.tunnel && e.level === level && e.width > (w?.width ?? 0) ? e : w), null);
 }
 
-// Darkens a #RRGGBB color by the given factor
-function darken(hex: string, k: number): string {
-  const v = parseInt(hex.slice(1), 16);
-  const ch = (s: number): number => Math.round(((v >> s) & 255) * (1 - k));
-  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+// Convex hull (monotone chain), counter-clockwise
+function hull(pts: Vec[]): Vec[] {
+  const p = [...pts].sort((a, b) => a.x - b.x || a.y - b.y), cross = (o: Vec, a: Vec, b: Vec): number => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const half = (list: Vec[]): Vec[] => {
+    const h: Vec[] = [];
+    for (const q of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); }
+    return h.slice(0, -1);
+  };
+  return [...half(p), ...half([...p].reverse())];
 }
