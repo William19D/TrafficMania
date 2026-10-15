@@ -392,6 +392,29 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.queueTrip(H.building!, O.building!, 'commute');
   for (let t = 0; t < 20 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`buildings: commute over the driveways did not arrive (score ${w.score})`);
+  // highways give no access through a driveway either: no retype of the street, no highway across a driveway
+  const hw: RoadType = { tier: 'highway', lanes: 2, oneWay: false }, run = w.graph.runOf(w.graph.edges.find(e => !e.drive)!).edges;
+  if (w.retype(run, hw)) fail('buildings: a street with driveways became a highway');
+  const across = w.planPath([{ x: 150, y: 445 }, { x: 650, y: 445 }], 0, hw).reason;
+  if (across !== 'Highways give no building access') fail(`buildings: a highway across the driveways was '${across || 'ok'}'`);
+}
+// Edits: a day-old avenue downgraded to dirt refunds REFUND_LATER of the drop, like a demolish; bending an arm of a junction with a
+// turn ban keeps the ban when the arm still leaves at about the same angle, and charges the plan's net
+{
+  const w = blank(), wg = w.graph, ave: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const J = wg.addNode(500, 500), W = wg.addNode(100, 500), E = wg.addNode(900, 500), N = wg.addNode(500, 100), S = wg.addNode(500, 900);
+  for (const n of [W, E, N, S]) w.commitPath(w.planPath([J, n], 0, ave));
+  for (const e of wg.edges) e.day = -1;
+  const wj = wg.edgeBetween(W, J)!;
+  w.editPlan(J, p => toggleBan(p, approachOf(p, J, wj), LEFT));
+  const m0 = w.money, drop = 10 * (TIERS.dirt.cost - TIERS.avenue.cost) * TUNING.REFUND_LATER;
+  if (!w.retype([wg.edgeBetween(J, N)!], { tier: 'dirt', lanes: 1, oneWay: false }) || Math.abs(w.money - m0 + drop) > 1e-6) {
+    fail(`edits: downgrade refunded ${w.money - m0}, expected ${-drop}`);
+  }
+  const m1 = w.money, bend = w.planBend([wg.edgeBetween(J, E)!], { x: 700, y: 510 });
+  if (!bend.ok || !w.commitBend([wg.edgeBetween(J, E)!], bend)) fail(`edits: bend refused (${bend.reason})`);
+  if (!J.plan) fail('edits: a slight bend reset the junction plan');
+  if (Math.abs(w.money - (m1 - bend.net!)) > 1e-6) fail(`edits: bend cost ${m1 - w.money}, expected ${bend.net}`);
 }
 // Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
 // get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the

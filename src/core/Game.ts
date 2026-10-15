@@ -65,6 +65,8 @@ export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; lev
 // note: what the preview label leads with (grid size, interchange name)
 export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number; note?: string }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
+// A building's door, a node a driveway joins, or a driveway: a road without access may not touch it
+const doorway = (n: Node | null, e?: Edge | null): boolean => !!n && (!!n.building || n.edges.some(x => x.drive)) || !!e?.drive;
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
 // A crossing road's arm from the junction to the cut point 'at' (edges[i] leaves nodes[i])
 interface Arm { edges: Edge[]; nodes: Node[]; at: Vec }
@@ -846,12 +848,14 @@ export class Game {
     if (Math.abs(la - lb) > n - 1) { plan.reason = 'Too steep: make the ramp longer'; return plan; }
 
     let total = 0, built = 0, blocked = false, hit = false, door = false;
-    const noAccess = !TIERS[type.tier].access && list.some(s => s.node?.building);
+    const acc = TIERS[type.tier].access;
+    let noAccess = !acc && list.some(s => doorway(s.node, s.edge));
     for (let i = 1; i <= n; i++) {
       const a = list[i - 1], b = list[i], L = Math.max(la - i + 1, lb - n + i, Math.min(la + i - 1, lb + n - i, level));
       const r = this.planSeg(a, b, L, type);
       const seg: SegPlan = { a: a.point, b: b.point, ...r.flags, sa: a, sb: b, crossings: r.crossings, exists: r.exists };
       plan.segs.push(seg);
+      noAccess ||= !acc && r.crossings.some(c => doorway(c.node, c.edge));
       door ||= L > 0 && !!(a.node?.building || b.node?.building);
       if (r.exists) continue;
       total += dist(a.point, b.point);
@@ -874,7 +878,7 @@ export class Game {
   }
 
   // link: give buildings near the new road their driveways (commitBend does it itself once its cars are moved)
-  commitPath(plan: PathPlan, link = true): void {
+  commitPath(plan: PathPlan, link = true, cost = plan.cost): void {
     if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return; }
     this.lastBuilt = [];
     let node: Node | null = null;
@@ -891,7 +895,7 @@ export class Game {
     if (link) this.connect();
     // a later segment (or a driveway) may have split an edge built by an earlier one
     this.lastBuilt = this.lastBuilt.filter(e => this.graph.edges.includes(e));
-    this.spend(plan.cost);
+    this.spend(cost);
   }
 
   demolishAt(p: Vec): void {
@@ -1026,17 +1030,21 @@ export class Game {
     return r.edges[0].a === r.nodes[0];
   }
 
-  // Full build price of the run (as 'type'). Editing credits the old road in full.
-  // ponytail: so a downgrade refunds the whole difference, even on an old road
+  // Full build price of the run (as 'type')
   private runPrice(run: Edge[], type?: RoadType): number {
     return run.reduce((n, e) => n + this.edgePrice(e, type), 0);
+  }
+
+  // A price change on a road built on 'day': a rise is paid in full, a drop comes back under the refund rule
+  private change(d: number, day: number): number {
+    return d < 0 ? d * this.refundX(day) : d;
   }
 
   // $ to pay (negative = refund) for the run as fitType(type). Same type on every edge (a flip) is free.
   retypeDelta(run: Edge[], type: RoadType): number {
     type = fitType(type);
     if (run.every(e => sameType(e.type, type))) return 0;
-    return this.runPrice(run, type) - this.runPrice(run);
+    return run.reduce((n, e) => n + this.change(this.edgePrice(e, type) - this.edgePrice(e), e.day), 0);
   }
 
   // Retypes the run as fitType(type), upgrades and downgrades across tiers included.
@@ -1046,7 +1054,7 @@ export class Game {
     if (!reverse && run.every(e => sameType(e.type, type))) return true;
     const { edges, nodes } = this.graph.runOf(run[0]);
     const why = this.lockedMsg(type)
-      || (!TIERS[type.tier].access && (nodes[0].building || nodes[nodes.length - 1].building) ? 'Highways give no building access' : '');
+      || (!TIERS[type.tier].access && nodes.some(n => doorway(n)) ? 'Highways give no building access' : '');
     if (why) { this.say(why); return false; }
     const d = this.retypeDelta(run, type);
     if (d > this.money) { this.say('Not enough money'); return false; }
@@ -1066,7 +1074,7 @@ export class Game {
   }
 
   // Rebuilds the run as a curve from its first to its last node through 'handle'.
-  // Affordability counts the run's full price as credit; plan.net = cost - credit.
+  // Affordability counts the run's full price as credit; plan.net = cost - credit, a refund under the old road's refund rule.
   planBend(run: Edge[], handle: Vec): PathPlan {
     const g = this.graph, r = g.runOf(run[0]);
     const A = r.nodes[0], B = r.nodes[r.nodes.length - 1];
@@ -1076,13 +1084,13 @@ export class Game {
     const pts = cubicPoints(A, ...bendControls(A, B, handle), B);
     // a one-way run travelling last -> first is rebuilt in that order
     if (type.oneWay && !this.runForward(run)) pts.reverse();
-    const credit = this.runPrice(r.edges);
+    const credit = this.runPrice(r.edges), day = Math.min(...r.edges.map(e => e.day));
     g.hidden = new Set(r.edges);
     this.money += credit;
     try {
       // a ramp or overpass keeps its top level; its ends keep theirs
       const plan = this.planPath(pts, Math.max(...r.edges.map(e => e.level)), type);
-      plan.net = plan.cost - credit;
+      plan.net = this.change(plan.cost - credit, day);
       return plan;
     } finally {
       g.hidden = new Set();
@@ -1104,10 +1112,10 @@ export class Game {
       }
       acc += e.length;
     });
-    const credit = this.runPrice(r.edges), day = Math.min(...r.edges.map(e => e.day));
+    const day = Math.min(...r.edges.map(e => e.day));
     for (const e of r.edges) for (const car of g.removeEdge(e)) g.detachCar(car);
-    this.spend(-credit);
-    this.commitPath(plan, false);
+    // one payment once the new road stands, so syncPlans never sees the junctions with the run missing
+    this.commitPath(plan, false, plan.net);
     // lastBuilt runs in plan order: A -> B, or B -> A for a reversed one-way run
     const built = this.lastBuilt;
     // the bent road keeps its oldest build day, so a bend never buys a same-day refund
