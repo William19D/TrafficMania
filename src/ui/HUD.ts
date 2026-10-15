@@ -1,6 +1,7 @@
 import type { Game, Tool } from '../core/Game.ts';
-import { fmtMoney, income, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
-import { PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
+import type { Ledger } from '../core/Game.ts';
+import { fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
 import type { Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { RoadType } from '../network/RoadGraph.ts';
@@ -103,7 +104,7 @@ export class HUD {
   private helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; danger?: number; pick?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
   } = { msg: '' };
   // Last level the player has seen in the level-up modal, and the speed to resume when it closes
   private seenLevel: number;
@@ -119,8 +120,10 @@ export class HUD {
       <div class="panel res" role="group" aria-label="Resources">
         <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
         <div class="chip people" tabindex="0" data-tip="">${icon('people')}<span class="pp"><span><b class="pv num"></b><small class="pn num"></small></span><span class="pbar"><i></i></span></span></div>
+        <div class="chip happy" tabindex="0" data-tip="">${icon('smile')}<b class="hv num"></b></div>
         <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
+        <div class="chip danger alarm" hidden tabindex="0" data-tip="">${icon('warning')}<b class="atxt"></b></div>
       </div>
       <div class="panel status">
         <div class="seg" role="group" aria-label="Game speed">
@@ -348,20 +351,25 @@ export class HUD {
 
   private renderModal(): void {
     const g = this.game, modal = this.q('.modal');
-    const open = g.gameOver || !!g.pendingLevel;
+    const open = !!g.gameOver || !!g.pendingLevel;
     this.hideTip();
     this.setHelp(false, false);
     // keep Tab inside the modal
     for (const el of Array.from(this.root.children)) if (el !== modal) el.toggleAttribute('inert', open);
     modal.hidden = !open;
-    // ponytail: nothing ends a game until S7's bankruptcy and happiness checks; the modal stays for them
     if (g.gameOver) {
+      const d = DIFFICULTY[g.cfg.difficulty], broke = g.gameOver === 'bankrupt';
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title" class="bad">${icon('warning')} Game over</h2>
+          <h2 id="m-title" class="bad">${icon('warning')} ${broke ? 'Bankrupt' : 'The residents left'}</h2>
+          <p class="sub">${broke ? `The city was in debt at ${d.debtDays} midnights in a row.` : `City happiness stayed under ${d.failHappy}% for ${T.FAIL_DAYS} midnights in a row.`}</p>
           <div class="stats">
-            <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.score}</b></div>
             <div>${icon('week', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
+            <div>${icon('star', 'big')}<span>Level</span><b class="num">${g.cityLevel}</b></div>
+            <div>${icon('people', 'big')}<span>Population</span><b class="num">${Math.round(g.population).toLocaleString('en-US')}</b></div>
+            <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.stats.arrived.toLocaleString('en-US')}</b></div>
+            <div>${icon('smile', 'big')}<span>Smooth trips</span><b class="num">${g.stats.arrived ? Math.round(100 * g.stats.smooth / g.stats.arrived) : 0}%</b></div>
+            <div>${icon('money', 'big')}<span>Money</span><b class="num">${fmtMoney(g.money)}</b></div>
           </div>
           <div class="actions"><button class="btn primary" data-action="restart">Play again <kbd>Enter</kbd></button></div>
         </div>`;
@@ -376,11 +384,11 @@ export class HUD {
       for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
       const unlocks = lv.flatMap(levelUnlocks), batch = Object.fromEntries(ZONE_KEYS.map(z => [z, 0])) as Record<Zone, number>;
       for (const n of lv) { const b = levelBatch(n); for (const z of ZONE_KEYS) batch[z] += b[z]; }
-      const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0);
+      const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0), won = lv.includes(LEVELS.length);
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title">${icon('star')} Level ${g.pendingLevel}!</h2>
-          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents. New buildings wait in the tray: place them beside your roads so the city keeps growing.</p>
+          <h2 id="m-title">${icon('star')} ${won ? 'City complete!' : `Level ${g.pendingLevel}!`}</h2>
+          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents bring another batch.` : '. New buildings wait in the tray: place them beside your roads so the city keeps growing.'}</p>
           <div class="lvl-grid">
             <div><h3>New buildings</h3>${ZONE_KEYS.filter(z => batch[z]).map(z => `<p>${zonePic(z)}${ZONES[z].label} <b class="num">×${batch[z]}</b></p>`).join('')}</div>
             <div><h3>Unlocked</h3>${unlocks.length ? unlocks.map(u => `<p>${icon('check')}${esc(u)}</p>`).join('') : '<p class="muted">Nothing new this time</p>'}
@@ -443,10 +451,10 @@ export class HUD {
   update(): void {
     const g = this.game, L = this.last;
 
-    // Money in whole dollars with a 200ms flash per change. Net per day = income (yesterday's, or today's so far
-    // on the first day) minus the network's upkeep.
+    // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business income (yesterday's,
+    // or today's so far on the first day) - the network's upkeep; grants are one-off
     const money = Math.round(g.money);
-    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(income(l) - l.grants - g.upkeepDay); // grants are one-off
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business - g.upkeepDay);
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -457,9 +465,12 @@ export class HUD {
       n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
       c.classList.toggle('debt', money < 0);
       const y = g.ledger.yesterday, t = g.ledger.today;
-      c.dataset.tip = `Money. Trips earn ${fmtMoney(T.ARRIVAL_PAY)} each; roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
-        + ` Yesterday: income ${fmtMoney(income(y))}, upkeep ${fmtMoney(y.upkeep)}, building ${fmtMoney(y.build)}.`
-        + ` Today: income ${fmtMoney(income(t))}, building ${fmtMoney(t.build)}.`;
+      const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
+        + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '');
+      c.dataset.tip = `Money. Residents pay ${fmtMoney(g.taxPerDay())}/day in taxes (more when they are happy); workers, shoppers and goods`
+        + ` arriving pay business income. Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
+        + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
+        + (g.creative ? '' : ` In debt at ${DIFFICULTY[g.cfg.difficulty].debtDays} midnights in a row = bankrupt.`);
       if (prev !== undefined && Number.isFinite(d) && d !== 0) {
         (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${fmtMoney(d)}` : `−${fmtMoney(-d)}`;
         flash(c, d > 0 ? 'gain' : 'spend', ['gain', 'spend']);
@@ -487,7 +498,7 @@ export class HUD {
       this.q('.pv').textContent = pop.toLocaleString('en-US');
       this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
       this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
-      this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Homes fill up while their trips go smoothly and empty out when they do not.`;
+      this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Happy homes fill up; unhappy ones empty out.`;
     }
     if (g.cityLevel !== L.city) {
       const up = L.city !== undefined;
@@ -579,7 +590,36 @@ export class HUD {
       this.cells.forEach((c, i) => { c.classList.toggle('past', i < h); c.classList.toggle('now', i === h); });
       this.cells[h].style.setProperty('--p', String(m / 60));
       this.q('.clock').dataset.tip = `Day ${g.day}, ${time}. Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift;`
-        + ' shoppers go out from mid-morning to the evening. Upkeep is paid at midnight.';
+        + ' shoppers go out from mid-morning to the evening. Taxes and upkeep are paid by the hour.';
+    }
+
+    // City happiness: smile 60+, neutral 30-60, frown under 30 (shape and colour), the weighted parts in the tooltip
+    const hp = Math.round(g.happiness), cp = g.cityParts, pc = (x: number) => `${Math.round(100 * x)}%`;
+    const hk = `${hp}|${Object.values(cp).map(pc).join()}`;
+    if (hk !== L.happy) {
+      L.happy = hk;
+      const c = this.q('.happy'), face = hp >= T.GROW_HI ? 'smile' : hp >= T.GROW_LO ? 'neutral' : 'frown';
+      c.querySelector('.ico')!.outerHTML = icon(face);
+      c.classList.toggle('good', face === 'smile');
+      c.classList.toggle('bad', face === 'frown');
+      this.q('.hv').textContent = `${hp}%`;
+      c.dataset.tip = `City happiness ${hp}%, averaged over a day. Jobs ${pc(cp.job)}, shops ${pc(cp.shop)}, trips ${pc(cp.trips)},`
+        + ` pollution ${pc(cp.pollution)}, noise ${pc(cp.noise)}. Happy homes fill up and pay more taxes; under ${T.GROW_LO}% people move out.`
+        + (g.creative ? '' : ` Under ${DIFFICULTY[g.cfg.difficulty].failHappy}% for ${T.FAIL_DAYS} midnights in a row from day ${T.FAIL_FROM_DAY}, the residents leave.`);
+    }
+
+    // Career fail countdown: Debt: 2 days to bankruptcy / Unhappy: 1 day left
+    const a = g.alarm, ak = a ? `${a.kind}|${a.days}` : '';
+    if (ak !== L.alarm) {
+      L.alarm = ak;
+      const c = this.q('.alarm'), s = a && a.days > 1 ? 's' : '';
+      c.hidden = !a;
+      if (a) {
+        this.q('.atxt').textContent = a.kind === 'bankrupt' ? `Debt: ${a.days} day${s} to bankruptcy` : `Unhappy: ${a.days} day${s} left`;
+        c.dataset.tip = a.kind === 'bankrupt'
+          ? 'Below $0 at midnight counts toward bankruptcy. Earn more (grow the city, get trips through) or demolish roads you do not need.'
+          : 'Happiness is too low. Give homes jobs and shops they can reach, smooth trips, and keep factories and loud roads away from them.';
+      }
     }
 
     const off = g.buildings.reduce((n, b) => n + +!b.connected, 0);

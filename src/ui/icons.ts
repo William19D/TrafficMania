@@ -20,6 +20,9 @@ const P: Record<string, string> = {
   warning: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/>',
   people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/>',
   star: '<path d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6-5.4-2.9-5.4 2.9 1.1-6L3.2 9.4l6.1-.8z"/>',
+  smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0M9 9.5v.01M15 9.5v.01"/>',
+  neutral: '<circle cx="12" cy="12" r="9.5"/><path d="M8.5 15h7M9 9.5v.01M15 9.5v.01"/>',
+  frown: '<circle cx="12" cy="12" r="9.5"/><path d="M8 16.5a5 5 0 0 1 8 0M9 9.5v.01M15 9.5v.01"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   place: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>',
 };

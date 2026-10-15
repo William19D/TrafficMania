@@ -45,7 +45,7 @@ function steps(g: Game): Step[] {
     },
     {
       title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
-      text: 'Commuters leave home between 6:00 and 10:00 and drive back after a 9-hour shift. Each trip that arrives earns money. Press 4x to speed up.',
+      text: 'Commuters leave home between 6:00 and 10:00 and drive back after a 9-hour shift. Residents pay taxes, more when they are happy, and every worker, shopper and truck of goods that arrives pays business income. Press 4x to speed up.',
       // the clock starts again here (start() paused it), so the morning rush is still ahead
       enter: g => { if (!g.speed) g.speed = 1; },
       done: g => g.reports.some(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)),
@@ -84,7 +84,7 @@ function steps(g: Game): Step[] {
     },
     {
       title: 'You are ready', task: 'Press Finish and keep the traffic flowing!',
-      text: 'Homes fill up while their trips go smoothly. Each new level brings buildings to place and unlocks road tiers, roundabouts, viaducts and tunnels. Edit (4) changes lanes or bends a road; Demolish (5) refunds all of a road built today, half of an older one. Roads cost upkeep every day.',
+      text: 'Homes fill up while they are happy: jobs and shops in reach, smooth trips, no factory or loud road next door. Stay out of debt and keep the residents happy, or the game ends. Each new level brings buildings to place and unlocks road tiers, roundabouts, viaducts and tunnels. Edit (4) changes lanes or bends a road; Demolish (5) refunds all of a road built today, half of an older one. Roads cost upkeep every day.',
     },
   ];
 }

@@ -191,6 +191,8 @@ kbd {
 .pbar { display: block; height: 3px; border-radius: 2px; background: var(--soft); overflow: hidden; }
 .pbar i { display: block; height: 100%; background: var(--success); transition: width .3s var(--ease); }
 .lvl .ico { color: var(--warning); }
+.happy.good .ico { color: var(--success); }
+.happy.bad .ico { color: var(--danger); }
 .lvl.bump b { animation: bump .3s var(--ease); display: inline-block; }
 
 /* ---------- B: status ---------- */

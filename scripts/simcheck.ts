@@ -10,7 +10,7 @@ import type { Trip } from '../src/entities/Trip.ts';
 import { Car, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 
@@ -131,7 +131,7 @@ if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(
 if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
 
 // Money: a straight 10-tile avenue costs 10 x its tier rate, a same-day demolish gives it all back; built again and demolished
-// the next day it refunds REFUND_LATER after one day of upkeep; no money, no road
+// the next day it refunds REFUND_LATER after day 1's upkeep (paid hourly from START_HOUR); no money, no road
 {
   const w = blank(), m0 = w.money, a = { x: 100, y: 500 }, b = { x: 500, y: 500 }, mid = { x: 300, y: 500 };
   const plan = w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false });
@@ -143,7 +143,7 @@ if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...ki
   w.commitPath(w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }));
   w.time = (24 - TUNING.START_HOUR) * HOUR - DT / 2; // just before the first midnight
   w.update(DT);
-  const upkeep = plan.cost * TUNING.UPKEEP_RATE;
+  const upkeep = plan.cost * TUNING.UPKEEP_RATE * (24 - TUNING.START_HOUR) / 24;
   if (Math.abs(w.ledger.yesterday.upkeep - upkeep) > 1e-6) fail(`money: upkeep ${w.ledger.yesterday.upkeep}, expected ${upkeep}`);
   w.demolishAt(mid);
   const left = m0 - plan.cost - upkeep + plan.cost * TUNING.REFUND_LATER;
@@ -413,6 +413,34 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.update(DT);
   if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
   if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+}
+// Happiness: an identical home 60px from a staffed factory scores 25+ points under one 600px away.
+// Fails: career money below 0 at DEBT_DAYS midnights in a row is bankrupt (the countdown says 1 day before it), city happiness
+// under failHappy from day FAIL_FROM_DAY at FAIL_DAYS midnights is 'unhappy'; creative and the tutorial never fail
+{
+  const w = blank(), F = town(w, 1000, 300, 'industry').building!;
+  F.staffed = 1;
+  const near = w.addBuilding(buildingAt('home', { x: F.x + 60, y: F.y }, 0)), far = w.addBuilding(buildingAt('home', { x: F.x + 600, y: F.y }, 0));
+  const hn = w.rateHome(near), hf = w.rateHome(far);
+  if (hf - hn < 25) fail(`happiness: home by the factory ${hn.toFixed(0)}, far one ${hf.toFixed(0)}`);
+  const midnight = (g: Game) => { g.time = ((g.today + 1) * 24 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
+  const d = DIFFICULTY[SIM.difficulty];
+  for (const [mode, tut] of [['career', false], ['creative', false], ['career', true]] as const) {
+    const g = blank();
+    g.cfg = { ...SIM, mode };
+    g.tutorialActive = tut;
+    g.money = -1;
+    for (let i = 1; i < d.debtDays; i++) midnight(g);
+    if (!tut && mode === 'career' && (g.gameOver || g.alarm?.kind !== 'bankrupt' || g.alarm.days !== 1)) fail(`fail: alarm ${JSON.stringify(g.alarm)} before bankruptcy`);
+    for (let i = 0; i < 3; i++) midnight(g);
+    if (g.gameOver !== (mode === 'career' && !tut ? 'bankrupt' : '')) fail(`fail: ${mode}${tut ? ' tutorial' : ''} in debt gave '${g.gameOver}'`);
+  }
+  const g = blank();
+  g.tutorialActive = false;
+  g.happiness = d.failHappy - 1;
+  if (g.alarm?.kind !== 'unhappy' || g.alarm.days !== TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS - 2) fail(`fail: unhappy alarm ${JSON.stringify(g.alarm)} on day 1`);
+  while (!g.gameOver && g.day < 10) midnight(g);
+  if (g.gameOver !== 'unhappy' || g.day !== TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS - 1) fail(`fail: unhappy city gave '${g.gameOver}' on day ${g.day}`);
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

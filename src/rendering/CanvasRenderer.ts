@@ -347,12 +347,20 @@ export class CanvasRenderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (const b of game.buildings) {
-      if (b.connected) continue;
+      const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
+      if (b.connected) {
+        // homes: a red dot while households are moving out, residents and happiness under the cursor
+        if (b.kind !== 'home') continue;
+        if (b.happy < TUNING.GROW_LO) { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, RED); }
+        if (over) this.text(b.residents < 1 ? `Abandoned · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${ZONES.home.residents} residents · ${Math.round(b.happy)}% happy`,
+          b.x, top, 'bold 11px system-ui', b.happy < TUNING.GROW_LO ? RED : DARK);
+        continue;
+      }
       this.circle(b.x, b.y, 6, RED);
       ctx.font = 'bold 9px system-ui';
       ctx.fillStyle = '#FFFFFF';
       ctx.fillText('!', b.x, b.y + 0.5);
-      if (hover && b.contains(hover, 4)) this.text('No road access', b.x, b.y - Math.max(b.w, b.h) / 2 - 10, 'bold 11px system-ui', RED);
+      if (over) this.text('No road access', b.x, top, 'bold 11px system-ui', RED);
     }
 
     this.offscreenMarkers(game, dpr);
@@ -411,6 +419,8 @@ export class CanvasRenderer {
     rect(-h, -w, 2 * h, 2 * w, 4, 'rgba(0,0,0,.12)');
     ctx.restore();
     frame(0, 0);
+    // an empty home (everyone moved out) fades
+    if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = 0.45;
     rect(-h, -w, 2 * h, 2 * w, 4, z.fill, z.out, 1.5);
     rect(-h + 3, -w + 3, 2 * h - 6, 2 * w - 6, 2.5, z.roof);
     ctx.strokeStyle = z.out;

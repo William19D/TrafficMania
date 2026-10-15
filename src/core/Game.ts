@@ -3,11 +3,11 @@ import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
 import type { Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
-import type { Commuter } from '../entities/Building.ts';
+import type { Commuter, Parts } from '../entities/Building.ts';
 import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
@@ -16,6 +16,7 @@ import type { Feature, GameConfig, Purpose, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place';
+export type GameOver = '' | 'bankrupt' | 'unhappy';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
@@ -23,7 +24,6 @@ const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map
 // $ per day by category; build is the net spent on construction (refunds count negative)
 export interface Ledger { taxes: number; business: number; upkeep: number; build: number; grants: number }
 const ledger0 = (): Ledger => ({ taxes: 0, business: 0, upkeep: 0, build: 0, grants: 0 });
-export const income = (l: Ledger): number => l.taxes + l.business + l.grants;
 // $24,310 · $1.2M · −$1,200 · ∞
 export const fmtMoney = (n: number): string => {
   if (n === Infinity) return '∞';
@@ -61,7 +61,7 @@ export class Game {
   cars: Car[] = [];
   // Last 200 finished trips, oldest first; arrived / failed since the start, outcomes since midnight
   reports: TripReport[] = [];
-  stats = { arrived: 0, failed: 0, today: outcomes0() };
+  stats = { arrived: 0, smooth: 0, failed: 0, today: outcomes0() };
   // Infinity in creative mode
   money: number;
   ledger = { today: ledger0(), yesterday: ledger0() };
@@ -86,9 +86,15 @@ export class Game {
   selected: Edge[] | null = null;
   // Edges created by the last commitPath, in build order (reused edges not included)
   lastBuilt: Edge[] = [];
-  gameOver = false;
+  gameOver: GameOver = '';
+  // City happiness 0..100 (EMA of the residents-weighted home mean) and its weighted parts
+  happiness = 60;
+  cityParts: Parts = { job: 0, shop: 0, trips: 0.6, pollution: 0, noise: 0 };
+  // Midnights in a row in debt / unhappy (career fail counters)
+  debtDays = 0;
+  sadDays = 0;
   message = '';
-  // Set while the tutorial runs (S7: no fail checks)
+  // Set while the tutorial runs: no fail checks
   tutorialActive = false;
   // No departures, shopping, freight or return trips (simcheck drives its own trips)
   demandOff = false;
@@ -96,7 +102,6 @@ export class Game {
   tutorialTargets: Vec[] = [];
   // Last successful commitPath: edges created and plan level (read by the tutorial)
   lastBuild: { segs: number; level: number } | null = null;
-  private lastDay = 0;
   private lastHour: number = T.START_HOUR;
   // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
   private assignAt = 0;
@@ -171,19 +176,12 @@ export class Game {
     if (!this.running) return;
     this.time += dt;
 
-    if (this.today > this.lastDay) {
-      // ponytail: upkeep is paid in one lump at midnight; hourly with S7's taxes
-      this.lastDay = this.today;
-      this.upkeepDay = this.upkeepPerDay();
-      this.money -= this.upkeepDay;
-      this.ledger.today.upkeep += this.upkeepDay;
-      this.ledger = { today: ledger0(), yesterday: this.ledger.today };
-      this.stats.today = outcomes0();
-    }
-    const hr = Math.floor(this.clock);
-    if (hr > this.lastHour) {
-      this.lastHour = hr;
-      this.hourly(hr % 24);
+    // every hour passed (a time jump runs each one): demand and happiness, then that hour's taxes and upkeep, then midnight
+    for (const hr = Math.floor(this.clock); this.lastHour < hr;) {
+      const h = ++this.lastHour % 24;
+      this.hourly(h);
+      this.payHour();
+      if (!h) this.midnight();
     }
     this.checkLevel();
     if (this.time >= this.assignAt) this.assign();
@@ -201,11 +199,8 @@ export class Game {
       if (r === 'arrived') {
         this.score++;
         this.stats.arrived++;
-        // ponytail: flat pay per arrival until S7's taxes and business income
-        const pay = T.ARRIVAL_PAY * DIFFICULTY[this.cfg.difficulty].tax;
-        this.money += pay;
-        this.ledger.today.business += pay;
         const t = car.trip, secs = this.time - t.departed;
+        if (!t.back) this.business(t);
         this.report(t, this.outcome(t, secs), secs);
         if (t.back) { if (t.who) t.who.at = 'home'; }
         else if (!this.demandOff) this.park(t);
@@ -215,13 +210,59 @@ export class Game {
     }
   }
 
+  // Business income on arrival: a worker at a workplace, a customer at a shop (half when it has no goods), a truck of goods
+  private business(t: Trip): void {
+    const x = t.purpose === 'commute' ? T.TAX_COMMUTE : t.purpose === 'freight' ? T.TAX_FREIGHT : T.TAX_SHOP * (t.to.stock > 0 ? 1 : 0.5);
+    const pay = x * DIFFICULTY[this.cfg.difficulty].tax;
+    this.money += pay;
+    this.ledger.today.business += pay;
+  }
+
+  // Residential taxes per day at the current population and happiness
+  taxPerDay(): number {
+    return T.TAX_RES * this.population * (0.5 + 0.5 * this.happiness / 100) * DIFFICULTY[this.cfg.difficulty].tax;
+  }
+
+  // One hour of taxes and upkeep
+  private payHour(): void {
+    const tax = this.taxPerDay() / 24, up = this.upkeepDay / 24;
+    this.money += tax - up;
+    this.ledger.today.taxes += tax;
+    this.ledger.today.upkeep += up;
+  }
+
+  // Rolls the ledger and the day's outcomes, then the career fail checks (never in creative or during the tutorial):
+  // in debt at debtDays midnights in a row = bankrupt; from day FAIL_FROM_DAY, unhappy at FAIL_DAYS midnights in a row = the residents left
+  private midnight(): void {
+    this.upkeepDay = this.upkeepPerDay();
+    this.ledger = { today: ledger0(), yesterday: this.ledger.today };
+    this.stats.today = outcomes0();
+    if (this.creative || this.tutorialActive) { this.debtDays = this.sadDays = 0; return; }
+    const d = DIFFICULTY[this.cfg.difficulty], day = this.lastHour / 24 + 1;
+    this.debtDays = this.money < 0 ? this.debtDays + 1 : 0;
+    this.sadDays = day >= T.FAIL_FROM_DAY && this.happiness < d.failHappy ? this.sadDays + 1 : 0;
+    if (this.debtDays >= d.debtDays) this.gameOver = 'bankrupt';
+    else if (this.sadDays >= T.FAIL_DAYS) this.gameOver = 'unhappy';
+  }
+
+  // The nearest career fail: midnights left before it if nothing changes (1 = the next one), null when none looms
+  get alarm(): { kind: Exclude<GameOver, ''>; days: number } | null {
+    if (this.creative || this.tutorialActive || this.gameOver) return null;
+    const d = DIFFICULTY[this.cfg.difficulty];
+    const debt = this.money < 0 ? d.debtDays - this.debtDays : Infinity;
+    // the first midnight that counts is the next one, or the one into day FAIL_FROM_DAY
+    const sad = this.happiness < d.failHappy ? Math.max(1, T.FAIL_FROM_DAY - this.day) + T.FAIL_DAYS - 1 - this.sadDays : Infinity;
+    if (debt === Infinity && sad === Infinity) return null;
+    return debt <= sad ? { kind: 'bankrupt', days: debt } : { kind: 'unhappy', days: sad };
+  }
+
   // On the hour: workplaces count their staff, homes accrue shopping trips along SHOP_CURVE, staffed factories accrue
   // trucks during TRUCK_HOURS; each whole trip goes to a gravity-picked reachable shop
   private hourly(h: number): void {
     if (h === 3) this.assign();
     if (this.demandOff) return;
     const comp = this.components(), mult = DIFFICULTY[this.cfg.difficulty].trips, [t0, t1] = T.TRUCK_HOURS;
-    this.grow();
+    this.grow(comp);
     for (const b of this.buildings) {
       if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.who).length * T.PEOPLE_PER_CAR / b.jobs);
       if (b.kind === 'home') {
@@ -241,20 +282,52 @@ export class Game {
     }
   }
 
-  // Homes: happiness from the last 24h of trips from or to them (0.6 with none; a home without a road sits at 33, S7's value),
-  // then residents move in or out by its band, each hour 1/24 of the daily share of capacity. A home over capacity (simcheck) only shrinks.
-  // ponytail: happiness = 100 x trip score until S7 adds jobs, shops, pollution and noise
-  private grow(): void {
-    const cut = this.time - T.DAY_SECONDS, cap = ZONES.home.residents, gm = DIFFICULTY[this.cfg.difficulty].growth;
+  // Homes: happiness (rateHome), then residents move in or out by its band, each hour 1/24 of the daily share of capacity; under
+  // GROW_LO households leave until the home stands empty. A home over capacity (simcheck) only shrinks. Then the city's happiness.
+  private grow(comp: Map<Node, number>): void {
+    const cap = ZONES.home.residents, gm = DIFFICULTY[this.cfg.difficulty].growth, keys = Object.keys(this.cityParts) as (keyof Parts)[];
+    const sum: Parts = { job: 0, shop: 0, trips: 0, pollution: 0, noise: 0 };
+    let w = 0, happy = 0;
     for (const b of this.buildings) {
       if (b.kind !== 'home') continue;
-      while (b.recent.length && b.recent[0].at <= cut) b.recent.shift();
-      const q = b.recent.length ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : 0.6;
-      b.happy = b.connected ? 100 * q : 33;
+      b.happy = this.rateHome(b, comp);
       const rate = b.happy >= T.GROW_HI ? T.GROW_FAST * gm : b.happy >= T.GROW_LO ? (b.connected ? T.GROW_SLOW * gm : 0) : -T.SHRINK;
       const d = rate * cap / 24;
       b.residents = d > 0 ? Math.max(b.residents, Math.min(cap, b.residents + d)) : Math.max(0, b.residents + d);
+      w += b.residents;
+      happy += b.residents * b.happy;
+      for (const k of keys) sum[k] += b.residents * b.parts[k];
     }
+    if (!w) return;
+    this.happiness += (happy / w - this.happiness) / T.HAPPY_TAU;
+    for (const k of keys) sum[k] /= w;
+    this.cityParts = sum;
+  }
+
+  // A home's happiness 0..100 from its parts (kept in b.parts), each 0..1:
+  // job: share of its commuters with a workplace (0 with none); shop: share of its last 24h shopping trips that arrived (none made:
+  // 1 when a shop is reachable); trips: mean SCORE of its last 24h trips (0.6 with none); without a road job = shop = 0, trips = 0.6;
+  // pollution: staffed factories, each fading out at POLLUTION_R; noise: the loudest road within NOISE_R by tier, louder with traffic.
+  // ponytail: scans every commuter, factory and road per home each hour; a spatial grid if big cities stutter on the hour
+  rateHome(b: Building, comp = this.components()): number {
+    const cut = this.time - T.DAY_SECONDS;
+    while (b.recent.length && b.recent[0].at <= cut) b.recent.shift();
+    const p = b.parts, mine = this.commuters.filter(c => c.home === b), shops = b.recent.filter(r => r.shop);
+    p.job = b.connected && mine.length ? mine.filter(c => c.work).length / mine.length : 0;
+    p.shop = !b.connected ? 0 : shops.length ? shops.filter(r => r.score > 0).length / shops.length
+      : +this.buildings.some(s => s.kind === 'shop' && comp.get(s.node) === comp.get(b.node));
+    p.trips = b.connected && b.recent.length ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : 0.6;
+    p.pollution = Math.min(1, this.buildings.reduce((n, o) => n + (o.kind === 'industry' ? o.staffed * Math.max(0, 1 - dist(o, b) / T.POLLUTION_R) : 0), 0));
+    p.noise = 0;
+    for (const e of this.graph.edges) {
+      if (e.drive || e.tunnel) continue;
+      const d = distToSegment(b, e.a, e.b).d;
+      if (d >= T.NOISE_R) continue;
+      const density = e.lanes.reduce((n, l) => n + l.cars.length, 0) * (CAR_LEN + GAP) / (e.length * e.lanes.length);
+      p.noise = Math.max(p.noise, TIERS[e.type.tier].noise * (1 - d / T.NOISE_R) * (0.5 + 0.5 * Math.min(1, 3 * density)));
+    }
+    const q = T.W_JOB * p.job + T.W_SHOP * p.shop + T.W_TRIPS * p.trips - T.W_POLL * p.pollution - T.W_NOISE * p.noise;
+    return 100 * Math.max(0, Math.min(1, q));
   }
 
   // Undirected road components by node; a door without a road is a component of its own.
@@ -368,7 +441,9 @@ export class Game {
 
   private report(t: Trip, outcome: Outcome, seconds: number): void {
     this.stats.today[outcome]++;
-    for (const b of new Set([t.from, t.to])) if (b.kind === 'home') b.recent.push({ at: this.time, score: SCORE[outcome] });
+    if (outcome === 'smooth') this.stats.smooth++;
+    const shop = t.purpose === 'shop' && !t.back;
+    for (const b of new Set([t.from, t.to])) if (b.kind === 'home') b.recent.push({ at: this.time, score: SCORE[outcome], shop });
     this.reports.push({ purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour });
     if (this.reports.length > 200) this.reports.shift();
   }

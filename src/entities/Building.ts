@@ -7,6 +7,9 @@ import type { Trip } from './Trip.ts';
 // Door: DOOR_D px out from the middle of the front face; roads snap to it within DOOR_R
 export const DOOR_D = 10, DOOR_R = 14;
 
+// What a home's happiness is made of, each 0..1 (Game.rateHome)
+export interface Parts { job: number; shop: number; trips: number; pollution: number; noise: number }
+
 // PEOPLE_PER_CAR workers driving one car; next = game time of its next departure, at = where the car is
 export interface Commuter { home: Building; work: Building | null; depart: number; next: number; at: 'home' | 'driving' | 'away' }
 
@@ -23,8 +26,9 @@ export class Building {
   truckAcc = 0;
   retryTimer = 0;
   happy = 60;            // 0..100, homes only, hourly
-  recent: { at: number; score: number }[] = []; // home: SCORE of each trip from or to it, last 24h
-
+  parts: Parts = { job: 0, shop: 0, trips: 0.6, pollution: 0, noise: 0 };
+  // home: SCORE of each trip from or to it in the last 24h; shop = an outbound shopping trip
+  recent: { at: number; score: number; shop: boolean }[] = [];
 
   constructor(public kind: Zone, public x: number, public y: number, public angle: number) {}
 

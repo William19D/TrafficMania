@@ -48,7 +48,7 @@ export const BIOMES: Record<Biome, {
 };
 
 // Road hierarchy. limit: px/s (Car MAX_SPEED 110 = avenue), a driver's top speed scales by limit / MAX_SPEED; kmh: UI only;
-// lanes: allowed per direction; cost: $/tile at laneFactor 1 (upkeep = price x UPKEEP_RATE per day); noise 0..1 (S7);
+// lanes: allowed per direction; cost: $/tile at laneFactor 1 (upkeep = price x UPKEEP_RATE per day); noise 0..1 (home happiness);
 // access: buildings may connect (S4); level: city level that unlocks it (S6).
 // Look: fill / outline, shoulder px per side, median px between the directions (two-way), centre line.
 export type Tier = 'dirt' | 'street' | 'avenue' | 'boulevard' | 'highway';
@@ -111,7 +111,6 @@ export const TUNING = {
   LIGHT_COST: 600, LIGHT_UPKEEP: 4, ROUNDABOUT_COST: 1200, ROUNDABOUT_UPKEEP: 2,
   UPKEEP_RATE: 0.02,         // of a road's build price, per day
   REFUND_SAME_DAY: 1, REFUND_LATER: 0.5,
-  ARRIVAL_PAY: 15,           // placeholder income per arrived trip until S7's taxes
   ACCESS_R: 60,              // px from a door to the road its free driveway joins
   // Day clock: game seconds per in-game day (1x = 4 real minutes, 10 s per hour); Day 1 starts at 06:00
   DAY_SECONDS: 240, START_HOUR: 6,
@@ -126,10 +125,16 @@ export const TUNING = {
   SPAWN_FAIL: 3,             // in-game hours waiting at the door -> gave up
   MAX_RETRIES: 1, MAX_CARS: 450,
   SMOOTH_X: 1.5, WAIT_SHARE: 0.4, DETOUR_X: 1.3, // outcome: time vs free-flow ideal, share of the trip stopped, length vs ideal
-  // Growth per day as a share of a home's capacity, by happiness band (S6: happiness = 100 x the trip score; S7 the full formula)
+  // Growth per day as a share of a home's capacity, by happiness band; below GROW_LO households move out until the home stands empty
   GROW_HI: 60, GROW_LO: 30, GROW_FAST: 0.25, GROW_SLOW: 0.1, SHRINK: 0.1,
+  // Home happiness = 100 x (W_JOB job + W_SHOP shop + W_TRIPS trips - W_POLL pollution - W_NOISE noise), parts 0..1;
+  // city happiness = the residents-weighted mean as an EMA over HAPPY_TAU hours
+  W_JOB: 0.25, W_SHOP: 0.2, W_TRIPS: 0.55, W_POLL: 0.4, W_NOISE: 0.3, HAPPY_TAU: 24,
+  // $ per resident per day x (0.5 + 0.5 x happiness), paid hourly; business $ per arrival at a workplace, shop (half with no stock) or of goods
+  TAX_RES: 5, TAX_COMMUTE: 2, TAX_SHOP: 4, TAX_FREIGHT: 25,
+  FAIL_DAYS: 2, FAIL_FROM_DAY: 4, // career: happiness under DIFFICULTY.failHappy at FAIL_DAYS midnights in a row, from day FAIL_FROM_DAY
   LEVEL_GRANT: 2000,         // $ x level x taxMult on each level-up
   PLACED_OCC: 0.4,           // a home placed from the tray moves in 40% full
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
-  POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // placement warnings (S7 scores them): factory reach, road noise reach, noisy tier
+  POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // factory pollution reach, road noise reach, a tier the place tool warns about
 } as const;
