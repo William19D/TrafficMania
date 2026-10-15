@@ -520,6 +520,9 @@ export class Game {
     }
     if (!b.connected || this.cars.length >= T.MAX_CARS) return;
     const rk = randomKind();
+    // a door on one road (its driveway) with no lane out that has room spawns nothing: skip the pathfinding
+    const one = b.node.edges.length === 1 ? b.node.edges[0] : null, min = Math.min(KINDS[rk].len, KINDS.truck.len);
+    if (one && !this.graph.lanesFrom(one, b.node).some(l => { const f = l.cars[0]; return !f || f.s >= (f.len + min) / 2 + GAP * 2; })) return;
     for (let i = 0; i < b.pending.length; i++) {
       const trip = b.pending[i], kind = trip.purpose === 'freight' ? 'truck' : rk, len = KINDS[kind].len;
       const path = findPath(this.graph, b.node, trip.to.node);
