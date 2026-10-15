@@ -176,6 +176,22 @@ export function segmentCrosses(t: Terrain, a: Vec, b: Vec): { water: number; mou
   return { water: water / (n + 1), mountain: mountain / (n + 1) };
 }
 
+// Dry points where the straight a -> b goes onto or off water or a mountain (every 4px), at least gap apart and from either end:
+// a straight road splits there, so only its crossing is a bridge or tunnel and the land either side keeps building access
+export function shoreSplits(t: Terrain, a: Vec, b: Vec, gap: number): Vec[] {
+  const n = Math.ceil(dist(a, b) / 4), out: Vec[] = [];
+  const at = (i: number): Vec => ({ x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n });
+  const wet = (p: Vec): number => inWater(t, p) ? 1 : inMountain(t, p) ? 2 : 0;
+  for (let i = 1, prev = wet(a); i <= n; i++) {
+    const p = at(i), w = wet(p);
+    if (w === prev) continue;
+    const dry = w ? (prev ? null : at(i - 1)) : p;
+    prev = w;
+    if (dry && dist(dry, a) >= gap && dist(dry, b) >= gap && (!out.length || dist(dry, out[out.length - 1]) >= gap)) out.push(dry);
+  }
+  return out;
+}
+
 const SYLLABLES = [
   'ba', 'be', 'lo', 'ma', 'ri', 'to', 'sa', 'ne', 'vi', 'ra', 'den', 'mon',
   'tal', 'cor', 'pi', 'lu', 'ga', 'dor', 'ven', 'sol', 'mar', 'fe', 'qui', 'nor',

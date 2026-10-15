@@ -1,7 +1,7 @@
 import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
-import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, findStarterTown } from '../world/MapGenerator.ts';
+import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, shoreSplits, findStarterTown } from '../world/MapGenerator.ts';
 import type { Control, Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { clonePlan, planFits, planOf } from '../network/Junction.ts';
@@ -891,6 +891,7 @@ export class Game {
       const q = points[i + 1], n = q ? Math.max(1, Math.floor(dist(p, q) / TILE)) : 1;
       return Array.from({ length: n }, (_, k) => q ? { x: p.x + (q.x - p.x) * k / n, y: p.y + (q.y - p.y) * k / n } : p);
     });
+    else if (!level && snapMid) points = points.flatMap((p, i) => i ? [...shoreSplits(this.terrain, points[i - 1], p, TILE / 2), p] : [p]);
     const mid = (p: Vec): Snap => {
       if (!snapMid) return { node: null, edge: null, point: { x: p.x, y: p.y } };
       const n = this.graph.nearestNode(p, NODE_R + 4, level);

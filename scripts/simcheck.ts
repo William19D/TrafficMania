@@ -431,6 +431,13 @@ for (const kind of ['ambulance', 'car'] as const) {
   if (!s.ok || s.points.length !== 2 || s.note !== 'Straight') fail(`road shape: straight gave ${s.points.length} points (${s.reason})`);
   const q = snapAngle(A, { x: 600, y: 530 }, Math.PI / 12), deg = Math.atan2(q.y - A.y, q.x - A.x) * 180 / Math.PI;
   if (Math.abs(deg - 15) > 1e-9 || Math.abs(dist(A, q) - Math.hypot(100, 30)) > 1e-9) fail(`road shape: snapped to ${deg}°`);
+  // a straight road over a river is a bridge only over the water: the land either side stays a street a building can join
+  w.terrain.rivers = [{ points: [{ x: 1200, y: 0 }, { x: 1200, y: 1200 }], width: 60 }];
+  const r = w.planRoad({ x: 900, y: 100 }, { x: 1500, y: 100 }, false), kinds = r.segs.map(s => s.bridge).join();
+  if (!r.ok || kinds !== 'false,true,false') fail(`road shape: a straight road over a river built as bridges ${kinds} (${r.reason})`);
+  w.commitPath(r);
+  w.startPlacing('home');
+  if (!w.planPlace({ x: 1000, y: 150 })?.road) fail('road shape: no building snaps to the land part of a road over a river');
 }
 // Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
 // get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the
