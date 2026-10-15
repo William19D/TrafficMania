@@ -285,6 +285,7 @@ export class HUD {
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
+        <button class="iconbtn snd" data-view="sound" data-key="Shift+M"></button>
         <button class="iconbtn" data-view="menu" aria-label="Menu" data-tip="Menu: save, load, quit" data-key="Esc">${icon('menu')}</button>
       </div>
       <div class="rcol">
@@ -399,6 +400,7 @@ export class HUD {
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
       else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
       else if (v === 'menu') this.onPause?.();
+      else if (v === 'sound') this.toggleSound();
     };
     this.q('.rcol').addEventListener('click', e => {
       const t = e.target as Element, v = t.closest<HTMLElement>('[data-v]')?.dataset.v, j = t.closest<HTMLElement>('[data-jump]')?.dataset.jump;
@@ -455,13 +457,17 @@ export class HUD {
     } else if (e.key === 'c' || e.key === 'C') {
       g.overlay = OVERLAYS[(OVERLAYS.indexOf(g.overlay) + 1) % OVERLAYS.length];
     } else if ((e.key === 'm' || e.key === 'M') && e.shiftKey) {
-      sound.toggleMute();
-      g.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
+      this.toggleSound();
     } else if (e.key === 'm' || e.key === 'M') {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
       this.show.feed = !this.show.feed;
     }
+  }
+
+  private toggleSound(): void {
+    sound.toggleMute();
+    this.game.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
   }
 
   private setHelp(open: boolean, refocus = true): void {
@@ -784,9 +790,14 @@ export class HUD {
 
   // ---------- analysis panels ----------
   private updateViews(): void {
-    const g = this.game, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}`;
+    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}|${m}`;
     if (key === this.last.views) return;
     this.last.views = key;
+    // the speaker shows the sound's state (the menu's Sound page can change it too)
+    const snd = this.q('.snd');
+    snd.innerHTML = icon(m ? 'mute' : 'sound');
+    snd.setAttribute('aria-label', m ? 'Sound off' : 'Sound on');
+    snd.dataset.tip = `Sound ${m ? 'off' : 'on'}: click to ${m ? 'turn it on' : 'mute'}. Volumes are in the menu`;
     const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
     this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
     this.q('.legend').innerHTML = LEGEND[g.overlay];

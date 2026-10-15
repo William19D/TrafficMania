@@ -759,7 +759,7 @@ kbd {
 .legend i.dot { width: .7em; height: .7em; border-radius: 50%; }
 /* narrower: the resources row keeps clear of the analysis buttons; phones: the buttons stack under help, panels beside them */
 @media (max-width: 1279px) {
-  .res { max-width: calc(100vw - 24em); }
+  .res { max-width: calc(100vw - 28em); }
 }
 @media (max-width: 768px) {
   .res { max-width: calc(100vw - 88px); }
