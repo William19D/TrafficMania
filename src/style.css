@@ -603,3 +603,36 @@ kbd {
 }
 
 .chip.danger { cursor: pointer; }
+
+/* ---------- junction panel (Edit tool on a junction) ---------- */
+.jpanel { width: min(22em, calc(100vw - 24px)); }
+.jbody { display: flex; flex-direction: column; gap: .5em; }
+.jbody .seg { flex-wrap: wrap; align-self: flex-start; }
+.jnote { margin: 0; font-size: var(--label); color: var(--muted); }
+.jsvg { display: block; width: min(14em, 100%); aspect-ratio: 1; margin: 0 auto; }
+.jsvg .arm { stroke: #9E9E9A; stroke-width: 11; stroke-linecap: round; }
+.jsvg .arm.main { stroke-width: 15; stroke: #85857F; }
+.jsvg .hub { fill: #9E9E9A; }
+.jsvg g { cursor: pointer; }
+.jsvg g:focus-visible { outline: none; }
+.jsvg g:focus-visible circle { stroke: var(--accent); stroke-width: 2; }
+.jsvg circle { stroke-width: 1; }
+.jsvg text { font: 700 6px system-ui, sans-serif; text-anchor: middle; pointer-events: none; }
+.jsvg .ok circle { fill: #fff; stroke: #6B6B68; }
+.jsvg .ok text { fill: var(--ink); }
+.jsvg .ban circle, .jsvg .s0 circle { fill: var(--danger); stroke: #fff; }
+.jsvg .ban text, .jsvg .s0 text, .jsvg .s2 text { fill: #fff; }
+.jsvg .s1 circle { fill: #fff; stroke: var(--success); stroke-width: 1.6; }
+.jsvg .s1 text { fill: var(--success); }
+.jsvg .s2 circle { fill: var(--success); stroke: #fff; }
+.jsvg .off circle { fill: var(--soft); stroke: var(--line); stroke-dasharray: 1.5 1; }
+.jsvg .off text { fill: var(--muted); }
+.jsvg.locked g { opacity: .6; cursor: not-allowed; }
+.jph { display: flex; flex-direction: column; gap: .25em; }
+.jph .row { display: flex; align-items: center; gap: .25em; padding-left: .5em; border-left: 3px solid transparent; }
+.jph .row.now { border-left-color: var(--success); }
+.jph .row > b { min-width: 2.5em; text-align: center; }
+.jph .row .lane { flex: 1; align-items: flex-start; }
+.jpre { display: flex; flex-wrap: wrap; align-items: center; gap: .375em; margin-top: .25em; }
+.jpre small { width: 100%; font-size: var(--label); color: var(--muted); font-weight: 600; }
+#hud .jpre .btn { min-height: 36px; padding: 0 .75em; }

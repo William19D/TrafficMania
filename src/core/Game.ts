@@ -50,6 +50,7 @@ export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; lev
 export interface PathPlan { points: Vec[]; segs: PathSeg[]; cost: number; ok: boolean; reason: string; type: RoadType; level: number; net?: number }
 type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
+export const CONTROL_LABEL: Record<Control, string> = { none: 'None', yield: 'Yield', stop: 'Stop', light: 'Light', roundabout: 'Roundabout' };
 const CONTROL_COST: Record<Control, number> = { none: 0, yield: T.SIGN_COST, stop: T.SIGN_COST, light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
 const CONTROL_UPKEEP: Record<Control, number> = { none: 0, yield: T.SIGN_UPKEEP, stop: T.SIGN_UPKEEP, light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
 const MAX_LEVEL = 10;

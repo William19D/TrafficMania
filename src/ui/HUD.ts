@@ -1,17 +1,19 @@
 import type { Game, Tool } from '../core/Game.ts';
 import type { Ledger } from '../core/Game.ts';
-import { fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { CONTROL_LABEL, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
 import type { Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
-import type { RoadType } from '../network/RoadGraph.ts';
+import type { Control, RoadType } from '../network/RoadGraph.ts';
+import type { Move, Preset } from '../network/Junction.ts';
+import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 
 const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
   { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
   { tool: 'light', label: 'Light', key: '2', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day.` },
   { tool: 'roundabout', label: 'Roundabout', key: '3', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
-  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction. Drag a road to bend it.' },
+  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a road to change its lanes or direction, or a junction for its control, light phases and turn bans. Drag a road to bend it.' },
   { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
   { tool: 'place', label: 'Buildings', key: 'B', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
 ];
@@ -63,6 +65,7 @@ const CONTROLS: [string, string][] = [
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
+  ['Edit junction', '<kbd>4</kbd>, click a junction: control, light phases, turn bans'],
   ['Road type', 'Tier (dirt to highway), Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
@@ -72,6 +75,24 @@ const CONTROLS: [string, string][] = [
 ];
 
 const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
+
+// Junction panel
+const CONTROL_KEYS = Object.keys(CONTROL_LABEL) as Control[];
+const CONTROL_TIP: Record<Control, string> = {
+  none: 'No control: one car at a time, first come first served',
+  yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
+  stop: 'All-way stop: every car stops at the line, then one at a time',
+  light: 'Traffic light: phases you can edit, protected lefts',
+  roundabout: 'Roundabout: up to 3 cars at once, no stopping when it is clear',
+};
+const MOVES = ['Left', 'Straight', 'Right'];
+const PRESETS: [Preset, string, string][] = [
+  ['two', '2 phases', 'One phase per axis, lefts give way to oncoming traffic'],
+  ['lefts', 'Protected lefts', '4 phases: per axis a protected-left phase, then straight and right'],
+  ['each', 'One at a time', 'Each approach gets its own phase'],
+];
+const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
+const compass = (a: number): string => COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8];
 // Rush hours tinted on the clock bar
 const RUSH = new Set([7, 8, 9, 16, 17, 18, 19]);
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -104,7 +125,7 @@ export class HUD {
   private helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; junction?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
   } = { msg: '' };
   // Last level the player has seen in the level-up modal, and the speed to resume when it closes
   private seenLevel: number;
@@ -113,6 +134,9 @@ export class HUD {
   // Called with the next building without a road each time the warning chip is clicked
   onDanger: ((b: Building) => void) | null = null;
   private dangerIdx = 0;
+  // Junction panel: what a turn click edits (light signals of phase jPhase, or bans)
+  private jMode: 'signals' | 'bans' = 'signals';
+  private jPhase = 0;
 
   constructor(private root: HTMLElement, private game: Game) {
     this.seenLevel = game.cityLevel;
@@ -142,6 +166,10 @@ export class HUD {
         <div class="pop-head"><h2>Controls</h2><button class="iconbtn" data-action="close-help" aria-label="Close [Esc]">${icon('close')}</button></div>
         <table>${CONTROLS.map(([a, b]) => `<tr><th scope="row">${a}</th><td>${b}</td></tr>`).join('')}</table>
         <button class="btn" data-action="tutorial">Replay tutorial</button>
+      </div>
+      <div class="panel pop jpanel" hidden role="dialog" aria-label="Junction">
+        <div class="pop-head"><h2>Junction</h2><button class="iconbtn" data-j="close" aria-label="Close [Esc]">${icon('close')}</button></div>
+        <div class="jbody"></div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${TOOLS.slice(0, 3).map(toolBtn).join('')}
@@ -215,6 +243,12 @@ export class HUD {
     const jump = () => {
       const off = game.buildings.filter(b => !b.connected);
       if (off.length) this.onDanger?.(off[this.dangerIdx++ % off.length]);
+    };
+    const jp = this.q('.jpanel');
+    jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
+    jp.onkeydown = e => {
+      const t = (e.target as Element).closest<HTMLElement>('g[data-j]');
+      if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); this.onJunction(t.dataset.j!); }
     };
     this.q('.danger').onclick = jump;
     this.q('.danger').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } };
@@ -447,6 +481,85 @@ export class HUD {
     this.q('[data-action="flip"]').hidden = !(run && t.oneWay);
   }
 
+  // ---------- junction panel (Edit tool on a junction) ----------
+  private onJunction(cmd: string): void {
+    const g = this.game, n = g.inspect;
+    if (!n) return;
+    const [k, a, b] = cmd.split(':'), i = Number(a);
+    if (k === 'close') g.inspect = null;
+    else if (k === 'ctl') g.setControl(n, a as Control);
+    else if (k === 'mode') this.jMode = a as 'signals' | 'bans';
+    else if (k === 'ph') this.jPhase = i;
+    else if (k === 'mv') {
+      const m = Number(b) as Move;
+      if (n.control === 'light' && this.jMode === 'signals') g.editPlan(n, p => cycleSig(p, this.jPhase, i, m));
+      else g.editPlan(n, p => toggleBan(p, i, m));
+    } else if (k === 'sec') g.editPlan(n, p => setSeconds(p, i, p.phases[i].seconds + Number(b)));
+    else if (k === 'add') g.editPlan(n, p => { addPhase(p); this.jPhase = p.phases.length - 1; });
+    else if (k === 'del') g.editPlan(n, p => removePhase(p, i));
+    else if (k === 'pre') g.editPlan(n, p => applyPreset(p, a as Preset));
+  }
+
+  private updateJunction(): void {
+    const g = this.game, n = g.inspect, panel = this.q('.jpanel');
+    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}` : '';
+    if (key === this.last.junction) return;
+    if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jMode = 'signals'; this.jPhase = 0; this.setHelp(false, false); }
+    this.last.junction = key;
+    panel.hidden = !n;
+    if (!n) return;
+    const p = planOf(n), light = n.control === 'light', lock = g.lockOf('junction');
+    this.jPhase = Math.min(this.jPhase, p.phases.length - 1);
+    const sigs = light && this.jMode === 'signals', ph = p.phases[this.jPhase];
+    const main = n.control === 'yield' ? mainEdges(n).map(e => approachOf(p, n, e)) : [];
+    const price = (k: Control) => {
+      const d = Math.round(g.controlPrice(k) - g.controlRefund(n));
+      return d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free';
+    };
+    const ctl = CONTROL_KEYS.map(k => {
+      const kl = k === 'roundabout' ? g.lockOf('roundabout') : '';
+      return `<button class="lane wide" data-j="ctl:${k}" aria-pressed="${n.control === k}" aria-disabled="${!!kl}"`
+        + ` data-tip="${kl || `${CONTROL_TIP[k]}${n.control === k ? '' : ` · ${price(k)}`}`}"><small>${CONTROL_LABEL[k]}</small></button>`;
+    }).join('');
+    // Diagram: one arm per approach, three turn buttons beside its incoming lane (left farthest out)
+    const arms = p.approaches.map((a, i) => {
+      const ux = Math.cos(a), uy = Math.sin(a), rx = uy * 8, ry = -ux * 8;
+      const turns = [42, 31, 20].map((r, m) => {
+        const x = ux * r + rx, y = uy * r + ry, ban = p.ban[i][m], s = ph?.sig[i][m] ?? 0;
+        const cls = sigs ? (ban ? 'off' : `s${s}`) : ban ? 'ban' : 'ok';
+        const state = sigs ? (ban ? 'banned' : ['red', 'yield', 'green'][s]) : ban ? 'banned' : 'allowed';
+        return `<g data-j="mv:${i}:${m}" class="${cls}" role="button" tabindex="0" aria-label="${MOVES[m]} from the ${compass(a)} arm: ${state}">`
+          + `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.2"/><text x="${x.toFixed(1)}" y="${(y + 2.3).toFixed(1)}">${MOVES[m][0]}</text></g>`;
+      }).join('');
+      return [`<line class="arm${main.includes(i) ? ' main' : ''}" x1="0" y1="0" x2="${(ux * 50).toFixed(1)}" y2="${(uy * 50).toFixed(1)}"/>`, turns];
+    });
+    // all arms first, then the turn buttons on top
+    const svg = arms.map(x => x[0]).join('') + arms.map(x => x[1]).join('');
+    const note = lock ? `${lock}.`
+      : sigs ? `Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.`
+      : 'Click a turn to ban or allow it. Cars reroute around banned turns.';
+    const phases = !sigs ? '' : `<div class="jph">${p.phases.map((x, i) => `
+      <div class="row${i === n.phase ? ' now' : ''}">
+        <button class="lane wide" data-j="ph:${i}" aria-pressed="${i === this.jPhase}" data-tip="${i === n.phase ? 'Running now. Click to edit' : 'Click to edit this phase'}"><small>Phase ${i + 1}</small></button>
+        <button class="iconbtn" data-j="sec:${i}:-1" aria-label="Phase ${i + 1} shorter" ${x.seconds <= PHASE_MIN ? 'disabled' : ''}><b>−</b></button>
+        <b class="num">${x.seconds}s</b>
+        <button class="iconbtn" data-j="sec:${i}:1" aria-label="Phase ${i + 1} longer" ${x.seconds >= PHASE_MAX ? 'disabled' : ''}><b>+</b></button>
+        <button class="iconbtn" data-j="del:${i}" aria-label="Remove phase ${i + 1}" ${p.phases.length < 2 ? 'disabled' : ''}>${icon('close')}</button>
+      </div>`).join('')}
+      <button class="btn" data-j="add" ${p.phases.length >= MAX_PHASES ? 'disabled' : ''}>Add phase</button>
+      <div class="jpre"><small>Presets</small>${PRESETS.map(([k, l, t]) => `<button class="btn" data-j="pre:${k}" data-tip="${t}">${l}</button>`).join('')}</div>
+    </div>`;
+    const was = (document.activeElement as Element | null)?.closest<HTMLElement>('.jpanel [data-j]')?.dataset.j;
+    this.q('.jbody').innerHTML = `
+      <div class="seg jctl" role="group" aria-label="Control">${ctl}</div>
+      ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
+      ${light ? `<div class="seg jmode" role="group" aria-label="Turn clicks edit"><button class="lane wide" data-j="mode:signals" aria-pressed="${sigs}"><small>Signals</small></button><button class="lane wide" data-j="mode:bans" aria-pressed="${!sigs}"><small>Turn bans</small></button></div>` : ''}
+      <svg class="jsvg${lock ? ' locked' : ''}" viewBox="-54 -54 108 108" role="group" aria-label="Turns at this junction">${svg}<circle class="hub" r="6"/></svg>
+      <p class="jnote">${esc(note)}</p>
+      ${lock ? '' : phases}`;
+    if (was) this.root.querySelector<HTMLElement>(`.jpanel [data-j="${was}"]`)?.focus();
+  }
+
   // ---------- per-frame update: writes the DOM only when a value changed ----------
   update(): void {
     const g = this.game, L = this.last;
@@ -566,6 +679,7 @@ export class HUD {
     }
 
     this.updatePicker();
+    this.updateJunction();
 
     // Trips today: arrivals and their smooth share
     const td = g.stats.today, arrived = td.smooth + td.wait + td.detour, tk = `${g.stats.arrived}|${g.stats.failed}|${g.day}`;

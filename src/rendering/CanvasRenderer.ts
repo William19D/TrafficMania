@@ -2,11 +2,12 @@ import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
 import type { Mountain } from '../world/MapGenerator.ts';
-import { ROAD_W, NODE_R, CAR_W, LANE_W, lightGroup, roadWidth } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, CAR_W, LANE_W, roadWidth } from '../network/RoadGraph.ts';
+import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
-import { fmtMoney } from '../core/Game.ts';
+import { CONTROL_LABEL, fmtMoney } from '../core/Game.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -262,6 +263,9 @@ export class CanvasRenderer {
       carsAt(L);
     }
 
+    // Junction open in the Edit panel
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
+
     // Tutorial targets: pulsing accent ring + static outer ring
     if (game.tutorialActive && game.tutorialTargets.length) {
       const r = 30 + 4 * Math.sin(performance.now() / 250);
@@ -469,7 +473,7 @@ export class CanvasRenderer {
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
         this.ring(n.x, n.y, NODE_R + 6, RED, 3);
-        label(`Remove ${n.control} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
+        label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
       const hit = g.nearestEdge(p, ROAD_W, game.level) ?? g.nearestEdge(p, ROAD_W);
@@ -500,6 +504,12 @@ export class CanvasRenderer {
     } else if (game.tool === 'place') {
       this.ghost(game, p);
     } else if (game.tool === 'edit') {
+      const j = game.junctionAt(p);
+      if (j) {
+        this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
+        label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
+        return;
+      }
       const run = game.runAt(p);
       if (!run) return;
       ctx.globalAlpha = 0.25;
@@ -693,6 +703,8 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
       ctx.lineCap = 'round';
       if (n.control === 'light') this.drawLights(n);
+      else if (n.control === 'yield' || n.control === 'stop') this.drawSigns(n);
+      if (n.plan) this.drawBans(n);
     }
   }
 
@@ -880,20 +892,60 @@ export class CanvasRenderer {
     ctx.fill();
   }
 
-  // One traffic light per approach, right of the incoming lane: green if its group has the active phase
+  // Spot d px out along e from n, right of the lane coming in (traffic flows toward the node, -u; its right is (uy, -ux))
+  private spot(n: Node, e: Edge, d: number): [number, number] {
+    const off = e.width / 2 + 3, [ux, uy] = this.dir(n, e);
+    return [n.x + ux * d + uy * off, n.y + uy * d - ux * off];
+  }
+
+  // One traffic light per approach: green while any of its movements may go, amber in the last second before all turn red
+  // (cosmetic: the sim has no amber)
   private drawLights(n: Node): void {
-    const ctx = this.ctx;
+    const ctx = this.ctx, p = planOf(n), ph = p.phases[n.phase] ?? p.phases[0], next = p.phases[(n.phase + 1) % p.phases.length];
     for (const e of n.edges) {
-      const off = e.width / 2 + 3;
-      const [ux, uy] = this.dir(n, e);
-      // Traffic flows toward the node (-u); its right is (uy, -ux)
-      const px = n.x + ux * (NODE_R + 6) + uy * off;
-      const py = n.y + uy * (NODE_R + 6) - ux * off;
+      const a = approachOf(p, n, e), go = ph.sig[a].some(x => x > 0);
+      const amber = go && ph.seconds - n.phaseTimer < 1 && !next.sig[a].some(x => x > 0);
+      const [px, py] = this.spot(n, e, NODE_R + 6);
       ctx.beginPath();
       ctx.roundRect(px - 3.5, py - 3.5, 7, 7, 1.5);
       ctx.fillStyle = DARK;
       ctx.fill();
-      this.circle(px, py, 1.2, lightGroup(n, e) === n.phase ? GREEN : RED);
+      this.circle(px, py, 1.2, amber ? AMBER : go ? GREEN : RED);
+    }
+  }
+
+  // Yield: a give-way triangle on every side-road approach; stop: a red octagon on every approach
+  private drawSigns(n: Node): void {
+    const ctx = this.ctx, main = n.control === 'yield' ? mainEdges(n) : [];
+    for (const e of n.edges) {
+      if (main.includes(e)) continue;
+      const [px, py] = this.spot(n, e, NODE_R + 6);
+      ctx.beginPath();
+      if (n.control === 'stop') for (let i = 0; i < 8; i++) ctx.lineTo(px + 3.6 * Math.cos((i + 0.5) * Math.PI / 4), py + 3.6 * Math.sin((i + 0.5) * Math.PI / 4));
+      else { ctx.moveTo(px - 3.8, py - 2.6); ctx.lineTo(px + 3.8, py - 2.6); ctx.lineTo(px, py + 3.8); }
+      ctx.closePath();
+      ctx.fillStyle = n.control === 'stop' ? RED : '#FFFFFF';
+      ctx.fill();
+      ctx.strokeStyle = n.control === 'stop' ? '#FFFFFF' : RED;
+      ctx.lineWidth = n.control === 'stop' ? 0.8 : 1.3;
+      ctx.stroke();
+    }
+  }
+
+  // A small red no-turn glyph on each approach with a banned movement
+  private drawBans(n: Node): void {
+    const ctx = this.ctx, p = n.plan!;
+    for (const e of n.edges) {
+      if (!p.ban[approachOf(p, n, e)].some(Boolean)) continue;
+      const [px, py] = this.spot(n, e, NODE_R + 15);
+      this.circle(px, py, 3.4, '#FFFFFF');
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(px - 2.2, py - 2.2);
+      ctx.lineTo(px + 2.2, py + 2.2);
+      ctx.stroke();
     }
   }
 }
