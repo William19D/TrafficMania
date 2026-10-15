@@ -312,6 +312,20 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (let t = 0; t < 3 * 60; t++) w.update(DT);
   if (c.lane.from === J || c.granted || c.lane.edge.length - c.s < stopDist(J) - 1) fail(`short approach: moto ran the busy junction (on ${c.lane.from.id}->${c.lane.to.id}, s=${c.s.toFixed(1)})`);
 }
+// Joint before a junction: a lone car through plain joint M onto a 15px link to plain J (a road crossing a curve next to its joint)
+// rolls onto the link to queue at J and arrives, instead of stopping short of M until it gives up
+{
+  const w = blank(), wg = w.graph, flat = { bridge: false, tunnel: false, level: 0, type: { tier: 'avenue', lanes: 1, oneWay: false } as RoadType };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), M = wg.addNode(485, 500), J = wg.addNode(500, 500);
+  for (const [a, b] of [[X, M], [M, J], [J, Y], [J, Z]]) wg.addEdge(a!, b!, { ...flat }, 0);
+  w.demandOff = true;
+  const e = wg.edgeBetween(X, M)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y));
+  c.s = 50;
+  c.lane.cars.push(c);
+  w.cars.push(c);
+  for (let t = 0; t < 15 * 60 && w.cars.includes(c); t++) w.update(DT);
+  if (w.score !== 1) fail(`joint before a junction: car stopped at ${c.lane.from.id}->${c.lane.to.id} s=${c.s.toFixed(1)}, waited ${c.wait.toFixed(1)}s`);
+}
 // Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };

@@ -142,7 +142,11 @@ export class Car {
         const n = this.path[j + 1]!, x = graph.edgeBetween(this.path[j]!, n);
         d += x?.length ?? Infinity;
         if (n === this.dest.node) break;
-        if (graph.needsControl(n, x) || keep(n, d, x)) { gap = Math.min(gap, d - stopDist(n)); break; }
+        // a car only queues at the node its lane leads to: a stop line short of this lane's end (a junction just past a plain joint,
+        // where a road crosses a curve) is reached from the link after the joint, so it rolls onto that link and stops there
+        const line = d - stopDist(n), roll = remaining + GAP + 1;
+        if (graph.needsControl(n, x)) { gap = Math.min(gap, Math.max(line, roll)); break; }
+        if (keep(n, d, x)) { gap = Math.min(gap, line); break; }
       }
     }
 
