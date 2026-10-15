@@ -445,6 +445,11 @@ for (const kind of ['ambulance', 'car'] as const) {
   w.update(DT);
   if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
   if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+  // the last shop placed hands the tool the next kind left (a factory); the last factory puts the tool away
+  w.tray = { home: 0, shop: 1, office: 0, industry: 1 };
+  w.startPlacing('shop');
+  if (!w.placeBuilding({ x: 780, y: 440 }) || w.tool !== 'place' || w.placing !== 'industry') fail(`levels: after the last shop ${w.tool} ${w.placing}`);
+  if (!w.placeBuilding({ x: 800, y: 575 }) || w.tool !== 'road' || w.placing) fail(`levels: after the last factory ${w.tool} ${w.placing}`);
 }
 // Driveways: homes placed facing each other across a street, doors 13px apart along it, share one junction instead of leaving a
 // stretch of road shorter than a truck between two (which locked both), and both commutes arrive

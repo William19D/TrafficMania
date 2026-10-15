@@ -1,11 +1,12 @@
 import type { Game, Tool, PathPlan } from '../core/Game.ts';
+import { ZONE_KEYS } from '../core/Game.ts';
 import type { Edge } from '../network/RoadGraph.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
 import { dist } from '../util/geom.ts';
 import { cubicPoints, autoControls, bendControls } from '../util/curve.ts';
 
-// Number keys follow the dock left to right; Buildings is B
+// Number keys follow the dock left to right; Buildings is B, and B again steps through the tray (past the last kind it lets go)
 export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
 const CLICK_PX = 6;
 
@@ -173,8 +174,10 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       game.speed = game.speed === 0 ? 1 : 0;
     } else if (e.ctrlKey || e.metaKey || e.altKey) return;
     else if (e.key === 'b' || e.key === 'B') {
-      if (game.tool === 'place') game.setTool('road');
-      else { cancel(); game.startPlacing(); }
+      const k = game.tool === 'place' ? game.nextKind(game.placing) : undefined;
+      if (game.tool !== 'place') { cancel(); game.startPlacing(); }
+      else if (k && ZONE_KEYS.indexOf(k) > ZONE_KEYS.indexOf(game.placing!)) game.startPlacing(k);
+      else game.setTool('road');
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
     else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool('road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }

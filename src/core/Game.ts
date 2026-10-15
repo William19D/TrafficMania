@@ -970,8 +970,14 @@ export class Game {
 
   // ---- Place tool ----
 
+  // The first zone after `from` (tray order, wrapping round to `from` itself) with a building left
+  nextKind(from: Zone | null = null): Zone | undefined {
+    const i = from ? ZONE_KEYS.indexOf(from) + 1 : 0;
+    return [...ZONE_KEYS.slice(i), ...ZONE_KEYS.slice(0, i)].find(z => this.tray[z] >= 1);
+  }
+
   // Picks up a building of the zone (or of the first zone with one left) from the tray
-  startPlacing(kind = ZONE_KEYS.find(z => this.tray[z] >= 1)): void {
+  startPlacing(kind = this.nextKind()): void {
     if (!kind || this.tray[kind] < 1) { this.say('No buildings to place: the next level brings more'); return; }
     this.placing = kind;
     this.setTool('place');
@@ -1010,7 +1016,7 @@ export class Game {
     return { b, ok: !reason, reason, warn, road };
   }
 
-  // Places the held building at p with its free driveway; the tool lets go once that zone runs out
+  // Places the held building at p with its free driveway; once that zone runs out the tool takes the next one left, or lets go
   placeBuilding(p: Vec): boolean {
     const plan = this.planPlace(p);
     if (!plan) return false;
@@ -1019,7 +1025,11 @@ export class Game {
     if (b.kind === 'home') b.residents = ZONES.home.residents * T.PLACED_OCC;
     this.addBuilding(b);
     this.connect();
-    if (--this.tray[b.kind] < 1) this.setTool('road');
+    if (--this.tray[b.kind] < 1) {
+      const next = this.nextKind(b.kind);
+      if (next) { this.placing = next; this.say(`No ${ZONES[b.kind].label} left in the tray: switched to ${ZONES[next].label}`); }
+      else this.setTool('road');
+    }
     return true;
   }
 

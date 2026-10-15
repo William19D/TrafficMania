@@ -27,8 +27,17 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   demolish: { label: 'Demolish', tip: 'Click a road, sign, light or roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
 };
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
-// Zone swatch for the tray: the footprint in its colours
-const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
+// Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
+const ZONE_PIC: Record<Zone, (f: string, o: string, r: string) => string> = {
+  home: (f, o, r) => `<path d="M5 11h14v10H5z" fill="${f}"/><path d="M2.5 12 12 4l9.5 8z" fill="${r}"/><path d="M10 15h4v6h-4z" fill="${o}"/>`,
+  shop: (f, o, r) => `<path d="M3 10h18v11H3z" fill="${f}"/><path d="M2 6h20v4H2z" fill="${r}"/><path d="M7 6v4M12 6v4M17 6v4" stroke="${o}"/><path d="M6 13h7v4H6zM15 13h3v8h-3z" fill="#fff"/>`,
+  office: (f, o, r) => `<path d="M6 3h12v18H6z" fill="${f}"/><path d="M6 3h12v3H6z" fill="${r}"/><path d="M9 9h2M13 9h2M9 12.5h2M13 12.5h2M9 16h2M13 16h2" stroke="#fff" stroke-width="2"/>`,
+  industry: (f, o, r) => `<path d="M16 3h3v18h-3z" fill="${o}"/><path d="M2 21V11l5-4v4l5-4v4l4-3v13z" fill="${f}"/><path d="M5 14h2M9.5 14h2" stroke="${r}" stroke-width="2"/>`,
+};
+const zonePic = (z: Zone): string => {
+  const { fill, out, roof } = ZONES[z];
+  return `<svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="${out}" stroke-width="1.5" stroke-linejoin="round">${ZONE_PIC[z](fill, out, roof)}</svg>`;
+};
 const count = (n: number): string => n === Infinity ? '∞' : String(n);
 
 const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
@@ -77,7 +86,7 @@ const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highwa
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
   [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
-  ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
+  ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
@@ -327,8 +336,8 @@ export class HUD {
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Buildings to place">
-          <small class="tray-h">To place</small>
-          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: click, then click the map near a road">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+          <small class="tray-h">Pick a building <kbd>B</kbd></small>
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
         </div>
         <div class="panel legend" role="group" aria-label="Map legend">${LEGEND.none}</div>
       </div>
@@ -919,6 +928,7 @@ export class HUD {
       this.q('.tray').hidden = total < 1;
       const badge = this.q('.badge');
       badge.hidden = total < 1;
+      this.q('[data-tool="place"]').classList.toggle('ready', total >= 1);
       badge.textContent = count(total);
       L.trayN = total;
       if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
