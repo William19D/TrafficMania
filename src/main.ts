@@ -32,7 +32,7 @@ const tutorialDone = (): boolean => { try { return localStorage.getItem('tm_tuto
 
 // One game at a time: a start aborts the old HUD's and input's listeners and builds them again on the new game
 let game: Game, hud: HUD, tutorial: Tutorial, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0;
-const autosave = (): void => { if (!game.gameOver && !tutorial.active) store(AUTO, game); };
+const autosave = (): void => { if (!game.gameOver) store(AUTO, game); };
 
 const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
   game: () => game,

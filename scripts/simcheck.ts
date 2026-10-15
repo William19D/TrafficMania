@@ -660,6 +660,13 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   expect(6, 'a longer phase');
   w.overlay = 'heat';
   expect(7, 'the heat map');
+  // a replay on a city in progress (tutorialActive off) tops nothing up
+  w.tutorialActive = false;
+  w.money = 5;
+  w.tray.home = 0;
+  steps[1].enter!(w);
+  steps[3].enter!(w);
+  if (w.money !== 5 || w.tray.home !== 0) fail(`tutorial: a replay gave $${w.money - 5} and ${w.tray.home} homes`);
 }
 // Short link: plain junctions J1 and J2 only 32px apart (shorter than a car needs to clear J1 before J2's line) with traffic both
 // ways and from both side roads: a car waiting at the next line lets go of the box behind it, so no gridlock and every trip arrives

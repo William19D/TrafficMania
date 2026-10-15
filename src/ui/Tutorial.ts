@@ -8,8 +8,8 @@ import type { Building } from '../entities/Building.ts';
 import { FAILED } from '../entities/Trip.ts';
 import { icon } from './icons.ts';
 
-// The tutorial must never strand the player without money for its own tasks.
-const topUp = (g: Game, money = 20000): void => { g.money = Math.max(money, g.money); };
+// The tutorial must never strand the player without money for its own tasks; a replay on a city in progress gives nothing
+const topUp = (g: Game, money = 20000): void => { if (g.tutorialActive) g.money = Math.max(money, g.money); };
 
 export interface Step {
   title: string;
@@ -65,7 +65,7 @@ export function tutorialSteps(g: Game): Step[] {
       title: 'Place new buildings', task: 'Press B (or Buildings), then click beside a road to place a home.',
       text: 'Every level brings a batch of buildings to place; they wait in the tray. Near a road a building turns to face it and gets a free driveway. Keep homes away from factories and busy roads. R turns a building that stands free.',
       // the tray always holds a home for this step
-      enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; g.tray.home = Math.max(1, g.tray.home); },
+      enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; if (g.tutorialActive) g.tray.home = Math.max(1, g.tray.home); },
       done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '[data-tool="place"], .tray',
     },
     {
@@ -86,7 +86,8 @@ export function tutorialSteps(g: Game): Step[] {
       title: 'Time the light', task: 'Press 6 (Edit), click the light, then press + on a phase.',
       text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases, protected lefts and turn bans. Give the busier road the longer green. In a career game the phase editor unlocks at level 4.',
       targets: g => lights(g).map(at),
-      done: g => lights(g).some(n => !!n.plan?.phases.some(p => p.seconds > LIGHT_PERIOD)), hint: '[data-tool="edit"]',
+      // a replay on a career city below level 4 cannot edit phases yet: nothing to do here
+      done: g => !!g.lockOf('junction') || lights(g).some(n => !!n.plan?.phases.some(p => p.seconds > LIGHT_PERIOD)), hint: '[data-tool="edit"]',
     },
     {
       title: 'Find the jams', task: 'Press C (or the flame button) for the heat map.',
@@ -142,7 +143,10 @@ export class Tutorial {
   start(): void {
     this.steps = tutorialSteps(this.game);
     this.shown = true;
-    this.game.tutorialActive = true;
+    // the tutorial's own game (a fresh one, or creative): top-ups, no fail checks, the junction editor unlocked. A replay on a city
+    // in progress is only the cards, so it cannot buy money, homes or time.
+    const g = this.game;
+    g.tutorialActive = g.creative || (g.day === 1 && !g.ledger.today.build);
     // paused until the 'Watch the commute' step, so the first morning is not over before the first road
     this.game.speed = 0;
     this.game.setRoadType(DEFAULT_TYPE); // the tutorial's own tasks assume a default two-way street

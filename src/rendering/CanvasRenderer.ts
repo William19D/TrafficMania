@@ -316,7 +316,7 @@ export class CanvasRenderer {
     }
 
     // Tutorial targets: pulsing accent ring + static outer ring
-    if (game.tutorialActive && game.tutorialTargets.length) {
+    if (game.tutorialTargets.length) {
       const r = 30 + 4 * Math.sin(performance.now() / 250);
       for (const t of game.tutorialTargets) {
         ctx.globalAlpha = 0.9;

@@ -136,7 +136,7 @@ export class Game {
   tutorialActive = false;
   // No departures, shopping, freight or return trips (simcheck drives its own trips)
   demandOff = false;
-  // World points the renderer highlights while tutorialActive
+  // World points the renderer highlights while the tutorial runs
   tutorialTargets: Vec[] = [];
   lastHour: number = T.START_HOUR;
   // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
