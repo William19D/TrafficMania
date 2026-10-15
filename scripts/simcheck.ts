@@ -15,6 +15,7 @@ import { findPath } from '../src/network/Pathfinder.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING } from '../src/core/config.ts';
 import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
+import { dist, snapAngle } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 
 declare const process: { exit(code: number): never };
@@ -415,6 +416,16 @@ for (const kind of ['ambulance', 'car'] as const) {
   if (!bend.ok || !w.commitBend([wg.edgeBetween(J, E)!], bend)) fail(`edits: bend refused (${bend.reason})`);
   if (!J.plan) fail('edits: a slight bend reset the junction plan');
   if (Math.abs(w.money - (m1 - bend.net!)) > 1e-6) fail(`edits: bend cost ${m1 - w.money}, expected ${bend.net}`);
+}
+// Road shape: from a street's end, Curve bends the new road to leave along the street, Straight lays one segment; Ctrl's 15° steps
+{
+  const w = blank(), A = w.graph.addNode(500, 500), B = w.graph.addNode(100, 500), to = { x: 800, y: 900 };
+  w.commitPath(w.planPath([B, A], 0));
+  const c = w.planRoad(A, to, true), s = w.planRoad(A, to, false);
+  if (!c.ok || c.points.length < 3 || c.note !== 'Curve') fail(`road shape: curve gave ${c.points.length} points (${c.reason})`);
+  if (!s.ok || s.points.length !== 2 || s.note !== 'Straight') fail(`road shape: straight gave ${s.points.length} points (${s.reason})`);
+  const q = snapAngle(A, { x: 600, y: 530 }, Math.PI / 12), deg = Math.atan2(q.y - A.y, q.x - A.x) * 180 / Math.PI;
+  if (Math.abs(deg - 15) > 1e-9 || Math.abs(dist(A, q) - Math.hypot(100, 30)) > 1e-9) fail(`road shape: snapped to ${deg}°`);
 }
 // Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
 // get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the

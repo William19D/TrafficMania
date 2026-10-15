@@ -4,8 +4,8 @@ import type { Edge } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
-import { dist } from '../util/geom.ts';
-import { cubicPoints, autoControls, bendControls } from '../util/curve.ts';
+import { dist, snapAngle } from '../util/geom.ts';
+import { cubicPoints, bendControls } from '../util/curve.ts';
 
 // Number keys follow the dock left to right; Buildings is B, and B again steps through the tray (past the last kind it lets go)
 export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
@@ -32,6 +32,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
   let grab: Building | null = null; // Edit tool: the building pressed on (dragging it moves it); then the move being dragged
   let grid: Vec[] = []; // Grid tool: the corner, then the end of the first side
+  let shift = false, snap = false; // Shift: straight this road; Ctrl / Alt: its end turns in 15° steps around the anchor
 
   const blocked = () => game.gameOver || game.pendingLevel > 0;
 
@@ -45,14 +46,16 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     grid = [];
   };
 
-  const autoPlan = (a: Vec, c: Vec): PathPlan => {
-    const ta = game.tangentAt(a, c), tb = game.tangentAt(c, a);
-    const pts = !ta && !tb ? [a, c] : cubicPoints(a, ...autoControls(a, c, ta, tb), c);
-    return game.planPath(pts);
-  };
+  const autoPlan = (a: Vec, c: Vec): PathPlan => game.planRoad(a, c, game.roadCurve && !shift);
+  const bendPlan = (a: Vec, b: Vec, q: Vec): PathPlan => ({ ...game.planPath(cubicPoints(a, ...bendControls(a, b, q), b)), note: 'Bend' });
+  const aim = (a: Vec, w: Vec): Vec => snap ? snapAngle(a, w, Math.PI / 12) : w;
+  const mods = (e: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean }) => { shift = e.shiftKey; snap = e.ctrlKey || e.altKey; };
+  // the road being placed follows a mode switch or a modifier key at once, without waiting for the mouse
+  const replan = () => { if (game.tool === 'road' && mode === 'placing' && anchor && hover && !blocked()) plan = autoPlan(anchor, aim(anchor, hover)); };
 
   canvas.addEventListener('pointerdown', e => {
     canvas.setPointerCapture(e.pointerId);
+    mods(e);
     if (e.button === 1 || e.button === 2) {
       panning = true;
       panMoved = false;
@@ -65,8 +68,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       press = { x: e.clientX, y: e.clientY };
       if (mode === 'placing' && anchor) {
         mode = 'pressed';
-        end = w;
-        plan = autoPlan(anchor, w);
+        end = aim(anchor, w);
+        plan = autoPlan(anchor, end);
       }
     } else if (game.tool === 'edit') {
       press = { x: e.clientX, y: e.clientY };
@@ -81,6 +84,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
 
   canvas.addEventListener('pointermove', e => {
     hover = renderer.screenToWorld(e.clientX, e.clientY);
+    mods(e);
     if (panning) {
       // dragging the map lets go of a followed car
       if (Math.hypot(e.clientX - last.x, e.clientY - last.y) > 0) { panMoved = true; game.follow = null; }
@@ -100,12 +104,12 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     }
     if (game.tool === 'grid' && grid.length && !blocked()) { plan = game.planGrid(grid[0], grid[1] ?? w, grid[1] ? w : null); return; }
     if (game.tool !== 'road' || blocked()) { if (mode !== 'idle') cancel(); return; }
-    if (mode === 'placing' && anchor) plan = autoPlan(anchor, w);
+    if (mode === 'placing' && anchor) plan = autoPlan(anchor, aim(anchor, w));
     else if ((mode === 'pressed' || mode === 'bending') && anchor && end && press) {
       if (mode === 'pressed' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';
       if (mode === 'bending') {
         handle = w;
-        plan = game.planPath(cubicPoints(anchor, ...bendControls(anchor, end, w), end));
+        plan = bendPlan(anchor, end, w);
       }
     }
   }, { signal });
@@ -148,8 +152,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     if (mode === 'pressed' || mode === 'bending') {
       // Recompute with the release position so the built curve matches where the button was released.
       if (mode === 'bending' && anchor && end) {
-        const w = renderer.screenToWorld(e.clientX, e.clientY);
-        plan = game.planPath(cubicPoints(anchor, ...bendControls(anchor, end, w), end));
+        plan = bendPlan(anchor, end, renderer.screenToWorld(e.clientX, e.clientY));
       }
       if (plan) game.commitPath(plan);
       cancel();
@@ -174,6 +177,12 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     e.preventDefault();
   }, { signal });
 
+  for (const t of ['keydown', 'keyup'] as const) window.addEventListener(t, e => {
+    if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt') return;
+    mods(e);
+    replan();
+  }, { signal });
+
   window.addEventListener('keydown', e => {
     const n = Number(e.key);
     if (n >= 1 && n <= KEY_TOOLS.length) {
@@ -190,6 +199,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       else if (k && ZONE_KEYS.indexOf(k) > ZONE_KEYS.indexOf(game.placing!)) game.startPlacing(k);
       else game.setTool('road');
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
+    else if (e.key === 'v' || e.key === 'V') { game.roadCurve = !game.roadCurve; replan(); }
     else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool(game.moving ? 'edit' : 'road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }

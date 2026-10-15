@@ -17,7 +17,7 @@ import { KEY_TOOLS } from './Input.ts';
 
 // Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
 const TOOLS: Record<Tool, { label: string; tip: string }> = {
-  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. Esc cancels.' },
+  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
   roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
@@ -59,6 +59,11 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
+// Road tool shape, one toggle showing the active mode (a two-button segment did not fit the dock at 1280px)
+const RMODE_TIP = {
+  straight: 'Straight roads: they run straight from click to click. Click for curves',
+  curve: 'Curved roads: they bend to meet the roads they join smoothly; hold Shift for a straight one. Click for straight',
+};
 
 const SPEEDS: { s: 0 | 1 | 2 | 4; icon: string; lbl: string; tip: string; key?: string }[] = [
   { s: 0, icon: 'pause', lbl: 'II', tip: 'Pause', key: 'Space' },
@@ -89,6 +94,8 @@ export const CONTROLS: [string, string][] = [
   ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
+  ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
+  ['Road angle in 15° steps', 'hold <kbd>Ctrl</kbd> or <kbd>Alt</kbd> while placing'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
   ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
@@ -298,6 +305,7 @@ export class HUD {
       <div class="panel dock" role="toolbar" aria-label="Tools">
         ${toolBtn('road')}
         ${toolBtn('grid')}
+        <button class="lane rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
@@ -396,6 +404,7 @@ export class HUD {
       }
     });
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
+    this.q('[data-action="curve"]').onclick = () => { game.roadCurve = !game.roadCurve; };
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
@@ -975,12 +984,17 @@ export class HUD {
     this.updateBuilding();
     this.updateFeed();
     this.updateMetrics();
-    const gk = `${g.tool}|${g.gridSize}`;
+    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}`;
     if (gk !== L.gsz) {
       L.gsz = gk;
       // the grid is built on the ground: its block size takes the elevation stepper's place
       this.q('.gsz').hidden = g.tool !== 'grid';
       this.q('.stepper').hidden = g.tool === 'grid';
+      const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
+      rm.hidden = g.tool !== 'road';
+      rm.innerHTML = icon(m);
+      rm.setAttribute('aria-label', `Road shape: ${m}. Switch [V]`);
+      rm.dataset.tip = RMODE_TIP[m];
       this.root.querySelectorAll<HTMLElement>('[data-grid]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.grid) === g.gridSize)));
     }
 

@@ -225,6 +225,7 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 
 **D, dock**, left to right. Locked tools show a `lock` icon, are `aria-disabled`, and a click toasts `Unlocks at level N`:
 - `Road [1]`, `Grid [2]`
+- road shape (Road tool only, where Grid shows its block size): one toggle whose icon is the active mode, `V` switches. **Curve** (default, `Game.roadCurve`): a new road bends to meet the roads at its ends (`tangentAt`). **Straight**: always one straight segment. Holding `Shift` while placing makes the road straight in Curve mode; holding `Ctrl` or `Alt` turns its end around the start in 15° steps (`snapAngle`). Pressing on the end point and dragging bends the road in both modes. The preview label leads with `Curve`, `Straight` or `Bend` (P4: the player could not choose between a curve and a straight road). A two-button segment did not fit the dock at 1280px, hence the single toggle.
 - tier picker: 5 small swatch buttons (dirt beige, street, avenue, boulevard with a green median, highway gray), tooltip `Avenue · 50 km/h · 1-2 lanes · $90/tile`
 - lanes 1/2/3 (disabled outside the tier's range) | One-way | Flip
 - elevation stepper (as today)
@@ -233,7 +234,7 @@ On `graph.update`: `edge.heat += (sample - heat) * dt / HEAT_TAU`, where `sample
 - `Edit [6]`, `Demolish [7]`
 - `Heat map [C]` (a toggle, `aria-pressed`)
 
-Other keys: `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
+Other keys: `V` straight / curved roads, `Shift` one straight road, `Ctrl`/`Alt` 15° steps, `R` rotates a building ghost, `M` metrics, `T` trip feed, `F` follows the selected car, `Esc` cancels, then closes the top panel, then opens the pause menu, `Space` pauses. The number keys follow the dock order (S12).
 
 **E toasts** and **F tutorial** as today. New error texts go into `FRIENDLY`:
 - `Not enough money` -> "Not enough money: wait for taxes or demolish a road built today for a full refund"

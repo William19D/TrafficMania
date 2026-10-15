@@ -6,7 +6,7 @@ import type { Control, Node, Edge, EdgeFlags, RoadType } from '../network/RoadGr
 import type { JunctionPlan } from '../network/Junction.ts';
 import { clonePlan, planFits, planOf } from '../network/Junction.ts';
 import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
-import { cubicPoints, bendControls } from '../util/curve.ts';
+import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
@@ -120,6 +120,8 @@ export class Game {
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Grid tool block size in tiles
   gridSize: 3 | 4 | 6 = 4;
+  // Road tool: true = new roads curve to meet the roads they join (tangentAt), false = always straight; a drag bends either
+  roadCurve = true;
   // Interchange tool: the junction picked and the template shown on it
   ichg: { node: Node; kind: Ichg } | null = null;
   // Bumped on every build, demolish and driveway: interchange previews are cached against it
@@ -803,6 +805,12 @@ export class Game {
       this.lastBuilt.push(g.addEdge(p, n, { ...flags }, this.today));
     }
     return chain[chain.length - 1];
+  }
+
+  // Road tool, click to click: curve = bend to meet the roads at either end (tangentAt), else one straight segment
+  planRoad(a: Vec, c: Vec, curve = this.roadCurve): PathPlan {
+    const ta = curve ? this.tangentAt(a, c) : null, tb = curve ? this.tangentAt(c, a) : null;
+    return { ...this.planPath(!ta && !tb ? [a, c] : cubicPoints(a, ...autoControls(a, c, ta, tb), c)), note: curve ? 'Curve' : 'Straight' };
   }
 
   // Curved / freehand road through several anchors. The ends snap on 'level' first, else onto a node or road of another level (snapEnd);

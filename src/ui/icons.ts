@@ -7,6 +7,8 @@ const P: Record<string, string> = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
   oneway: '<path d="M3 12h17"/><path d="M14 6l6 6-6 6"/>',
   flip: '<path d="M4 8h15l-4-4M20 16H5l4 4"/>',
+  straight: '<path d="M4 20 20 4"/><circle cx="4" cy="20" r="1.5"/><circle cx="20" cy="4" r="1.5"/>',
+  curve: '<path d="M4 20C4 10 10 4 20 4"/><circle cx="4" cy="20" r="1.5"/><circle cx="20" cy="4" r="1.5"/>',
   money: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>',
   car: '<path d="M5 16V11l2-5h10l2 5v5z"/><path d="M5 11h14"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/>',
   pause: '<path d="M9 5v14M15 5v14"/>',
