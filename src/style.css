@@ -341,8 +341,9 @@ kbd {
 
 /* locked: faded, a lock on the corner; still clickable so the game says the level */
 #hud [aria-disabled="true"] { opacity: .45; }
-.tool .lock { display: none; position: absolute; top: 3px; right: 4px; width: 1em; height: 1em; }
-.tool[aria-disabled="true"] .lock { display: inline-flex; }
+#hud .lock { display: none; position: absolute; top: 3px; right: 4px; width: 1em; height: 1em; }
+#hud [aria-disabled="true"] > .lock { display: inline-flex; }
+#hud .lane .lock { top: 1px; right: 1px; width: .8em; height: .8em; }
 .tool .badge {
   position: absolute;
   top: -6px; right: -6px;
@@ -390,6 +391,7 @@ kbd {
 .lanes.off { opacity: .45; }
 #hud .lanes.off button:disabled { opacity: 1; }
 #hud .lane {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -478,6 +480,13 @@ kbd {
 @media (max-width: 1400px) {
   #hud:has(.tutorial:not([hidden])) .toasts { left: var(--edge-l); transform: none; }
 }
+/* a right-column panel open (the junction step needs both): the card steps left of the column; phones: the column stops above it */
+@media (min-width: 769px) {
+  #hud:has(.rcol > :not([hidden])) .tutorial { right: calc(var(--edge-r) + min(22em, calc(100vw - 24px)) + 12px); }
+}
+@media (max-width: 768px) {
+  #hud:has(.tutorial:not([hidden])) .rcol { max-height: calc(60vh - var(--edge-t) - max(48px, 3em) - var(--dock-h) - var(--edge-b) - 36px); }
+}
 
 /* ---------- modals ---------- */
 .modal {
@@ -556,12 +565,25 @@ kbd {
   .tool .lbl { font-size: 12px; }
 }
 /* below ~1280px the centred status bar would hit the resources row once the no-road chip shows */
+/* (.topl: the resources row and the status bar, a column so a wrapped row pushes the status down instead of under it) */
+.topl { display: contents; }
 @media (max-width: 1279px) {
-  .status { top: calc(var(--edge-t) + 56px); }
+  #hud > .topl {
+    position: absolute;
+    top: var(--edge-t);
+    left: var(--edge-l);
+    right: calc(var(--edge-r) + 56px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    pointer-events: none;
+  }
+  .topl > * { position: static; transform: none; pointer-events: auto; }
   .res { max-width: calc(100vw - 88px); }
 }
 @media (max-width: 768px) {
-  #hud { --dock-h: 74px; }
+  #hud { --dock-h: 84px; } /* 74px of buttons and room for a desktop scrollbar under them */
   .chip { min-height: 40px; padding: 0 .5em; }
   .chip.danger .long { display: none; }
   .legend { display: none; }
@@ -598,7 +620,9 @@ kbd {
   .elev { width: auto; min-width: 3.5em; }
 
   .toasts { left: 12px; right: 12px; transform: none; width: auto; max-width: none; }
-  #hud:has(.tutorial:not([hidden])) .toasts { top: calc(var(--edge-t) + 148px); bottom: auto; left: 12px; }
+  #hud:has(.tutorial:not([hidden])) .toasts { top: calc(var(--edge-t) + 200px); bottom: auto; left: 12px; }
+  /* the card covers the bottom-left column; the dock's Buildings button still opens the tray */
+  #hud:has(.tutorial:not([hidden])) .leftcol { display: none; }
 
   .tutorial { left: 12px; right: 12px; width: auto; max-height: 40vh; overflow: auto; }
 }

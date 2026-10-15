@@ -13,17 +13,20 @@ import type { Control, RoadType } from '../network/RoadGraph.ts';
 import type { Move, Preset } from '../network/Junction.ts';
 import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
+import { KEY_TOOLS } from './Input.ts';
 
-const TOOLS: { tool: Tool; label: string; key: string; tip: string }[] = [
-  { tool: 'road', label: 'Road', key: '1', tip: 'Click start, click end. Drag the end to bend. Esc cancels.' },
-  { tool: 'light', label: 'Light', key: '2', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day.` },
-  { tool: 'roundabout', label: 'Roundabout', key: '3', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
-  { tool: 'edit', label: 'Edit', key: '4', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its lanes or direction. Drag a road to bend it.' },
-  { tool: 'demolish', label: 'Demolish', key: '5', tip: 'Click a road or a light/roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
-  { tool: 'place', label: 'Buildings', key: 'B', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
-  { tool: 'grid', label: 'Grid', key: '6', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
-  { tool: 'interchange', label: 'Interchange', key: '7', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
-];
+// Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
+const TOOLS: Record<Tool, { label: string; tip: string }> = {
+  road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. Esc cancels.' },
+  grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
+  light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
+  place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
+  edit: { label: 'Edit', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it.' },
+  demolish: { label: 'Demolish', tip: 'Click a road, sign, light or roundabout to remove it. Refunds 100% on the day you built it, 50% later.' },
+};
+const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Zone swatch for the tray: the footprint in its colours
 const zonePic = (z: Zone): string => `<i class="zsw" style="background:${ZONES[z].roof};border-color:${ZONES[z].out}"></i>`;
 const count = (n: number): string => n === Infinity ? '∞' : String(n);
@@ -71,20 +74,21 @@ const FRIENDLY: Record<string, string> = {
 };
 const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
+const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
-  ['Road / Light / Roundabout / Edit / Demolish / Grid / Interchange', '<kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> <kbd>5</kbd> <kbd>6</kbd> <kbd>7</kbd>'],
+  [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
   ['Place buildings / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
-  ['Edit road', '<kbd>4</kbd>, click to select, drag to bend'],
-  ['Edit junction', '<kbd>4</kbd>, click a junction: control, light phases, turn bans'],
-  ['Road type', 'Tier (dirt to highway), Lanes 1 / 2 / 3 and One-way in the dock (new roads, or the selected road)'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
+  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
-  ['Street grid', '<kbd>6</kbd>: click a corner, the end of the first side, then the depth'],
-  ['Interchange', '<kbd>7</kbd>: click a junction, pick a type, then Build'],
-  ['Follow a car / building details', '<kbd>4</kbd>, click it; <kbd>Esc</kbd> stops'],
+  ['Street grid', `${kbd('grid')}: click a corner, the end of the first side, then the depth`],
+  ['Interchange', `${kbd('interchange')}: click a junction, pick a type, then Build`],
+  ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
+  ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, turn bans`],
+  ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Pause / resume', '<kbd>Space</kbd>'],
@@ -176,10 +180,11 @@ function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.add(cls);
 }
 
-function toolBtn(t: (typeof TOOLS)[number]): string {
-  return `<button class="tool${t.tool === 'demolish' ? ' destroy' : ''}" data-tool="${t.tool}" aria-pressed="false" data-tip="${t.tip}" data-key="${t.key}">`
-    + `<span class="kb" aria-hidden="true">${t.key}</span>${icon(t.tool)}<span class="lbl">${t.label}</span>`
-    + `${icon('lock', 'lock')}${t.tool === 'place' ? '<b class="badge num" hidden></b>' : ''}</button>`;
+function toolBtn(t: Tool): string {
+  const k = keyOf(t);
+  return `<button class="tool${t === 'demolish' ? ' destroy' : ''}" data-tool="${t}" aria-pressed="false" data-tip="${TOOLS[t].tip}" data-key="${k}">`
+    + `<span class="kb" aria-hidden="true">${k}</span>${icon(t)}<span class="lbl">${TOOLS[t].label}</span>`
+    + `${icon('lock', 'lock')}${t === 'place' ? '<b class="badge num" hidden></b>' : ''}</button>`;
 }
 
 interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<typeof setTimeout> }
@@ -221,6 +226,7 @@ export class HUD {
   constructor(private root: HTMLElement, private game: Game, signal?: AbortSignal) {
     this.seenLevel = game.cityLevel;
     root.innerHTML = `
+      <div class="topl">
       <div class="panel res" role="group" aria-label="Resources">
         <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
         <div class="chip people" tabindex="0" data-tip="">${icon('people')}<span class="pp"><span><b class="pv num"></b><small class="pn num"></small></span><span class="pbar"><i></i></span></span></div>
@@ -240,6 +246,7 @@ export class HUD {
           <span class="ck num"></span>
           <span class="hours">${Array.from({ length: 24 }, (_, h) => `<i${RUSH.has(h) ? ' class="rush"' : ''}></i>`).join('')}</span>
         </div>
+      </div>
       </div>
       <button class="panel helpbtn" data-action="help" aria-label="Controls" aria-expanded="false" data-tip="Controls" data-key="?">${icon('help')}</button>
       <div class="panel pop" hidden role="dialog" aria-label="Controls">
@@ -281,21 +288,21 @@ export class HUD {
         </div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        ${toolBtn(TOOLS[0])}
-        ${toolBtn(TOOLS[6])}
+        ${toolBtn('road')}
+        ${toolBtn('grid')}
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
           <div class="seg tiers" role="group" aria-label="Road tier">
-            ${TIER_KEYS.map(t => `<button class="lane tier" data-tier="${t}" aria-pressed="false" aria-label="${TIERS[t].label}" data-tip="${tierTip(t)}"><svg class="pic" viewBox="0 0 40 24" aria-hidden="true">${tierPic(t)}</svg></button>`).join('')}
+            ${TIER_KEYS.map(t => `<button class="lane tier" data-tier="${t}" aria-pressed="false" aria-label="${TIERS[t].label}" data-tip="${tierTip(t)}"><svg class="pic" viewBox="0 0 40 24" aria-hidden="true">${tierPic(t)}</svg>${icon('lock', 'lock')}</button>`).join('')}
           </div>
           <span class="plabel"><b class="tname">Street</b><small class="pctx">per direction</small></span>
           <div class="seg" role="group" aria-label="Lanes per direction">
             ${[1, 2, 3].map(n => `<button class="lane" data-lanes="${n}" aria-pressed="false" data-tip="${laneTip(n)}"><b>${n}</b></button>`).join('')}
           </div>
-          <button class="lane wide" data-action="oneway" aria-pressed="false" data-tip="${ONEWAY_TIP}">${icon('oneway')}<small>One-way</small></button>
+          <button class="lane wide" data-action="oneway" aria-pressed="false" data-tip="${ONEWAY_TIP}">${icon('oneway')}<small>One-way</small>${icon('lock', 'lock')}</button>
           <button class="lane wide" data-action="flip" hidden data-tip="Reverse direction">${icon('flip')}<small>Flip</small></button>
         </div>
         <span class="sep"></span>
@@ -311,13 +318,14 @@ export class HUD {
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
         <span class="sep"></span>
-        ${TOOLS.slice(1, 3).map(toolBtn).join('')}
-        ${toolBtn(TOOLS[7])}
+        ${toolBtn('light')}
+        ${toolBtn('roundabout')}
+        ${toolBtn('interchange')}
         <span class="sep"></span>
-        ${toolBtn(TOOLS[5])}
+        ${toolBtn('place')}
         <span class="sep"></span>
-        ${toolBtn(TOOLS[3])}
-        ${toolBtn(TOOLS[4])}
+        ${toolBtn('edit')}
+        ${toolBtn('demolish')}
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Buildings to place">
@@ -540,7 +548,7 @@ export class HUD {
           <h2 id="m-title" class="bad">${icon('warning')} ${broke ? 'Bankrupt' : 'The residents left'}</h2>
           <p class="sub">${broke ? `The city was in debt at ${d.debtDays} midnights in a row.` : `City happiness stayed under ${d.failHappy}% for ${T.FAIL_DAYS} midnights in a row.`}</p>
           <div class="stats">
-            <div>${icon('week', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
+            <div>${icon('calendar', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
             <div>${icon('star', 'big')}<span>Level</span><b class="num">${g.cityLevel}</b></div>
             <div>${icon('people', 'big')}<span>Population</span><b class="num">${Math.round(g.population).toLocaleString('en-US')}</b></div>
             <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.stats.arrived.toLocaleString('en-US')}</b></div>
@@ -645,7 +653,7 @@ export class HUD {
 
   private updateJunction(): void {
     const g = this.game, n = g.inspect, panel = this.q('.jpanel');
-    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}` : '';
+    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
     if (key === this.last.junction) return;
     if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jMode = 'signals'; this.jPhase = 0; this.setHelp(false, false); }
     this.last.junction = key;
@@ -693,7 +701,7 @@ export class HUD {
       <div class="jpre"><small>Presets</small>${PRESETS.map(([k, l, t]) => `<button class="btn" data-j="pre:${k}" data-tip="${t}">${l}</button>`).join('')}</div>
     </div>`;
     const was = (document.activeElement as Element | null)?.closest<HTMLElement>('.jpanel [data-j]')?.dataset.j;
-    this.q('.jbody').innerHTML = `
+    this.q('.jpanel .jbody').innerHTML = `
       <div class="seg jctl" role="group" aria-label="Control">${ctl}</div>
       ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
       ${light ? `<div class="seg jmode" role="group" aria-label="Turn clicks edit"><button class="lane wide" data-j="mode:signals" aria-pressed="${sigs}"><small>Signals</small></button><button class="lane wide" data-j="mode:bans" aria-pressed="${!sigs}"><small>Turn bans</small></button></div>` : ''}
@@ -889,7 +897,7 @@ export class HUD {
       for (const b of this.toolBtns) {
         const f = TOOL_LOCK[b.dataset.tool as Tool], lock = f ? g.lockOf(f) : '';
         b.setAttribute('aria-disabled', String(!!lock));
-        const tip = TOOLS.find(t => t.tool === b.dataset.tool)!.tip;
+        const tip = TOOLS[b.dataset.tool as Tool].tip;
         b.dataset.tip = lock ? `${lock}. ${tip}` : tip;
       }
       L.pick = undefined;

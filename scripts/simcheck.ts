@@ -3,7 +3,8 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, LIGHT_PERIOD, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, applyPreset, approachOf, moveOf, planOf, toggleBan } from '../src/network/Junction.ts';
+import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
+import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
@@ -619,6 +620,42 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const c = lane.cars[3]!;
   w.select(w.graph.carPos(c));
   if (w.follow !== c || w.selected) fail('follow: an Edit click on a car did not follow it');
+}
+// Tutorial: every step's done is a pure read (the save JSON is the same after checking them all), and a scripted level-1 town
+// passes the tasks in order: homes to the office, a commute, a placed home, the shop on a junction, a light, a longer phase
+// (the tutorial lifts the level-4 lock), the heat map
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.cityLevel = 1;
+  w.demandOff = true;
+  const H = town(w, 300, 460).building!, O = town(w, 900, 380, 'office', true).building!, S = town(w, 600, 700, 'shop').building!;
+  const steps = tutorialSteps(w);
+  const done = (): boolean[] => {
+    const json = serialize(w), d = steps.map(s => !!s.done?.(w));
+    if (serialize(w) !== json) fail('tutorial: a done check changed the game');
+    return d;
+  };
+  const expect = (n: number, what: string): void => { if (!done()[n]) fail(`tutorial: step ${n + 1} not done after ${what}`); };
+  if (done().slice(1, -1).some(x => x)) fail(`tutorial: steps done before anything was built: ${done()}`);
+  w.commitPath(w.planPath([{ x: 100, y: 420 }, { x: 1000, y: 420 }], 0, street));
+  expect(1, 'the road to the office');
+  w.queueTrip(H, O, 'commute');
+  for (let t = 0; t < 20 * 60 && !done()[2]; t++) w.update(DT);
+  expect(2, 'a commute');
+  steps[3].enter!(w);
+  w.startPlacing('home');
+  if (done()[3] || !w.placeBuilding({ x: 150, y: 470 })) fail('tutorial: home placing');
+  expect(3, 'placing a home');
+  if (done()[4]) fail('tutorial: the shop counted before its road');
+  w.commitPath(w.planPath([S.node, { x: 600, y: 420 }], 0, street));
+  expect(4, 'the shop road');
+  const j = w.graph.nodes.find(n => !n.building && n.edges.length >= 3)!;
+  w.placeControl(j, 'light');
+  expect(5, 'the light');
+  w.editPlan(j, p => setSeconds(p, 0, LIGHT_PERIOD + 2));
+  expect(6, 'a longer phase');
+  w.overlay = 'heat';
+  expect(7, 'the heat map');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

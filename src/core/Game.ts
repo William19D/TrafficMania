@@ -138,8 +138,6 @@ export class Game {
   demandOff = false;
   // World points the renderer highlights while tutorialActive
   tutorialTargets: Vec[] = [];
-  // Last successful commitPath: edges created and plan level (read by the tutorial)
-  lastBuild: { segs: number; level: number } | null = null;
   lastHour: number = T.START_HOUR;
   // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
   assignAt = 0;
@@ -558,7 +556,8 @@ export class Game {
   // '' when unlocked, else the toast: 'Unlocks at level 2: Roundabouts'
   lockOf(f: Feature): string {
     const u = UNLOCKS[f];
-    return this.unlocked(u.level) ? '' : `Unlocks at level ${u.level}: ${u.label}`;
+    // ponytail: the tutorial edits a light phase at level 1; the junction editor is the only lock it lifts
+    return this.unlocked(u.level) || (f === 'junction' && this.tutorialActive) ? '' : `Unlocks at level ${u.level}: ${u.label}`;
   }
 
   private lockedMsg(t: RoadType): string {
@@ -872,7 +871,6 @@ export class Game {
   // link: give buildings near the new road their driveways (commitBend does it itself once its cars are moved)
   commitPath(plan: PathPlan, link = true): void {
     if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return; }
-    const before = this.graph.edges.length;
     this.lastBuilt = [];
     let node: Node | null = null;
     for (const seg of plan.segs as SegPlan[]) {
@@ -889,8 +887,6 @@ export class Game {
     // a later segment (or a driveway) may have split an edge built by an earlier one
     this.lastBuilt = this.lastBuilt.filter(e => this.graph.edges.includes(e));
     this.spend(plan.cost);
-    // ponytail: net edge delta (a split of an existing road adds one too), fine for the tutorial check
-    this.lastBuild = { segs: this.graph.edges.length - before, level: plan.segs[0]?.level ?? this.level };
   }
 
   demolishAt(p: Vec): void {

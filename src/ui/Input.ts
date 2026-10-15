@@ -5,7 +5,8 @@ import type { Vec } from '../util/geom.ts';
 import { dist } from '../util/geom.ts';
 import { cubicPoints, autoControls, bendControls } from '../util/curve.ts';
 
-const KEY_TOOLS: Tool[] = ['road', 'light', 'roundabout', 'edit', 'demolish', 'grid', 'interchange'];
+// Number keys follow the dock left to right; Buildings is B
+export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
 const CLICK_PX = 6;
 
 type Mode = 'idle' | 'placing' | 'pressed' | 'bending';

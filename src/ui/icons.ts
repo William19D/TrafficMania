@@ -14,7 +14,7 @@ const P: Record<string, string> = {
   fast: '<path d="M4 5v14l8-7zM12 5v14l8-7z"/>',
   faster: '<path d="M2 6v12l6-6zM9 6v12l6-6zM16 6v12l6-6z"/>',
   help: '<circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7v.5"/><path d="M12 17.5v.01"/>',
-  week: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/>',
+  calendar: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   check: '<path d="M4 12.5 9.5 18 20 6"/>',
   warning: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.01"/>',
