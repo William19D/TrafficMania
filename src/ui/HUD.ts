@@ -114,7 +114,7 @@ export const CONTROLS: [string, string][] = [
   ['Street grid', `${kbd('grid')}: click a corner, the end of the first side, then the depth`],
   ['Interchange', `${kbd('interchange')}: click a junction, pick a type, then Build`],
   ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
-  ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, lane connections`],
+  ['Edit junction', `${kbd('edit')}, click a junction: control and light phases; drag from a lane to a road to connect it, click a line to remove it`],
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
   ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],

@@ -55,7 +55,7 @@ export function tutorialSteps(g: Game): Step[] {
     },
     {
       title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
-      text: `Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift. Car colours show the trip. Press 4x to speed up.`,
+      text: `Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift. P marks each car with its trip purpose. Press 4x to speed up.`,
       // the clock starts again here (start() paused it), so the morning rush is still ahead
       enter: g => { if (!g.speed) g.speed = 1; },
       done: g => g.reports.some(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)),
