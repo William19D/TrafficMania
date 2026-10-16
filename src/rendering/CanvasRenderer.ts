@@ -2,7 +2,7 @@ import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
 import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
-import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
+import { approachOf, autoMasks, inLanes, laneMasks, mainEdges, moveOf, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
@@ -290,7 +290,7 @@ export class CanvasRenderer {
     }
 
     // Junction open in the Edit panel
-    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.laneLinks(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
@@ -1101,7 +1101,7 @@ export class CanvasRenderer {
     }
   }
 
-  // Ground road details: lane arrows into each junction (the turns its roads allow), a manhole on every third road, lamp posts
+  // Ground road details: lane arrows into each junction (the turns its roads and its lane arrows allow), a manhole on every third road, lamp posts
   private details(edges: Edge[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'butt';
@@ -1120,12 +1120,19 @@ export class CanvasRenderer {
           turns |= Math.abs(a) < 0.6 ? 2 : a > 0 ? 4 : 1;
         }
         if (!turns) continue;
+        // each lane: the turns there are, less the junction's turn bans, within its lane arrows (set or auto)
+        const m = this.arrowsOf(n, e), ban = n.plan?.ban[approachOf(n.plan, n, e)] ?? [false, false, false];
+        turns &= ~ban.reduce((x, b, i) => x | (b ? 1 << i : 0), 0);
+        let j = 0;
         for (const l of e.lanes) {
           if (l.to !== n) continue;
+          const t = turns & (m ? m[j] : 7);
+          j++;
+          if (!t) continue;
           ctx.save();
           ctx.translate(n.x + ux * (NODE_R + 22) + uy * l.offset, n.y + uy * (NODE_R + 22) - ux * l.offset);
           ctx.rotate(Math.atan2(ty, tx));
-          this.arrow(turns);
+          this.arrow(t);
           ctx.restore();
         }
       }
@@ -1267,6 +1274,53 @@ export class CanvasRenderer {
       ctx.strokeStyle = n.control === 'stop' ? '#FFFFFF' : RED;
       ctx.lineWidth = n.control === 'stop' ? 0.8 : 1.3;
       ctx.stroke();
+    }
+  }
+
+  // Arrows of e's lanes into n: its plan's lane arrows, else auto ones where two lanes or more come in (roundabouts: set ones only)
+  private arrowsOf(n: Node, e: Edge): number[] | null {
+    const m = n.plan && laneMasks(n.plan, n, e), k = inLanes(n, e);
+    return m ?? (k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null);
+  }
+  // Lane centre d px out from n on e's lane j into n (out: lane j out of n), and the travel direction there
+  private laneAt(n: Node, e: Edge, j: number, d: number, out = false): [number, number, number, number] {
+    const [ux, uy] = this.dir(n, e), l = e.lanes.filter(x => out ? x.from === n : x.to === n)[j]!, o = l.offset, f = out ? 1 : -1;
+    return [n.x + ux * d - f * uy * o, n.y + uy * d + f * ux * o, ux * f, uy * f];
+  }
+
+  // Lane connections of the junction open in the panel: a curve from each incoming lane to the road each of its arrows leads onto
+  // (left blue, straight green, right amber), landing on the outer lane for a turn and the matching lane straight on
+  private laneLinks(n: Node): void {
+    if (n.control === 'roundabout' || !junction(n)) return;
+    const ctx = this.ctx, d = NODE_R + 4, COL = [ACCENT, '#2F8F5B', '#E08A1E'];
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = 'round';
+    for (const e of n.edges) {
+      const k = inLanes(n, e), m = this.arrowsOf(n, e) ?? autoMasks(k);
+      if (e.drive || !k) continue;
+      m.forEach((x, j) => {
+        const [sx, sy] = this.laneAt(n, e, j, d);
+        for (const o of n.edges) {
+          const ko = o.lanes.filter(l => l.from === n).length, mv = o === e ? -1 : moveOf(n, e, o);
+          if (o.drive || !ko || mv < 0 || !(x >> mv & 1)) continue;
+          const [ex, ey, vx, vy] = this.laneAt(n, o, mv === 0 ? 0 : mv === 2 ? ko - 1 : Math.min(j, ko - 1), d, true);
+          ctx.strokeStyle = ctx.fillStyle = COL[mv];
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.bezierCurveTo(sx + (n.x - sx) * 0.6, sy + (n.y - sy) * 0.6, ex + (n.x - ex) * 0.6, ey + (n.y - ey) * 0.6, ex, ey);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(ex + vx * 3, ey + vy * 3);
+          ctx.lineTo(ex - vy * 2, ey + vx * 2);
+          ctx.lineTo(ex + vy * 2, ey - vx * 2);
+          ctx.fill();
+        }
+        this.circle(sx, sy, 1.8, '#FFFFFF');
+        ctx.strokeStyle = '#5A5A57';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        ctx.lineWidth = 1.6;
+      });
     }
   }
 

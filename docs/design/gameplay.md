@@ -554,7 +554,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - Known gaps:
   - Roads are still stroked every frame. A cached road layer would need invalidating on every graph change.
   - The night glows draw over viaducts when a lamp, window or headlight lies underneath.
-  - Lane arrows ignore turn bans and lane-by-turn rules: every incoming lane shows every turn the junction allows.
+  - (Q5) Lane arrows now follow the turn bans and each lane's arrows; see Q5.
   - Signs and the roundabout island are tinted at night like everything else. Only light heads are redrawn.
 
 **Q4 Roundabout sizes.**
@@ -565,3 +565,11 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - Rendering: ring, sidewalk, island, stop lines, the demolish highlight and the hit test (`nearestNode`, anywhere on the ring) follow the size; lane markings stop at the outside of the ring.
 - simcheck: a 4-arm cross flooded from every arm (24 cars) holds more cars at once on a Large ring than on a Small one and every car gets through; a Large ring is refused where a road leaves it after 70px, a Small one fits.
 - Known gaps: no 2-lane XL ring (the ring is one lane at `LANE_OFFSET`); a car's ride round a bigger ring is the same straight-line distance in the sim (`2 * ringIn`), so it visibly speeds up on the arc.
+
+**Q5 Lane arrows (per-lane turns).**
+- Plan: `JunctionPlan.lanes?: (number[] | null)[]`, per approach a move bitmask (`1 << Move`: 1 left/U-turn, 2 straight, 4 right) per incoming lane, left to right; null or missing = auto. Saved with the plan, so old saves load as auto. `autoMasks(k)` is the old behaviour written as arrows: one lane takes every turn, else the leftmost also turns left, the rightmost also right, all go straight. `laneMasks` ignores arrows whose lane count no longer matches the road (back to auto). Edits: `toggleArrow` (a lane keeps at least one turn) and `setLanes` presets Auto / Left lane (leftmost turns left only) / Right lane (rightmost turns right only) / Any.
+- Sim: `banned()` also bans a move no lane allows, so A* avoids it like a turn ban, and `editPlan` reroutes on arrow changes as on ban changes. `RoadGraph.arrows(lane)` / `arrowLanes(e, from, q)`: `pickLane` takes the node after the edge and picks the roomiest lane whose arrows allow that move; `Car.changeLane` heads for the nearest allowed lane and only overtakes into allowed ones. A car still in a wrong lane past the last lane-change point reroutes with `findPath(..., mask)` (the moves its lane allows at the start node); with no such route it keeps its route (ponytail).
+- UI: the junction panel has Turn bans / Lanes (plus Signals at a light; roundabouts keep bans only). Lanes lists each incoming arm, a row per lane with left / straight / right toggles (disabled where no road leads that way) and the four presets.
+- Renderer: the painted lane arrows in `details()` show each lane's turns less the turn bans. The junction open in the panel draws its lane connections: a curve from every incoming lane to each road its arrows lead onto (left blue, straight green, right amber), landing on the outer lane for a turn and the matching lane straight on.
+- simcheck: with X's two lanes set to left+straight and right-only, no car leaves the right lane but to the right and all 9 trips arrive; with no lane allowing the left the route detours via K and Q; arrows survive a save round trip.
+- Known gaps: arrows apply only on the edge that enters the junction (a bent approach picks by turn until its last segment); no separate U-turn arrow (it counts as left); a lane count change resets that arm's arrows to auto silently.

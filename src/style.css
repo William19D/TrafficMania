@@ -860,3 +860,12 @@ kbd {
 #menu th, #menu td { padding: .45em 0; border-bottom: 1px solid var(--soft); vertical-align: top; text-align: left; }
 #menu th { font-weight: 600; padding-right: 1em; }
 #menu td { color: var(--muted); }
+.jlanes { display: flex; flex-direction: column; gap: .5em; max-height: 46vh; overflow-y: auto; }
+.jarm { display: flex; flex-direction: column; gap: .25em; padding: .375em .5em; border-radius: 8px; background: var(--soft); }
+.jarm > small { font-size: var(--label); color: var(--muted); font-weight: 600; }
+.jarm .row { display: flex; align-items: center; gap: .25em; }
+.jarm .row span { flex: 1; font-size: var(--label); }
+#hud .jarm .arr { font-size: 1.1em; font-weight: 700; }
+#hud .jarm .arr[aria-pressed="true"] { background: var(--accent); color: #fff; }
+#hud .jarm .arr:disabled { opacity: .35; }
+#hud .jarm .jpre .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
