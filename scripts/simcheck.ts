@@ -3,7 +3,7 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
+import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleArrow, toggleBan } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
@@ -553,6 +553,35 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
     for (const c of w.cars) if (c.prev === X && c.lane.from === J && c.lane.to === P) fail('turn ban: a car took the banned left');
   }
   if (w.score !== 1) fail(`turn ban: the trip did not arrive via the detour (score ${w.score})`);
+}
+// Lane arrows: X's two lanes into J set to left+straight and right only; no car leaves the right lane but to the right, and every
+// trip arrives. Then no lane allows the left: the Z trip reroutes round the block via K and Q.
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Z = town(w, 500, 60, 'home', true), S = town(w, 500, 940), E = town(w, 1000, 500);
+  const J = wg.addNode(500, 500), K = wg.addNode(800, 500), Q = wg.addNode(800, 200), P = wg.addNode(500, 200);
+  w.commitPath(w.planPath([X, J], 0, { ...flat, lanes: 2 }));
+  for (const [a, b] of [[J, K], [K, Q], [Q, P], [P, J], [P, Z], [J, S], [K, E]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  w.demandOff = true;
+  const xj = wg.edgeBetween(X, J)!, right = wg.lanesFrom(xj, X)[1]!;
+  w.editPlan(J, p => toggleArrow(p, approachOf(p, J, xj), 2, 1, STRAIGHT));
+  if (wg.arrows(right) !== 1 << RIGHT) fail(`lane arrows: right lane allows ${wg.arrows(right)}`);
+  for (let i = 0; i < 3; i++) for (const to of [Z, S, E]) w.queueTrip(X.building!, to.building!, 'commute');
+  const last = new Map<Car, Lane>();
+  for (let t = 0; t < 90 * 60 && w.score < 9; t++) {
+    w.update(DT);
+    for (const c of w.cars) {
+      if (c.lane.edge === xj) last.set(c, c.lane);
+      else if (c.lane.from === J && last.get(c) === right && c.lane.to !== S.building!.node && c.lane.to !== S) fail(`lane arrows: a car left the right-only lane toward ${c.lane.to.id}`);
+      if (c.lane.from === J) last.delete(c);
+    }
+  }
+  if (w.score !== 9) fail(`lane arrows: ${w.score} of 9 trips arrived`);
+  w.editPlan(J, p => toggleArrow(p, approachOf(p, J, xj), 2, 0, LEFT));
+  const route = findPath(wg, X, Z);
+  if (route?.[1] !== J || route[2] !== K) fail(`lane arrows: route ${route?.map(n => n.id)} still turns left at J with no lane for it`);
+  const back = deserialize(serialize(w)).graph.nodes[wg.nodes.indexOf(J)]?.plan?.lanes;
+  if (JSON.stringify(back) !== JSON.stringify(J.plan!.lanes)) fail(`lane arrows: saved as ${JSON.stringify(back)}`);
 }
 // Protected lefts: under the preset a left-turner at the light is only granted in a phase that protects its left, and arrives
 {

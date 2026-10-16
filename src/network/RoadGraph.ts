@@ -6,7 +6,7 @@ import type { Car } from '../entities/Car.ts';
 import { TIERS, TUNING } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
 import type { JunctionPlan, Move } from './Junction.ts';
-import { LEFT, approachOf, edgeAngle, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
+import { ANY, LEFT, approachOf, edgeAngle, laneMasks, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
 export { LIGHT_PERIOD, lightGroup } from './Junction.ts';
 
 export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5;
@@ -226,10 +226,24 @@ export class RoadGraph {
     return 0;
   }
 
-  // Lane for the turn after this edge: rightmost / leftmost (lanesFrom is ascending by offset), straight: the most room at its start
-  pickLane(e: Edge, from: Node, turn = 0): Lane | null {
-    const ls = this.lanesFrom(e, from);
-    if (turn) return ls[turn > 0 ? ls.length - 1 : 0] ?? null;
+  // Lane arrows: the moves (bits 1 << Move) lane l may make at the node it leads into; ANY without arrows there
+  arrows(l: Lane): number {
+    const p = l.to.plan, m = p && laneMasks(p, l.to, l.edge);
+    return m ? m[this.lanesFrom(l.edge, l.from).indexOf(l)] : ANY;
+  }
+  // Lanes of e from 'from' whose arrows allow going on to q at its far end; null when that node has no arrows for e
+  arrowLanes(e: Edge, from: Node, q: Node | undefined): Lane[] | null {
+    const n = e.a === from ? e.b : e.a, out = q && this.edgeBetween(n, q);
+    if (!out || !n.plan || !laneMasks(n.plan, n, e)) return null;
+    const mv = moveOf(n, e, out);
+    return this.lanesFrom(e, from).filter(l => this.arrows(l) >> mv & 1);
+  }
+
+  // Lane for the turn after this edge: rightmost / leftmost (lanesFrom is ascending by offset), straight: the most room at its start.
+  // q: the node after e's far end; where that junction has lane arrows, the roomiest lane they allow for the move onto q
+  pickLane(e: Edge, from: Node, turn = 0, q?: Node): Lane | null {
+    const ok = this.arrowLanes(e, from, q), ls = ok?.length ? ok : this.lanesFrom(e, from);
+    if (turn && !ok?.length) return ls[turn > 0 ? ls.length - 1 : 0] ?? null;
     let best: Lane | null = null, room = -1;
     for (const l of ls) {
       const r = l.cars[0]?.s ?? Infinity;

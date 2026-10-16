@@ -599,7 +599,7 @@ export class Game {
       if (!path || path.length < 2) { this.fail(b.pending.splice(i--, 1)[0], 'noroute'); continue; }
       const e = this.graph.edgeBetween(b.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1));
+      const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1), path[2]);
       const f = lane?.cars[0];
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       b.pending.splice(i, 1);
@@ -1582,7 +1582,7 @@ export class Game {
     edit(p);
     n.plan = p;
     if (n.phase >= p.phases.length) { n.phase = 0; n.phaseTimer = 0; }
-    if (JSON.stringify(p.ban) !== JSON.stringify(old.ban)) for (const c of this.cars) if (c.granted !== n) c.path = null;
+    if (JSON.stringify([p.ban, p.lanes]) !== JSON.stringify([old.ban, old.lanes])) for (const c of this.cars) if (c.granted !== n) c.path = null;
   }
 
   say(text: string): void {

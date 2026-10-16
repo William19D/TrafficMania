@@ -10,7 +10,8 @@ export type Move = 0 | 1 | 2;
 export type Signal = 0 | 1 | 2; // red, go but yield (a permissive left gives way to the opposite approach), protected
 // sig[approach][move]; ban[approach][move]. approaches: angles of the edges leaving the node, sorted.
 export interface Phase { seconds: number; sig: Signal[][] }
-export interface JunctionPlan { approaches: number[]; phases: Phase[]; ban: boolean[][] }
+// lanes[approach]: lane arrows, a move bitmask (1 << Move) per incoming lane, left to right; null / missing = auto (the default lane choice)
+export interface JunctionPlan { approaches: number[]; phases: Phase[]; ban: boolean[][]; lanes?: (number[] | null)[] }
 export type Preset = 'two' | 'lefts' | 'each';
 const MATCH = Math.PI / 12; // 15 degrees
 
@@ -70,9 +71,22 @@ export function planFits(n: Node, p: JunctionPlan): boolean {
   return used.size === n.edges.length && n.edges.every(e => diff(edgeAngle(n, e), p.approaches[approachOf(p, n, e)]) < MATCH);
 }
 
+// Lane arrows. Auto: one lane takes every move; else the leftmost also turns left, the rightmost also right, all go straight
+export const ANY = 7;
+export const autoMasks = (k: number): number[] => Array.from({ length: k }, (_, i) => k === 1 ? ANY : (i ? 0 : 1) | 2 | (i === k - 1 ? 4 : 0));
+export const inLanes = (n: Node, e: Edge): number => e.lanes.filter(l => l.to === n).length;
+// The arrows of e's lanes into n, or null (auto, or the road's lane count changed since they were set)
+// ponytail: a lane count change silently drops the arrows back to auto; remap them if players miss that
+export function laneMasks(p: JunctionPlan, n: Node, e: Edge): number[] | null {
+  const m = p.lanes?.[approachOf(p, n, e)];
+  return m && m.length === inLanes(n, e) ? m : null;
+}
+// A movement is banned by its turn ban, or when no lane's arrow allows it
 export const banned = (n: Node, inE: Edge, out: Edge): boolean => {
   const p = n.plan;
-  return !!p && p.ban[approachOf(p, n, inE)][moveOf(n, inE, out)];
+  if (!p) return false;
+  const mv = moveOf(n, inE, out), m = laneMasks(p, n, inE);
+  return p.ban[approachOf(p, n, inE)][mv] || (!!m && !m.some(x => x >> mv & 1));
 };
 
 // Priority junction: the main road is its highest tier (more lanes break ties); when more than two arms share it, the straightest pair
@@ -99,3 +113,18 @@ export const addPhase = (p: JunctionPlan): void => {
 };
 export const removePhase = (p: JunctionPlan, ph: number): void => { if (p.phases.length > 1) p.phases.splice(ph, 1); };
 export const applyPreset = (p: JunctionPlan, kind: Preset): void => { p.phases = presetPhases(p.approaches, kind); };
+export type LanePreset = 'auto' | 'left' | 'right' | 'any';
+// Lane arrow presets for an approach of k lanes: left / right = the outermost lane only turns that way
+export function setLanes(p: JunctionPlan, a: number, k: number, kind: LanePreset): void {
+  const m = kind === 'auto' ? null : kind === 'any' ? autoMasks(k).map(() => ANY) : autoMasks(k);
+  if (m && kind === 'left') m[0] = 1;
+  if (m && kind === 'right') m[k - 1] = 4;
+  (p.lanes ??= p.approaches.map(() => null))[a] = m;
+}
+// Toggles one arrow of lane i (of k); a lane keeps at least one
+export function toggleArrow(p: JunctionPlan, a: number, k: number, i: number, mv: Move): void {
+  const cur = p.lanes?.[a], m = cur && cur.length === k ? [...cur] : autoMasks(k), x = m[i] ^ (1 << mv);
+  if (!x) return;
+  m[i] = x;
+  (p.lanes ??= p.approaches.map(() => null))[a] = m;
+}
