@@ -51,7 +51,7 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Click = start point, click again = end point; hold the end point and drag to bend. A building next to a road gets a free driveway. The label shows the price. Esc cancels.',
       enter: g => { g.setTool('road'); topUp(g); }, targets: () => [...centre, ...door(office)],
       done: g => homes.length ? reaches(g, homes, office) : g.graph.edges.length >= 1,
-      hint: '[data-tool="road"]',
+      hint: '.buildbtn, [data-tool="road"]',
     },
     {
       title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
@@ -66,7 +66,7 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Every level brings a batch of buildings to place; they wait in the tray. Near a road a building turns to face it and gets a free driveway. Keep homes away from factories and busy roads. R turns a building that stands free.',
       // the tray always holds a home for this step
       enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; if (g.tutorialActive) g.tray.home = Math.max(1, g.tray.home); },
-      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '[data-tool="place"], .tray',
+      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '.buildbtn, .bmenu [data-zone="home"], .tray',
     },
     {
       title: 'Open the shop', task: 'Build a road from the shop door to the middle of one of your roads.',
@@ -80,7 +80,7 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Three or more roads meeting make an intersection; if you have none, draw a road into the middle of one. Without a control cars take turns one at a time.',
       enter: g => topUp(g),
       targets: g => junctions(g).length ? junctions(g).map(at) : mid(g),
-      done: g => lights(g).length > 0, hint: '[data-tool="light"]',
+      done: g => lights(g).length > 0, hint: '.buildbtn, [data-tool="light"]',
     },
     {
       title: 'Time the light', task: 'Press 6 (Edit), click the light, then press + on a phase.',

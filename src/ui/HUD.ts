@@ -28,6 +28,8 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
   demolish: { label: 'Demolish', tip: `Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (${fmtMoney(T.MOVE_COST)} in career; an occupied one takes a second click).` },
 };
+// Tools in the Build menu; Edit and Demolish stay in the dock
+const BUILD: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'place'];
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
 const ZONE_PIC: Record<Site, (f: string, o: string, r: string) => string> = {
@@ -94,13 +96,14 @@ const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highwa
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
   [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
+  ['Build menu: roads, junctions, buildings', 'click Build; <kbd>Esc</kbd> or a click outside closes it. The keys pick its tools directly'],
   ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
   ['Road angle in 15° steps', 'hold <kbd>Ctrl</kbd> or <kbd>Alt</kbd> while placing'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
-  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
+  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way beside Build: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
   ['Street grid', `${kbd('grid')}: click a corner, the end of the first side, then the depth`],
@@ -318,8 +321,8 @@ export class HUD {
         </div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        ${toolBtn('road')}
-        ${toolBtn('grid')}
+        <button class="tool buildbtn" data-action="build" aria-expanded="false" aria-controls="bmenu" data-tip="Build: roads, junctions and buildings"><span class="bico"></span><span class="lbl">Build</span>${icon('chev', 'chev')}<b class="badge num" hidden></b></button>
+        <div class="ctx" role="group" aria-label="Tool options">
         <button class="lane wide rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
@@ -348,15 +351,18 @@ export class HUD {
           <span class="elev"><b class="lv num"></b><small class="eh"></small></span>
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
-        <span class="sep brk"></span>
-        ${toolBtn('light')}
-        ${toolBtn('roundabout')}
-        ${toolBtn('interchange')}
-        <span class="sep"></span>
-        ${toolBtn('place')}
+        </div>
         <span class="sep"></span>
         ${toolBtn('edit')}
         ${toolBtn('demolish')}
+      </div>
+      <div class="panel bmenu" id="bmenu" role="group" aria-label="Build menu">
+        <div class="bgrp"><h3>Roads</h3><div class="brow">${toolBtn('road')}${toolBtn('grid')}</div></div>
+        <div class="bgrp"><h3>Junctions</h3><div class="brow">${toolBtn('light')}${toolBtn('roundabout')}${toolBtn('interchange')}</div></div>
+        <div class="bgrp"><h3>Buildings <kbd>B</kbd></h3><div class="brow">
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+          <small class="bnone">None waiting: the next level brings more</small>
+        </div></div>
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Buildings to place">
@@ -368,14 +374,15 @@ export class HUD {
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
       <div class="tip" role="tooltip" hidden></div>`;
-    this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
+    this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
     this.dayBar = this.q('.day');
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
-    for (const b of this.toolBtns) b.onclick = () => game.setTool(b.dataset.tool as Tool);
-    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => game.startPlacing(b.dataset.zone as Zone); });
+    for (const b of this.toolBtns) b.onclick = () => { game.setTool(b.dataset.tool as Tool); this.setBuild(false); };
+    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.startPlacing(b.dataset.zone as Zone); this.setBuild(false); }; });
+    this.q('[data-action="build"]').onclick = () => this.setBuild(!this.buildOpen);
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
     const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
@@ -434,6 +441,15 @@ export class HUD {
     document.addEventListener('pointerdown', e => {
       if (this.helpOpen && !(e.target as Element).closest('.pop, .helpbtn')) this.setHelp(false, false);
     }, { signal });
+    // a click outside the Build menu closes it; on the map that click does nothing else (its pointerup is eaten too)
+    let eat = false;
+    document.addEventListener('pointerdown', e => {
+      const t = e.target as Element;
+      if (!this.buildOpen || t.closest('.bmenu, .buildbtn')) return;
+      this.setBuild(false);
+      if (t.tagName === 'CANVAS') { eat = true; e.stopPropagation(); }
+    }, { capture: true, signal });
+    document.addEventListener('pointerup', e => { if (eat) { eat = false; e.stopPropagation(); } }, { capture: true, signal });
     // capture phase on window: runs before Input's listener, so modal keys never reach the tools
     window.addEventListener('keydown', e => this.onKey(e), { capture: true, signal });
     this.bindTips(signal);
@@ -451,7 +467,10 @@ export class HUD {
       if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else this.closeLevel(); }
       return;
     }
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && this.buildOpen) {
+      e.stopPropagation();
+      this.setBuild(false, true);
+    } else if (e.key === 'Escape') {
       this.hideTip();
       this.setHelp(false);
     } else if (e.ctrlKey || e.metaKey || e.altKey) {
@@ -474,6 +493,20 @@ export class HUD {
   private toggleSound(): void {
     sound.toggleMute();
     this.game.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
+  }
+
+  // Build menu: unfolds upward from the Build button, anchored to it
+  buildOpen = false;
+  setBuild(open: boolean, refocus = false): void {
+    if (open === this.buildOpen) return;
+    this.buildOpen = open;
+    const m = this.q('.bmenu'), b = this.q('.buildbtn');
+    if (open) m.style.setProperty('--bx', `${Math.max(8, Math.min(innerWidth - m.offsetWidth - 8, b.getBoundingClientRect().left))}px`);
+    m.classList.toggle('open', open);
+    b.setAttribute('aria-expanded', String(open));
+    this.hideTip();
+    if (open) m.querySelector<HTMLElement>('button[aria-pressed="true"]')?.focus({ preventScroll: true });
+    else if (refocus || m.contains(document.activeElement)) b.focus({ preventScroll: true });
   }
 
   private setHelp(open: boolean, refocus = true): void {
@@ -514,7 +547,7 @@ export class HUD {
     this.root.addEventListener('pointerdown', e => {
       if (e.pointerType !== 'touch') return;
       const el = target(e);
-      if (!el?.closest('.dock')) return;
+      if (!el?.closest('.dock, .bmenu')) return;
       press = setTimeout(() => { this.showTip(el, true); setTimeout(() => this.hideTip(), 2500); }, 500);
     }, { signal });
     const stop = () => clearTimeout(press);
@@ -530,7 +563,7 @@ export class HUD {
     this.tip.classList.toggle('touch', touch);
     this.tip.hidden = false;
     const r = el.getBoundingClientRect(), t = this.tip.getBoundingClientRect();
-    const above = !!el.closest('.dock, .tutorial');
+    const above = !!el.closest('.dock, .bmenu, .tutorial');
     const x = Math.max(8, Math.min(innerWidth - t.width - 8, r.left + r.width / 2 - t.width / 2));
     const y = above ? r.top - t.height - 8 : r.bottom + 8;
     this.tip.style.left = `${x}px`;
@@ -933,6 +966,12 @@ export class HUD {
       L.tool = g.tool;
       for (const b of this.toolBtns) b.setAttribute('aria-pressed', String(b.dataset.tool === g.tool));
       document.body.dataset.tool = g.tool;
+      // the Build button wears the active build tool's icon
+      const bt = BUILD.includes(g.tool), bb = this.q('.buildbtn');
+      bb.setAttribute('aria-pressed', String(bt));
+      this.q('.bico').innerHTML = icon(bt ? g.tool : 'build');
+      bb.dataset.tip = `Build: roads, junctions and buildings${bt ? `. Now: ${TOOLS[g.tool].label}` : ''}`;
+      this.setBuild(false);
     }
 
     // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
@@ -963,7 +1002,7 @@ export class HUD {
     }
 
     // Tray: one card per zone with buildings left; the dock badge counts them all
-    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}`;
+    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}|${g.tool}`;
     if (yk !== L.tray) {
       const before = L.trayN;
       L.tray = yk;
@@ -975,10 +1014,12 @@ export class HUD {
         b.setAttribute('aria-pressed', String(g.placing === z));
         (b.querySelector('.zn') as HTMLElement).textContent = `×${count(n)}`;
       });
-      this.q('.tray').hidden = total < 1;
+      // the left tray is the Place tool's picker; the Build menu holds the same cards
+      this.q('.tray').hidden = total < 1 || g.tool !== 'place';
+      this.q('.bnone').hidden = total >= 1;
       const badge = this.q('.badge');
       badge.hidden = total < 1;
-      this.q('[data-tool="place"]').classList.toggle('ready', total >= 1);
+      this.q('.buildbtn').classList.toggle('ready', total >= 1);
       badge.textContent = count(total);
       L.trayN = total;
       if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
@@ -1024,6 +1065,8 @@ export class HUD {
       // the grid is built on the ground: its block size takes the elevation stepper's place
       this.q('.gsz').hidden = g.tool !== 'grid';
       this.q('.stepper').hidden = g.tool === 'grid';
+      // road options beside Build, for the tools that use them; the same for Edit and Demolish so those buttons stay put
+      this.q('.ctx').hidden = !['road', 'grid', 'edit', 'demolish'].includes(g.tool);
       const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
       rm.hidden = g.tool !== 'road';
       rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;

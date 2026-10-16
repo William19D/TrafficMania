@@ -419,6 +419,39 @@ kbd {
 .tier .pic { width: 30px; height: 18px; }
 #hud .tier[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 0 0 2px var(--accent); }
 
+/* Build: the dock's first button; it wears the active build tool's icon and opens the Build menu */
+#hud .buildbtn { min-width: 5.5em; }
+.buildbtn .chev { position: absolute; top: 2px; right: 4px; width: 1em; height: 1em; transition: transform .16s var(--ease); }
+#hud .buildbtn[aria-expanded="true"] { box-shadow: inset 0 0 0 2px var(--accent); }
+.buildbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+#hud .buildbtn.ready[aria-pressed="false"] > .bico .ico { color: var(--accent); }
+.bico { display: inline-flex; }
+/* the active tool's options beside Build (road shape, type, elevation) */
+.ctx { display: flex; align-items: center; gap: .375em; padding-left: .375em; border-left: 1px solid var(--soft); }
+/* Build menu: unfolds upward from the Build button (--bx: its left edge, set on open) */
+.bmenu {
+  position: absolute;
+  z-index: 2;
+  left: var(--bx, 50%);
+  bottom: calc(var(--edge-b) + var(--dock-h) + 12px);
+  display: flex;
+  gap: .75em;
+  padding: .625em .75em .75em;
+  transform-origin: 2.5em 100%;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(16px) scaleY(.85);
+  transition: opacity .16s var(--ease), transform .16s var(--ease), visibility 0s .16s;
+}
+.bmenu.open { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+.bgrp + .bgrp { padding-left: .75em; border-left: 1px solid var(--soft); }
+.bgrp h3 { margin: 0 0 .375em; font-size: var(--label); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.bgrp h3 kbd { font-size: 12px; text-transform: none; }
+.brow { display: flex; gap: 6px; align-items: stretch; }
+#hud .bmenu .zone { flex-direction: column; justify-content: center; gap: .2em; width: auto; min-width: 4.5em; min-height: 4em; font-size: var(--label); }
+.bmenu .zone .zn { margin: 0; padding: 0; color: var(--muted); }
+.bnone { align-self: center; max-width: 10em; color: var(--muted); font-size: var(--label); }
+
 /* ---------- E: toasts ---------- */
 .toasts {
   position: absolute;
@@ -599,13 +632,6 @@ kbd {
   .topl > * { position: static; transform: none; pointer-events: auto; }
   .res { max-width: calc(100vw - 88px); }
 }
-/* under 1320px the dock no longer fits one row (Buildings, Edit and Demolish fell off the right edge): it wraps to two */
-@media (min-width: 769px) and (max-width: 1319px) {
-  #hud { --dock-h: 9em; }
-  /* both edges set (not left 50% + translate, which caps the shrink-to-fit width at half the screen), centred by its auto margins */
-  .dock { left: var(--edge-l); right: var(--edge-r); transform: none; width: fit-content; max-width: none; margin-inline: auto; flex-wrap: wrap; justify-content: center; row-gap: .375em; }
-  .dock > .brk { flex-basis: 100%; height: 0; margin: 0; } /* the road options on the first row, the other tools on the second */
-}
 /* under 1024px the first row needs room too: the elevation picture and the one-way caption go (their tooltips stay) */
 @media (min-width: 769px) and (max-width: 1023px) {
   .stepper .pic, .lanes .lane.wide small { display: none; }
@@ -646,6 +672,10 @@ kbd {
   .tool .kb, .eh, .tray-h kbd { display: none; }
   .tool .lbl { font-size: 13px; }
   .elev { width: auto; min-width: 3.5em; }
+  /* the Build menu spans the width; its groups wrap and it scrolls when taller than the space above the dock */
+  .bmenu { left: var(--edge-l); right: var(--edge-r); flex-wrap: wrap; max-height: calc(100vh - var(--dock-h) - var(--edge-b) - 120px); overflow-y: auto; }
+  .bgrp + .bgrp { padding-left: 0; border-left: 0; }
+  .brow { flex-wrap: wrap; }
 
   .toasts { left: 12px; right: 12px; transform: none; width: auto; max-width: none; }
   #hud:has(.tutorial:not([hidden])) .toasts { top: calc(var(--edge-t) + 200px); bottom: auto; left: 12px; }
