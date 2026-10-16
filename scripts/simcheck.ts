@@ -619,6 +619,11 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   }
   if (lefts < 3 || w.score !== 8) fail(`protected lefts: ${lefts} lefts granted, ${w.score} of 8 trips arrived`);
 }
+// Mountains read raised, not as pits: every biome's peak band is lighter than its foot
+for (const [k, b] of Object.entries(BIOMES)) {
+  const lum = (c: string): number => [1, 3, 5].reduce((n, i) => n + parseInt(c.slice(i, i + 2), 16), 0);
+  if (lum(b.bands[2]) <= lum(b.bands[0])) fail(`mountains: ${k} peak ${b.bands[2]} is darker than its foot ${b.bands[0]}`);
+}
 // Roundabout sizes: a 4-arm cross flooded from every arm; a large ring holds more cars at once than a small one and every car still
 // gets through. A large ring is refused where a road leaves it after 70px, a small one fits there.
 {
