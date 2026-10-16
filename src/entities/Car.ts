@@ -11,14 +11,12 @@ export const MAX_SPEED = 110, ACCEL = 80, TURN_SPEED = 45;
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
 // Vehicle kinds: length, top speed and acceleration factors, spawn weight for passenger trips (trucks only carry freight, so 0).
-// Ambulances jump node queues (RoadGraph.update).
-export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
+// Trips are private, so no buses or ambulances: they read as a bus leaving a home.
+export type Kind = 'car' | 'truck' | 'moto';
 export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
-  car: { len: CAR_LEN, v: 1, a: 1, w: 0.72 },
+  car: { len: CAR_LEN, v: 1, a: 1, w: 0.88 },
   truck: { len: 24, v: 0.75, a: 0.55, w: 0 },
-  bus: { len: 26, v: 0.7, a: 0.5, w: 0.06 },
-  moto: { len: 10, v: 1.1, a: 1.4, w: 0.09 },
-  ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
+  moto: { len: 10, v: 1.1, a: 1.4, w: 0.12 },
 };
 const W = Object.values(KINDS).reduce((n, k) => n + k.w, 0);
 export const randomKind = (): Kind => {

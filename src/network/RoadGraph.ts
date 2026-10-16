@@ -458,9 +458,6 @@ export class RoadGraph {
       // it in its lane.
       const dj = this.drivewayJunction(n), plain = n.control === 'none' && !dj;
       const cap = n.control === 'light' || n.control === 'yield' || plain ? Infinity : n.control === 'roundabout' ? 3 : 1;
-      // Ambulance: its whole lane goes first (stable sort keeps the cars ahead of it in order) and runs red into an empty box
-      const amb = new Set(n.queue.filter(c => c.kind === 'ambulance').map(c => c.lane));
-      if (amb.size) n.queue.sort((p, q) => +amb.has(q.lane) - +amb.has(p.lane));
       // Approach and movement of every car queued at or granted into n (plan nodes only)
       const mv = new Map<Car, [number, Move]>();
       if (plan) for (const c of [...n.queue, ...n.occupants]) if (c.exit && c.lane.to === n) mv.set(c, [approachOf(plan, n, c.lane.edge), moveOf(n, c.lane.edge, c.exit.edge)]);
@@ -487,7 +484,6 @@ export class RoadGraph {
         const x = mv.get(c);
         if (plan && (!x || plan.ban[x[0]][x[1]])) return false;
         if (n.control === 'light') {
-          if (amb.has(c.lane) && !n.occupants.size) return true;
           const s = plan!.phases[n.phase].sig[x![0]][x![1]];
           return x![1] === LEFT ? s === 2 || (s === 1 && left(c, x![0])) : s > 0 && !lefty(oppositeOf(plan!, x![0]));
         }

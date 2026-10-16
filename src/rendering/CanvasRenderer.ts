@@ -1011,7 +1011,7 @@ export class CanvasRenderer {
   }
 
   // A cached model (VehicleArt) on a soft shadow cast down-right, then the live lights: tail lights (bright while braking), the
-  // indicator blinking on game time (so pause freezes it) and the ambulance's red / blue bar
+  // indicator blinking on game time (so pause freezes it)
   private car(game: Game, car: Car): void {
     const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
     this.seen.push(car);
@@ -1034,13 +1034,6 @@ export class CanvasRenderer {
       ctx.fillStyle = AMBER;
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
-    }
-    if (k === 'ambulance') {
-      const on = (game.time * 4 | 0) % 2;
-      ctx.fillStyle = on ? RED : ACCENT;
-      ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
-      ctx.fillStyle = on ? ACCENT : RED;
-      ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
     }
     ctx.restore();
   }

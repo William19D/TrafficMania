@@ -155,7 +155,7 @@ const tripName = (t: Leg): string => {
 const JAM_AT: Record<Control | 'road', string> = {
   light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
-const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
+const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
 function tripLine(r: TripReport): string {
   const to = destOf(r), x = (n: number) => `${n.toFixed(1)}x`;

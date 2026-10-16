@@ -129,6 +129,7 @@ for (let i = 0; i < STEPS; i++) {
   }
   maxCars = Math.max(maxCars, live.size);
   for (const c of live) { const v = c.vmax / (MAX_SPEED * KINDS[c.kind].v); lo = Math.min(lo, v); hi = Math.max(hi, v); kinds.add(c.kind); }
+  for (const c of live) if ((c.kind === 'truck') !== (c.trip.purpose === 'freight')) fail(`kinds: a ${c.kind} on a ${c.trip.purpose} trip`);
   for (const c of live) {
     const [l, x] = exits.get(c) ?? [null, null];
     if (l === c.lane && x && c.exit && x !== c.exit && x.edge === c.exit.edge && l.edge.length - c.s < 2 * NODE_R) fail(`exit lane switched inside the turn arc at t=${game.time.toFixed(2)}`);
@@ -326,7 +327,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (let t = 0; t < 15 * 60 && w.cars.includes(c); t++) w.update(DT);
   if (w.score !== 1) fail(`joint before a junction: car stopped at ${c.lane.from.id}->${c.lane.to.id} s=${c.s.toFixed(1)}, waited ${c.wait.toFixed(1)}s`);
 }
-// Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
+// Box release: a truck granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), J = wg.addNode(500, 500);
@@ -335,28 +336,28 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   const out = wg.lanesFrom(wg.edgeBetween(J, Y)!, J)[0]!, parked = new Car(out, trip(X, Y));
   parked.s = 54 + parked.len / 2;
   out.cars.push(parked);
-  const e = wg.edgeBetween(X, J)!, bus = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), 'bus');
+  const e = wg.edgeBetween(X, J)!, bus = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), 'truck');
   bus.s = e.length - 80;
   bus.lane.cars.push(bus);
   w.cars.push(bus);
   for (let t = 0; t < 10 * 60; t++) w.update(DT);
-  if (bus.lane !== out || J.occupants.size) fail(`box release: bus at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
+  if (bus.lane !== out || J.occupants.size) fail(`box release: truck at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
 }
-// Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
-for (const kind of ['ambulance', 'car'] as const) {
+// Lights: a car on the red waits for green with its brake lights on
+{
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   w.placeControl(J, 'light');
-  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), kind);
+  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y));
   c.s = e.length - 80;
   c.lane.cars.push(c);
   w.cars.push(c);
   J.phase = lightGroup(J, e) ^ 1;
   for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
-  if (kind === 'car' && !c.brake) fail('lights: brake lights off while held at the red');
-  if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`ambulance: ${kind} ${kind === 'ambulance' ? 'held at' : 'ran'} the red light`);
+  if (!c.brake) fail('lights: brake lights off while held at the red');
+  if (c.lane.from === J) fail('lights: a car ran the red light');
 }
 // Tiers: a car never beats its top speed x dirt's limit on dirt (it brakes before the avenue -> dirt joint M);
 // A* takes a longer highway over a shorter dirt road; highways never connect to a building;
@@ -567,7 +568,7 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (let t = 0; t < 60 * 60; t++) {
     w.update(DT);
     for (const c of w.cars) {
-      if (c.granted !== J || seen.has(c) || c.kind === 'ambulance') continue; // ambulances run reds
+      if (c.granted !== J || seen.has(c)) continue;
       seen.add(c);
       const p = planOf(J), m = moveOf(J, c.lane.edge, c.exit!.edge), sig = p.phases[J.phase].sig[approachOf(p, J, c.lane.edge)][m];
       if (m === LEFT) lefts++;
