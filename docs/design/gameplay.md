@@ -552,7 +552,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - Cost: on a 62-road, 30-building street at 1280x720, a frame renders in about 1.9 ms of script by day and 2.1 ms at night. Junction paint, arrows, manholes and lamps together take under 0.15 ms.
 - simcheck: `daylight` has no tint at noon, a full blue night at midnight, and a warm dusk part way to night. The tint never jumps between two readings 3 in-game minutes apart. A shade of a shade still parses.
 - Known gaps:
-  - Roads are still stroked every frame. A cached road layer would need invalidating on every graph change.
+  - (Q6) Ground roads are now cached; see Q6.
   - The night glows draw over viaducts when a lamp, window or headlight lies underneath.
   - (Q5) Lane arrows now follow the turn bans and each lane's arrows; see Q5.
   - Signs and the roundabout island are tinted at night like everything else. Only light heads are redrawn.
@@ -573,3 +573,15 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 - Renderer: the painted lane arrows in `details()` show each lane's turns less the turn bans. The junction open in the panel draws its lane connections: a curve from every incoming lane to each road its arrows lead onto (left blue, straight green, right amber), landing on the outer lane for a turn and the matching lane straight on.
 - simcheck: with X's two lanes set to left+straight and right-only, no car leaves the right lane but to the right and all 9 trips arrive; with no lane allowing the left the route detours via K and Q; arrows survive a save round trip.
 - Known gaps: arrows apply only on the edge that enters the junction (a bent approach picks by turn until its last segment); no separate U-turn arrow (it counts as left); a lane count change resets that arm's arrows to auto silently.
+
+**Q6 Detailed streets and junctions.**
+- Visual direction: no longer minimal. Roads keep their colours (white asphalt, tier outlines, yellow centre lines, green medians) and gain texture and small parts.
+- Asphalt: each tier's fill is an opaque 64px tile of its colour with faint specks (`RoadArt.grain`), at half a world px, so overlapping strokes at a junction stay even. Tyre tracks run down every lane (stopping at a junction box or a ring). Some roads get a repair patch or a hairline crack, placed by a position hash.
+- Kerbs and walks: street kerbs stay light, avenue and boulevard kerbs are darker granite. Sidewalks carry paving joints (a thin dash across the band). A boulevard is 4px wider at the kerb, with a grass verge and a street tree every 24px each side, clear of junctions and driveways. Its raised median has a kerb, grass and small trees.
+- Markings: double yellow centre lines; edge lines on every tier with shoulders (avenue, boulevard, highway); lane markings and tyre tracks stop at the edge of a junction box. Zebras now mark every busy junction (a light, or 4+ roads), with the stop line behind them.
+- Highway: darker shoulders, a guardrail on posts outside each edge, and a concrete barrier instead of the double line on a two-way highway.
+- Junctions: a traffic light is a kerb pole with a mast arm over the lanes coming in and a three-lamp head (red, amber, green). The lit lamp glows in the live phase colour. Stop and yield signs stand on posts and cast shadows. Lights, signs and ban glyphs sit past the kerb of the widest crossing road (before, a sign on a street meeting a boulevard stood in the boulevard). A roundabout's centre has a cobbled truck apron, a kerb, grass, a flower bed, shrubs and a tree in the middle.
+- Details: manholes with a grate, a kerb drain on each town road, lamp posts. Bridge and viaduct railings stand on posts.
+- Cache: the static ground roads (bridges, kerbs, walks, verges, asphalt, wear, markings, manholes, drains, lamps, islands, stop lines, zebras, signs) are painted once into an offscreen canvas covering the view plus a quarter view of margin each side. It is drawn at a half-power-of-2 zoom bucket (at most 1.41x the screen's resolution). `RoadArt.netKey` is an FNV hash of every edge's geometry, tier, lanes and flags and every node's control and ring size. The layer is repainted when that key, the map or the bucket changes, or when the view leaves the rect; otherwise it is one `drawImage`. Painted lane arrows, ban glyphs, signal heads, the heat map and everything elevated stay live, since plans and phases change without touching the key. A frame with the layer cached costs about 1.3 ms. A repaint takes about 5 ms at 800x450.
+- simcheck: `netKey` holds still on an unchanged network and changes with a control, a ring size or a retype.
+- Known gaps: with no margin past ~20M px (a 4K screen close up), every pan step repaints the layer. Elevated layers (viaducts) are still stroked every frame and got only the railing posts. The bridge deck's blue edge is still thin under its sidewalk caps.

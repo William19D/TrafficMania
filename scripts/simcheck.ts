@@ -21,6 +21,7 @@ import { deserialize, serialize } from '../src/core/Save.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
+import { netKey } from '../src/rendering/RoadArt.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -1004,6 +1005,19 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const n = CAR_PAINT.map(() => 0);
   for (let i = 0; i < 500; i++) n[pick(CAR_PAINT, new Car(g.edges[0]!.lanes[0]!, makeTrip('commute', game.buildings[0]!, game.buildings[1]!)).paint)]!++;
   if (n.some(x => !x) || Math.max(...n) !== n[0]) fail(`art: paint spread ${n.join(',')}`);
+  // road layer cache: its key holds still on an unchanged network and moves with a control, a ring size or a retype
+  const key = (): number => netKey(g.edges, g.nodes), k0 = key(), was = J2.control, t0 = g.edges[0]!.type;
+  if (key() !== k0) fail('art: road key unstable');
+  J2.control = 'stop';
+  const k1 = key();
+  J2.control = was;
+  R.ring = R.ring === 2 ? 0 : 2;
+  const k2 = key();
+  R.ring = R.ring === 2 ? 0 : 2;
+  g.edges[0]!.type = { ...t0, tier: 'boulevard' };
+  const k3 = key();
+  g.edges[0]!.type = t0;
+  if (new Set([k0, k1, k2, k3]).size !== 4 || key() !== k0) fail('art: road key misses a change');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

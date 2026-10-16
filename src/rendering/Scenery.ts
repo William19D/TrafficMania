@@ -166,7 +166,7 @@ function rock(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, rn
 }
 
 // One tree crown at p: round (three lobes and a highlight), conifer (layered star), snowy conifer, palm (fronds), blossom, autumn
-function tree(ctx: CanvasRenderingContext2D, p: Vec, r: number, sp: Species, base: string, tone: number, a: number): void {
+export function tree(ctx: CanvasRenderingContext2D, p: Vec, r: number, sp: Species, base: string, tone: number, a: number): void {
   const dot = (x: number, y: number, rad: number, fill: string): void => { ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); };
   const star = (rad: number, inner: number, rot: number, fill: string): void => {
     ctx.beginPath();
