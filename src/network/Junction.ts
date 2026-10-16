@@ -1,4 +1,4 @@
-// Junction plans: light phases per movement, protected lefts and turn bans. Value imports from RoadGraph would be circular: types only.
+// Junction plans: light phases per movement, protected lefts and lane connections (the turns each lane may take). Value imports from RoadGraph would be circular: types only.
 import type { Node, Edge } from './RoadGraph.ts';
 import { TIERS } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
@@ -8,9 +8,10 @@ export const LIGHT_PERIOD = 5, PHASE_MIN = 3, PHASE_MAX = 30, MAX_PHASES = 6;
 export const LEFT = 0, STRAIGHT = 1, RIGHT = 2;
 export type Move = 0 | 1 | 2;
 export type Signal = 0 | 1 | 2; // red, go but yield (a permissive left gives way to the opposite approach), protected
-// sig[approach][move]; ban[approach][move]. approaches: angles of the edges leaving the node, sorted.
+// sig[approach][move]; ban[approach][move]: legacy turn bans (old saves), folded into the lanes on the next edit. approaches: angles of the edges leaving the node, sorted.
 export interface Phase { seconds: number; sig: Signal[][] }
-// lanes[approach]: lane arrows, a move bitmask (1 << Move) per incoming lane, left to right; null / missing = auto (the default lane choice)
+// lanes[approach]: lane connections, a move bitmask (1 << Move) per incoming lane, left to right (0: the lane connects nowhere);
+// null / missing = auto (the default lane choice). A move no lane connects is banned.
 export interface JunctionPlan { approaches: number[]; phases: Phase[]; ban: boolean[][]; lanes?: (number[] | null)[] }
 export type Preset = 'two' | 'lefts' | 'each';
 const MATCH = Math.PI / 12; // 15 degrees
@@ -105,7 +106,6 @@ export function mainEdges(n: Node): Edge[] {
 }
 
 // Plan edits (Game.editPlan applies them to a copy)
-export const toggleBan = (p: JunctionPlan, a: number, m: Move): void => { p.ban[a][m] = !p.ban[a][m]; };
 export const cycleSig = (p: JunctionPlan, ph: number, a: number, m: Move): void => { p.phases[ph].sig[a][m] = ((p.phases[ph].sig[a][m] + 1) % 3) as Signal; };
 export const setSeconds = (p: JunctionPlan, ph: number, s: number): void => { p.phases[ph].seconds = Math.max(PHASE_MIN, Math.min(PHASE_MAX, s)); };
 export const addPhase = (p: JunctionPlan): void => {
@@ -113,18 +113,23 @@ export const addPhase = (p: JunctionPlan): void => {
 };
 export const removePhase = (p: JunctionPlan, ph: number): void => { if (p.phases.length > 1) p.phases.splice(ph, 1); };
 export const applyPreset = (p: JunctionPlan, kind: Preset): void => { p.phases = presetPhases(p.approaches, kind); };
-export type LanePreset = 'auto' | 'left' | 'right' | 'any';
-// Lane arrow presets for an approach of k lanes: left / right = the outermost lane only turns that way
-export function setLanes(p: JunctionPlan, a: number, k: number, kind: LanePreset): void {
-  const m = kind === 'auto' ? null : kind === 'any' ? autoMasks(k).map(() => ANY) : autoMasks(k);
-  if (m && kind === 'left') m[0] = 1;
-  if (m && kind === 'right') m[k - 1] = 4;
-  (p.lanes ??= p.approaches.map(() => null))[a] = m;
+// Lane connections of e into n as drawn: its lane arrows (auto ones when unset) less the approach's legacy turn bans
+export function links(p: JunctionPlan, n: Node, e: Edge): number[] {
+  const b = p.ban[approachOf(p, n, e)].reduce((x, y, i) => x | (y ? 1 << i : 0), 0);
+  return (laneMasks(p, n, e) ?? autoMasks(inLanes(n, e))).map(x => x & ~b);
 }
-// Toggles one arrow of lane i (of k); a lane keeps at least one
-export function toggleArrow(p: JunctionPlan, a: number, k: number, i: number, mv: Move): void {
-  const cur = p.lanes?.[a], m = cur && cur.length === k ? [...cur] : autoMasks(k), x = m[i] ^ (1 << mv);
-  if (!x) return;
-  m[i] = x;
+// Connects (or disconnects) lane j of e into n to move mv; sets the approach's lanes and folds its legacy bans into them
+export function setLink(p: JunctionPlan, n: Node, e: Edge, j: number, mv: Move, on: boolean): void {
+  const a = approachOf(p, n, e), m = links(p, n, e);
+  m[j] = on ? m[j] | 1 << mv : m[j] & ~(1 << mv);
   (p.lanes ??= p.approaches.map(() => null))[a] = m;
+  p.ban[a] = [false, false, false];
+}
+export type LinkPreset = 'auto' | 'any' | 'nolefts';
+// auto: no connections set, no bans; any: every lane takes every turn; nolefts: today's connections less every left (and U-turn)
+export function linkPreset(p: JunctionPlan, n: Node, kind: LinkPreset): void {
+  const m = n.edges.map(e => !e.drive && inLanes(n, e) ? (kind === 'any' ? Array<number>(inLanes(n, e)).fill(ANY) : links(p, n, e).map(x => x & ~1)) : null);
+  p.ban = grid(p.approaches.length, false);
+  if (kind === 'auto') { delete p.lanes; return; }
+  n.edges.forEach((e, i) => { if (m[i]) (p.lanes ??= p.approaches.map(() => null))[approachOf(p, n, e)] = m[i]; });
 }

@@ -22,7 +22,7 @@
 
 TrafficMania is a traffic-management game in the spirit of *Traffic Architect*, drawn in a flat top-down style like *Trafficity*. A seeded, procedurally generated map holds a small starter town. Its buildings make real trips: commuters drive from home to work and back, residents go shopping, and factories send trucks of goods to the shops. Every car is simulated on its own. It picks a lane for its next turn, queues at junctions and routes around traffic.
 
-You build and fix the network. You choose the road tier, the lanes and one-way streets, and the junction control: yield, stop, traffic lights with editable phases, protected lefts, turn bans and roundabouts. You can also raise viaducts, dig tunnels and build interchanges. Smooth trips make residents happy, and happy homes fill up and pay more taxes. Each population milestone levels the city up, hands you a new batch of buildings to place and unlocks new tools.
+You build and fix the network. You choose the road tier, the lanes and one-way streets, and the junction control: yield, stop, traffic lights with editable phases, protected lefts, lane connections you drag on the map, and roundabouts. You can also raise viaducts, dig tunnels and build interchanges. Smooth trips make residents happy, and happy homes fill up and pay more taxes. Each population milestone levels the city up, hands you a new batch of buildings to place and unlocks new tools.
 
 Built with **TypeScript**, **Vite** and the **HTML5 Canvas 2D** API. There is no game engine and there are no runtime dependencies.
 
@@ -77,7 +77,7 @@ Requires Node.js 18 or newer.
 | Place / bend a road | Click the start, click the end; hold the end and drag to bend | `Esc` or right-click cancels |
 | Road type | Tier, lanes 1 / 2 / 3 and **One-way** in the dock | applies to new roads, or to the road selected with Edit |
 | Elevation | `−` / `+` in the dock | `PageDown` / `PageUp` |
-| Edit | Click a car (follow), a building (details), a junction (control, phases, bans) or a road (retype, drag to bend) | `6` |
+| Edit | Click a car (follow), a building (details), a junction (control, phases, drag lane connections) or a road (retype, drag to bend) | `6` |
 | Heat map / noise and pollution | Overlay buttons, top right | `C` cycles |
 | Trip reports / metrics | Panel buttons, top right | `T` / `M` |
 | Pause, 1x, 2x, 4x | Speed buttons | `Space` toggles pause |

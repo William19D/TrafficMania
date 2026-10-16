@@ -3,7 +3,7 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleArrow, toggleBan } from '../src/network/Junction.ts';
+import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
@@ -429,7 +429,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (const n of [W, E, N, S]) w.commitPath(w.planPath([J, n], 0, ave));
   for (const e of wg.edges) e.day = -1;
   const wj = wg.edgeBetween(W, J)!;
-  w.editPlan(J, p => toggleBan(p, approachOf(p, J, wj), LEFT));
+  w.editPlan(J, p => setLink(p, J, wj, 0, LEFT, false));
   const m0 = w.money, drop = 10 * (TIERS.dirt.cost - TIERS.avenue.cost) * TUNING.REFUND_LATER;
   if (!w.retype([wg.edgeBetween(J, N)!], { tier: 'dirt', lanes: 1, oneWay: false }) || Math.abs(w.money - m0 + drop) > 1e-6) {
     fail(`edits: downgrade refunded ${w.money - m0}, expected ${-drop}`);
@@ -545,15 +545,26 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (const [a, b] of [[X, J], [J, K], [K, Q], [Q, P], [P, J], [P, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   const xj = wg.edgeBetween(X, J)!;
-  w.editPlan(J, p => toggleBan(p, approachOf(p, J, xj), LEFT));
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, false));
   const route = findPath(wg, X, Z);
   if (route?.[1] !== J || route[2] !== K) fail(`turn ban: route ${route?.map(n => n.id)} still turns left at J`);
+  // a legacy turn ban (old saves) shows as the missing connection, and the next connection edit folds it into the lanes
+  const legacy = clonePlan(planOf(J));
+  legacy.lanes = undefined;
+  legacy.ban[approachOf(legacy, J, xj)][LEFT] = true;
+  if (links(legacy, J, xj)[0] !== (1 << STRAIGHT | 1 << RIGHT)) fail(`turn ban: legacy ban shows as ${links(legacy, J, xj)}`);
+  setLink(legacy, J, xj, 0, STRAIGHT, true);
+  if (legacy.ban.flat().some(Boolean) || legacy.lanes?.[approachOf(legacy, J, xj)]?.[0] !== (1 << STRAIGHT | 1 << RIGHT)) fail(`turn ban: legacy ban not folded ${JSON.stringify(legacy)}`);
   w.queueTrip(X.building!, Z.building!, 'commute');
   for (let t = 0; t < 40 * 60 && !w.score; t++) {
     w.update(DT);
     for (const c of w.cars) if (c.prev === X && c.lane.from === J && c.lane.to === P) fail('turn ban: a car took the banned left');
   }
   if (w.score !== 1) fail(`turn ban: the trip did not arrive via the detour (score ${w.score})`);
+  // connecting the lane to the left again lifts the ban: the route turns left at J
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, true));
+  const back = findPath(wg, X, Z);
+  if (back?.[1] !== J || back[2] !== P) fail(`turn ban: route ${back?.map(n => n.id)} does not turn left at J once reconnected`);
 }
 // Lane arrows: X's two lanes into J set to left+straight and right only; no car leaves the right lane but to the right, and every
 // trip arrives. Then no lane allows the left: the Z trip reroutes round the block via K and Q.
@@ -565,7 +576,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (const [a, b] of [[J, K], [K, Q], [Q, P], [P, J], [P, Z], [J, S], [K, E]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   const xj = wg.edgeBetween(X, J)!, right = wg.lanesFrom(xj, X)[1]!;
-  w.editPlan(J, p => toggleArrow(p, approachOf(p, J, xj), 2, 1, STRAIGHT));
+  w.editPlan(J, p => setLink(p, J, xj, 1, STRAIGHT, false));
   if (wg.arrows(right) !== 1 << RIGHT) fail(`lane arrows: right lane allows ${wg.arrows(right)}`);
   for (let i = 0; i < 3; i++) for (const to of [Z, S, E]) w.queueTrip(X.building!, to.building!, 'commute');
   const last = new Map<Car, Lane>();
@@ -578,7 +589,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
     }
   }
   if (w.score !== 9) fail(`lane arrows: ${w.score} of 9 trips arrived`);
-  w.editPlan(J, p => toggleArrow(p, approachOf(p, J, xj), 2, 0, LEFT));
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, false));
   const route = findPath(wg, X, Z);
   if (route?.[1] !== J || route[2] !== K) fail(`lane arrows: route ${route?.map(n => n.id)} still turns left at J with no lane for it`);
   const back = deserialize(serialize(w)).graph.nodes[wg.nodes.indexOf(J)]?.plan?.lanes;

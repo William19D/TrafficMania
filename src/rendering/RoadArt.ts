@@ -2,7 +2,7 @@ import type { Edge, Node } from '../network/RoadGraph.ts';
 import { mulberry32 } from '../util/rng.ts';
 
 // Signature of everything the cached road layer draws: geometry, tiers, lanes, flags, controls and ring sizes (FNV-1a over the
-// numbers). Lane arrows, turn bans and signal colours are drawn live, so junction plans stay out of it.
+// numbers). Lane arrows and signal colours are drawn live, so junction plans stay out of it.
 export function netKey(edges: Edge[], nodes: Node[]): number {
   let h = 2166136261;
   const mix = (v: number): void => { h = Math.imul(h ^ Math.round(v * 8), 16777619); };

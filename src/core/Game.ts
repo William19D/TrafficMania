@@ -1573,7 +1573,7 @@ export class Game {
     return true;
   }
 
-  // Edits a copy of the junction's plan (phases, protected lefts, turn bans); free. A ban change reroutes every car not already
+  // Edits a copy of the junction's plan (phases, protected lefts, lane connections); free. A connection change reroutes every car not already
   // granted through the junction.
   editPlan(n: Node, edit: (p: JunctionPlan) => void): void {
     const locked = this.lockOf('junction');

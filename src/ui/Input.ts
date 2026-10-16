@@ -5,11 +5,13 @@ import type { Building } from '../entities/Building.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
 import { dist, snapAngle } from '../util/geom.ts';
+import { moveOf, setLink } from '../network/Junction.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
+import { editable, handleAt, linkAt, linkUI, targetAt } from './LaneLinks.ts';
 
 // Number keys follow the dock left to right; Buildings is B, and B again steps through the tray (past the last kind it lets go)
 export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
-const CLICK_PX = 6;
+const CLICK_PX = 6, HIT_PX = 9;
 
 type Mode = 'idle' | 'placing' | 'pressed' | 'bending';
 
@@ -44,6 +46,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     run = null;
     grab = null;
     grid = [];
+    linkUI.drag = null;
   };
 
   const autoPlan = (a: Vec, c: Vec): PathPlan => game.planRoad(a, c, game.roadCurve && !shift);
@@ -51,6 +54,18 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   const aim = (a: Vec, w: Vec): Vec => snap ? snapAngle(a, w, Math.PI / 12) : w;
   const mods = (e: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean }) => { shift = e.shiftKey; snap = e.ctrlKey || e.altKey; };
   // the road being placed follows a mode switch or a modifier key at once, without waiting for the mouse
+  // lane connection hit radius in world px; fingers get more
+  const hitR = (e: PointerEvent): number => HIT_PX * (e.pointerType === 'touch' ? 1.8 : 1) / renderer.cam.zoom;
+  // Releases a lane drag: a click on a line removes it; a drag moves it (or makes a new one) to the road let go on, or off any road removes it
+  const dropLink = () => {
+    const d = linkUI.drag, n = game.inspect;
+    linkUI.drag = null;
+    if (!d || !editable(n) || (d.moved && d.was && d.t?.o === d.was.t.o) || (!d.was && (!d.moved || !d.t))) return;
+    game.editPlan(n, p => {
+      if (d.was) setLink(p, n, d.h.e, d.h.j, d.was.mv, false);
+      if (d.moved && d.t) setLink(p, n, d.h.e, d.h.j, moveOf(n, d.h.e, d.t.o), true);
+    });
+  };
   const replan = () => { if (game.tool === 'road' && mode === 'placing' && anchor && hover && !blocked()) plan = autoPlan(anchor, aim(anchor, hover)); };
 
   canvas.addEventListener('pointerdown', e => {
@@ -73,6 +88,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       }
     } else if (game.tool === 'edit') {
       press = { x: e.clientX, y: e.clientY };
+      const n = game.inspect, r = hitR(e), h = editable(n) ? handleAt(n, w, r) : null, l = !h && editable(n) ? linkAt(n, w, r) : null;
+      if (h || l) { linkUI.drag = { h: h ?? l!.h, was: l, x: w.x, y: w.y, t: null, moved: false }; return; }
       grab = game.carAt(w) || game.junctionAt(w) ? null : game.buildingUnder(w);
       run = grab ? null : game.runAt(w);
     } else if (game.tool === 'grid') press = { x: e.clientX, y: e.clientY };
@@ -92,7 +109,15 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       last = { x: e.clientX, y: e.clientY };
       return;
     }
-    const w = renderer.screenToWorld(e.clientX, e.clientY);
+    const w = renderer.screenToWorld(e.clientX, e.clientY), n = game.inspect, d = linkUI.drag;
+    if (d && editable(n)) {
+      d.x = w.x;
+      d.y = w.y;
+      d.moved ||= !!press && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX;
+      d.t = d.moved ? targetAt(n, w, hitR(e), d.h) : null;
+      return;
+    }
+    if (game.tool === 'edit' && editable(n) && !press) { const r = hitR(e), h = handleAt(n, w, r); linkUI.hover = h?.key ?? linkAt(n, w, r)?.key ?? ''; }
     if (game.tool === 'edit' && grab && press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) { game.startMove(grab); return; }
     if (game.tool === 'edit' && run && press && !blocked()) {
       if (mode === 'idle' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';
@@ -129,7 +154,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       return;
     }
     if (game.tool === 'edit') {
-      if (mode === 'bending' && run) {
+      if (linkUI.drag) dropLink();
+      else if (mode === 'bending' && run) {
         // replan at the release point, like the road bend
         game.commitBend(run, game.planBend(run, renderer.screenToWorld(e.clientX, e.clientY)));
       } else if (press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) <= CLICK_PX) {
@@ -200,6 +226,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       else game.setTool('road');
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
     else if (e.key === 'v' || e.key === 'V') { game.roadCurve = !game.roadCurve; replan(); }
+    else if (e.key === 'Escape' && linkUI.drag) linkUI.drag = null;
     else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool(game.moving ? 'edit' : 'road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
@@ -212,6 +239,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     if ((mode !== 'idle' || run) && (game.tool !== (run ? 'edit' : 'road') || blocked())) cancel();
     if (grid.length && (game.tool !== 'grid' || blocked())) cancel();
     if (game.selected && game.tool !== 'edit') game.select(null);
+    if (game.tool !== 'edit' || !editable(game.inspect) || blocked()) { linkUI.drag = null; linkUI.hover = ''; }
   };
 
   return {
@@ -219,6 +247,6 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     get anchor() { live(); return grid[0] ?? anchor; },
     get handle() { live(); return handle; },
     get hover() { live(); return blocked() ? null : hover; },
-    get busy() { return mode !== 'idle' || !!run || grid.length > 0; },
+    get busy() { return mode !== 'idle' || !!run || grid.length > 0 || !!linkUI.drag; },
   };
 }

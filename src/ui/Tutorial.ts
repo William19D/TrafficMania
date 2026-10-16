@@ -84,7 +84,7 @@ export function tutorialSteps(g: Game): Step[] {
     },
     {
       title: 'Time the light', task: 'Press 6 (Edit), click the light, then press + on a phase.',
-      text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases, protected lefts and turn bans. Give the busier road the longer green. In a career game the phase editor unlocks at level 4.',
+      text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases and protected lefts. On the map, drag from a lane to a road to connect it, click a line to remove it: a turn no lane connects is banned. Give the busier road the longer green. In a career game the phase editor unlocks at level 4.',
       targets: g => lights(g).map(at),
       // a replay on a career city below level 4 cannot edit phases yet: nothing to do here
       done: g => !!g.lockOf('junction') || lights(g).some(n => !!n.plan?.phases.some(p => p.seconds > LIGHT_PERIOD)), hint: '[data-tool="edit"]',

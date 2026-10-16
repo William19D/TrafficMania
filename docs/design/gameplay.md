@@ -49,7 +49,7 @@ Zone capacities: home 30 residents, shop 10 jobs, office 30 jobs, industry 25 jo
 | 1 | start | dirt, street, ground bridges, light, Edit, Demolish | pre-placed 4/1/1/0 + tray 6/1/3/0 | 10/2/4/0 |
 | 2 | 220 | avenue, one-way, roundabout | 6/1/2/0 | 16/3/6/0 |
 | 3 | 400 | viaducts L1-5, ramps | 7/1/1/2 | 23/4/7/2 |
-| 4 | 580 | boulevard, light phase editor, protected lefts, turn bans | 8/2/2/1 | 31/6/9/3 |
+| 4 | 580 | boulevard, light phase editor, protected lefts, lane connections | 8/2/2/1 | 31/6/9/3 |
 | 5 | 800 | Grid tool, L6-10, tunnels | 9/1/3/1 | 40/7/12/4 |
 | 6 | 1000 | highway, Interchange tool | 10/2/3/1 | 50/9/15/5 |
 | 7 | 1250 | none | 10/1/3/1 | 60/10/18/6 |
@@ -601,3 +601,12 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - **Cloud shadows**: 6 stretched copies of one cached radial sprite drifting east (not under an overlay). **Birds**: 3 small flocks in loose Vs with beating wings and faint ground shadows, over every level.
 - Cost: a frame stays under 0.5 ms of script on the starter town at zoom 0.4-2.5. A ground repaint on a medium map takes about 80 ms at scale 0.5, 120 ms at 1 and 330 ms at 2 (was about 25 ms).
 - Known gaps: the slower ground repaint makes a zoom-bucket hitch noticeable (tiling or an idle-time repaint would fix it). Boats can cut a lake's corner on a very concave lake. No sea coast: archipelago water is still lakes and rivers.
+
+**Q9 Lane connections by dragging lines.**
+- Feedback on Q5: the Turn bans and Lanes tabs were confusing. Both are gone; connections are edited on the map.
+- Model: `JunctionPlan.lanes` is the source of truth (a lane mask may now be 0: that lane connects nowhere there). A move no lane connects is banned (`banned()`, unchanged). `ban` stays only so old saves load: `links(p, n, e)` = the lane masks (auto ones when unset) less the approach's legacy bans, and the next `setLink` on that approach folds its bans into the lanes and clears them. Edits: `setLink(p, n, e, j, mv, on)` and `linkPreset(p, n, 'auto' | 'any' | 'nolefts')`; `toggleBan`, `toggleArrow` and `setLanes` are removed.
+- Editor (`src/ui/LaneLinks.ts`, geometry shared by Input and the renderer): with the Edit tool on a junction (not a roundabout) each incoming lane shows a handle at its stop line and each road out a target bar. Press a handle and drag: the line snaps onto the nearest road out within reach (highlighted; the lane's own road greyed, others dashed), release connects that lane to that move. Click a line to remove it; press a line and drag it to another road to move it, or off any road to remove it. Esc (or a right click) cancels a drag. Lines are cubic curves with arrowheads, a colour per approach, white casing, twice as thick hovered. Hit radius 9 screen px (x1.8 for touch); the canvas has `touch-action: none`.
+- Panel: control picker, ring sizes, the one-line hint, Reset to auto / Any lane / No lefts; at a light the signal diagram (a turn no lane connects shows banned) and phases as before.
+- Painted lane arrows read `links()`, so they follow every edit live (they are drawn over the cached road layer).
+- simcheck: removing the only lane's left connection bans it (the route and the car detour via K and Q); connecting it again restores the left at J; a legacy ban shows as a missing connection and is folded into the lanes by the next edit.
+- Known gaps: connections are per move class, so at a 5+ arm junction two roads out the same way share one (a line is drawn to both). A lane with no connection is avoided by lane choice, but a car already in it past the last lane change takes its turn anyway (Q5 ponytail). No undo beyond Esc during a drag.

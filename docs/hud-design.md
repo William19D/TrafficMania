@@ -114,10 +114,10 @@ The dock holds only what is used all the time; building lives in a menu that unf
 ### G. Panel column (`.rcol`, newest state, scrolls when full)
 - **Junction** (Edit click on a junction):
   - control picker: None, Yield, Stop, Light, Roundabout, each with its price or refund;
-  - Signals / Turn bans toggle;
-  - arm diagram with L/S/R turn buttons that you can reach from the keyboard;
+  - the hint "Drag from a lane to a road to connect it. Click a line to remove it." (the lane connections are edited on the map) and Reset to auto / Any lane / No lefts;
+  - at a light: arm diagram with L/S/R signal buttons that you can reach from the keyboard (a turn no lane connects shows banned);
   - phase rows (select, `−`/`+` seconds, remove), Add phase, and presets.
-  The phase editor and turn bans are locked below level 4.
+  The phase editor and lane connections are locked below level 4.
 - **Interchange** (Interchange tool on a junction): Diamond / Cloverleaf / Trumpet, the reason or the net price, Build / Cancel.
 - **Car** (Edit click on a car): trip, from -> to, kind, time so far vs on empty roads, speed in km/h, stopped and the longest stop. The camera follows the car, and the route is drawn dashed.
 - **Building** (Edit click on a building):
@@ -217,7 +217,7 @@ Tokens (`:root`):
 - [ ] The money chip flashes on spends and gains, goes red in debt, and its tooltip has both days' ledgers.
 - [ ] The clock advances in 10-minute steps, the paused state shows, and Space toggles it.
 - [ ] Error toasts show a warning icon and a "what to do" text. At most 2 show, and duplicates merge.
-- [ ] The junction panel edits phases and bans. The focus survives the re-render on each phase change.
+- [ ] The junction panel edits phases; lane connections are dragged on the map. The focus survives the re-render on each phase change.
 - [ ] The tutorial runs start to end on a new career map: each step waits for its task, hints pulse, and targets ring the right spot.
 - [ ] The level-up modal pauses and resumes, and Enter continues. The game-over modal focuses Play again.
 - [ ] The help popover lists every shortcut and can replay the tutorial.

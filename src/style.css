@@ -41,7 +41,7 @@ body {
   user-select: none;
 }
 
-canvas { display: block; }
+canvas { display: block; touch-action: none; }
 body[data-tool="road"] canvas { cursor: crosshair; }
 body[data-tool="light"] canvas,
 body[data-tool="roundabout"] canvas { cursor: pointer; }
@@ -729,10 +729,8 @@ kbd {
 .jsvg g:focus-visible circle { stroke: var(--accent); stroke-width: 2; }
 .jsvg circle { stroke-width: 1; }
 .jsvg text { font: 700 6px system-ui, sans-serif; text-anchor: middle; pointer-events: none; }
-.jsvg .ok circle { fill: #fff; stroke: #6B6B68; }
-.jsvg .ok text { fill: var(--ink); }
-.jsvg .ban circle, .jsvg .s0 circle { fill: var(--danger); stroke: #fff; }
-.jsvg .ban text, .jsvg .s0 text, .jsvg .s2 text { fill: #fff; }
+.jsvg .s0 circle { fill: var(--danger); stroke: #fff; }
+.jsvg .s0 text, .jsvg .s2 text { fill: #fff; }
 .jsvg .s1 circle { fill: #fff; stroke: var(--success); stroke-width: 1.6; }
 .jsvg .s1 text { fill: var(--success); }
 .jsvg .s2 circle { fill: var(--success); stroke: #fff; }
@@ -876,15 +874,6 @@ kbd {
 #menu th, #menu td { padding: .45em 0; border-bottom: 1px solid var(--soft); vertical-align: top; text-align: left; }
 #menu th { font-weight: 600; padding-right: 1em; }
 #menu td { color: var(--muted); }
-.jlanes { display: flex; flex-direction: column; gap: .5em; max-height: 46vh; overflow-y: auto; }
-.jarm { display: flex; flex-direction: column; gap: .25em; padding: .375em .5em; border-radius: 8px; background: var(--soft); }
-.jarm > small { font-size: var(--label); color: var(--muted); font-weight: 600; }
-.jarm .row { display: flex; align-items: center; gap: .25em; }
-.jarm .row span { flex: 1; font-size: var(--label); }
-#hud .jarm .arr { font-size: 1.1em; font-weight: 700; }
-#hud .jarm .arr[aria-pressed="true"] { background: var(--accent); color: #fff; }
-#hud .jarm .arr:disabled { opacity: .35; }
-#hud .jarm .jpre .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 
 /* ---------- finish: depth, colour and motion (docs/hud-design.md, Visual language) ---------- */
 /* type: numbers, labels and headings in the display face */
@@ -924,7 +913,7 @@ kbd { background: linear-gradient(180deg, #FFFFFF, #ECEAE4); box-shadow: inset 0
 #menu .slot { background: linear-gradient(180deg, #FFFFFF, #F1EFE9); box-shadow: var(--sheen); }
 
 /* pressed toggles: a lit accent cap (destroy and tier keep their own looks) */
-#hud :is(.speed, .tool, .lane:not(.tier), .jarm .arr)[aria-pressed="true"], #hud .views [aria-pressed="true"] {
+#hud :is(.speed, .tool, .lane:not(.tier))[aria-pressed="true"], #hud .views [aria-pressed="true"] {
   background: var(--accent-grad);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), inset 0 -2px 0 rgba(0, 0, 0, .18), 0 3px 10px -3px rgba(47, 111, 237, .75);
 }
@@ -991,7 +980,7 @@ kbd { background: linear-gradient(180deg, #FFFFFF, #ECEAE4); box-shadow: inset 0
 .tut-head .bar, .pbar2 > i { box-shadow: var(--well); background: #E6E3DC; }
 .pbar i, .tut-head .bar i, .pbar2 > i > i { background-image: linear-gradient(180deg, rgba(255, 255, 255, .45), rgba(255, 255, 255, 0) 70%); }
 .day { box-shadow: var(--well); }
-.stats > div, .lvl-grid > div, .jarm { background: linear-gradient(180deg, #F7F6F2, #EFEDE7); box-shadow: inset 0 0 0 1px rgba(60, 50, 30, .06); }
+.stats > div, .lvl-grid > div { background: linear-gradient(180deg, #F7F6F2, #EFEDE7); box-shadow: inset 0 0 0 1px rgba(60, 50, 30, .06); }
 
 /* toasts and tooltip */
 .toast { background: var(--grain), var(--panel-bg); box-shadow: var(--sheen), var(--shadow-hi); border-left: 4px solid var(--accent); animation: toast-in .28s var(--spring); }

@@ -105,7 +105,7 @@ export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
   roundabout: { level: 2, label: 'Roundabouts' },
   oneway: { level: 2, label: 'One-way roads' },
-  junction: { level: 4, label: 'Light phases, protected lefts and turn bans' },
+  junction: { level: 4, label: 'Light phases, protected lefts and lane connections' },
   viaduct: { level: 3, label: 'Viaducts L1-L5 and ramps' },
   tunnel: { level: 5, label: 'Tunnels' },
   high: { level: 5, label: 'Viaducts L6-L10' },

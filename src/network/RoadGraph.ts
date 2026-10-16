@@ -56,7 +56,7 @@ export interface Node {
   id: number; x: number; y: number; edges: Edge[]; building: Building | null; control: Control;
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
   controlDay: number; // day the control was built (refund rule)
-  plan: JunctionPlan | null; // edited phases / turn bans; null = the default plan (Junction.planOf)
+  plan: JunctionPlan | null; // edited phases / lane connections; null = the default plan (Junction.planOf)
   ring: RingSize; // roundabout size (kept when the control changes)
   delay: number; // EMA of the mean stopped seconds of the cars queued at it (heat map)
 }

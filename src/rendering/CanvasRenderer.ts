@@ -2,7 +2,8 @@ import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
 import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
-import { approachOf, autoMasks, inLanes, laneMasks, mainEdges, moveOf, planOf } from '../network/Junction.ts';
+import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
+import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
@@ -27,6 +28,8 @@ const RED = '#E5484D';
 const RAIL = '#55657A';
 const PILLAR = '#8A99AD';
 const ACCENT = '#2F6FED';
+// lane connection colours, one per junction approach
+const LINK_COLS = [ACCENT, '#2F8F5B', '#E08A1E', '#8A4FD8', '#D0457A', '#1E9AA8'];
 const BRAKE_ON = '#FF2A2A';
 const BRAKE_OFF = '#8C2A2A';
 const AMBER = '#FFB020';
@@ -231,7 +234,7 @@ export class CanvasRenderer {
     };
     halo(0);
 
-    // Ground roads: the cached static layer, then the live lane arrows, heat, signals, signs and bans over it
+    // Ground roads: the cached static layer, then the live lane arrows, heat, signals and signs over it
     const nodes0 = levelNodes(0);
     this.roadLayer(game, ground, nodes0, dpr);
     this.laneArrows(ground);
@@ -274,7 +277,7 @@ export class CanvasRenderer {
     }
 
     // Junction open in the Edit panel
-    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.laneLinks(game.inspect); }
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
@@ -697,7 +700,7 @@ export class CanvasRenderer {
       const j = game.junctionAt(p);
       if (j) {
         this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
-        label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
+        label('Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
         return;
       }
       const b = game.buildingUnder(p);
@@ -1039,13 +1042,12 @@ export class CanvasRenderer {
   }
 
   // Intersection markings (stop lines), roundabout islands and traffic lights
-  // part: 'static' (islands, stop lines, zebras, signs: the cached layer), 'live' (lights, bans), 'all'
+  // part: 'static' (islands, stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
   private controls(nodes: Node[], part: 'static' | 'live' | 'all'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
       if (part !== 'static' && (n.control === 'roundabout' || junction(n))) {
         if (n.control === 'light') this.drawLights(n);
-        if (n.plan) this.drawBans(n);
       }
       if (part === 'live') continue;
       if (n.control === 'roundabout') this.island(n);
@@ -1295,9 +1297,8 @@ export class CanvasRenderer {
           turns |= Math.abs(a) < 0.6 ? 2 : a > 0 ? 4 : 1;
         }
         if (!turns) continue;
-        // each lane: the turns there are, less the junction's turn bans, within its lane arrows (set or auto)
-        const m = this.arrowsOf(n, e), ban = n.plan?.ban[approachOf(n.plan, n, e)] ?? [false, false, false];
-        turns &= ~ban.reduce((x, b, i) => x | (b ? 1 << i : 0), 0);
+        // each lane: the turns there are, within its lane connections (set or auto)
+        const m = this.arrowsOf(n, e);
         let j = 0;
         for (const l of e.lanes) {
           if (l.to !== n) continue;
@@ -1518,66 +1519,75 @@ export class CanvasRenderer {
     }
   }
 
-  // Arrows of e's lanes into n: its plan's lane arrows, else auto ones where two lanes or more come in (roundabouts: set ones only)
+  // Arrows of e's lanes into n: its plan's lane connections (less legacy bans), else auto ones where two lanes or more come in
+  // (roundabouts: set ones only)
   private arrowsOf(n: Node, e: Edge): number[] | null {
-    const m = n.plan && laneMasks(n.plan, n, e), k = inLanes(n, e);
-    return m ?? (k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null);
+    const p = n.plan, k = inLanes(n, e);
+    if (p && (laneMasks(p, n, e) || p.ban[approachOf(p, n, e)].some(Boolean))) return links(p, n, e);
+    return k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null;
   }
-  // Lane centre d px out from n on e's lane j into n (out: lane j out of n), and the travel direction there
-  private laneAt(n: Node, e: Edge, j: number, d: number, out = false): [number, number, number, number] {
-    const [ux, uy] = this.dir(n, e), l = e.lanes.filter(x => out ? x.from === n : x.to === n)[j]!, o = l.offset, f = out ? 1 : -1;
-    return [n.x + ux * d - f * uy * o, n.y + uy * d + f * ux * o, ux * f, uy * f];
-  }
-
-  // Lane connections of the junction open in the panel: a curve from each incoming lane to the road each of its arrows leads onto
-  // (left blue, straight green, right amber), landing on the outer lane for a turn and the matching lane straight on
-  private laneLinks(n: Node): void {
-    if (n.control === 'roundabout' || !junction(n)) return;
-    const ctx = this.ctx, d = NODE_R + 4, COL = [ACCENT, '#2F8F5B', '#E08A1E'];
-    ctx.lineWidth = 1.6;
+  // Lane connection editor (LaneLinks) of the junction open in the panel: a soft pad, the target zones on the roads out, a curve per
+  // connection in its approach's colour (thicker hovered), the lane handles, and the line being dragged snapping onto a zone
+  private linkEditor(n: Node): void {
+    if (!editable(n)) return;
+    const ctx = this.ctx, z = this.cam.zoom, lw = Math.max(1.5, 2 / z), d = linkUI.drag, ls = linksOf(n), hs = handles(n);
+    const col = (a: number): string => LINK_COLS[a % LINK_COLS.length];
+    const r = Math.max(...hs.map(h => Math.hypot(h.x - n.x, h.y - n.y)), NODE_R) + 10;
+    ctx.globalAlpha = 0.45;
+    this.circle(n.x, n.y, r, '#FFFFFF');
+    ctx.globalAlpha = 1;
     ctx.lineCap = 'round';
-    for (const e of n.edges) {
-      const k = inLanes(n, e), m = this.arrowsOf(n, e) ?? autoMasks(k);
-      if (e.drive || !k) continue;
-      m.forEach((x, j) => {
-        const [sx, sy] = this.laneAt(n, e, j, d);
-        for (const o of n.edges) {
-          const ko = o.lanes.filter(l => l.from === n).length, mv = o === e ? -1 : moveOf(n, e, o);
-          if (o.drive || !ko || mv < 0 || !(x >> mv & 1)) continue;
-          const [ex, ey, vx, vy] = this.laneAt(n, o, mv === 0 ? 0 : mv === 2 ? ko - 1 : Math.min(j, ko - 1), d, true);
-          ctx.strokeStyle = ctx.fillStyle = COL[mv];
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.bezierCurveTo(sx + (n.x - sx) * 0.6, sy + (n.y - sy) * 0.6, ex + (n.x - ex) * 0.6, ey + (n.y - ey) * 0.6, ex, ey);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(ex + vx * 3, ey + vy * 3);
-          ctx.lineTo(ex - vy * 2, ey + vx * 2);
-          ctx.lineTo(ex + vy * 2, ey - vx * 2);
-          ctx.fill();
-        }
-        this.circle(sx, sy, 1.8, '#FFFFFF');
-        ctx.strokeStyle = '#5A5A57';
-        ctx.lineWidth = 0.8;
-        ctx.stroke();
-        ctx.lineWidth = 1.6;
-      });
-    }
-  }
-
-  // A small red no-turn glyph on each approach with a banned movement
-  private drawBans(n: Node): void {
-    const ctx = this.ctx, p = n.plan!;
-    for (const e of n.edges) {
-      if (!p.ban[approachOf(p, n, e)].some(Boolean)) continue;
-      const [px, py] = this.spot(n, e, NODE_R + 15);
-      this.circle(px, py, 3.4, '#FFFFFF');
-      ctx.strokeStyle = RED;
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
+    for (const t of targets(n)) {
+      const own = d?.h.e === t.o, on = d?.t === t, px = -t.uy * t.w, py = t.ux * t.w, ox = t.x + t.ux * 4, oy = t.y + t.uy * 4;
+      ctx.globalAlpha = own ? 0.25 : 1;
       ctx.beginPath();
-      ctx.moveTo(px - 2.2, py - 2.2);
-      ctx.lineTo(px + 2.2, py + 2.2);
+      ctx.moveTo(ox - px, oy - py);
+      ctx.lineTo(ox + px, oy + py);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = (on ? 7 : 5) * lw / 1.5;
+      ctx.stroke();
+      ctx.strokeStyle = own ? '#9A9A96' : d ? col(d.h.a) : '#7C8796';
+      ctx.lineWidth = (on ? 4.5 : 2.5) * lw / 1.5;
+      ctx.setLineDash(d && !on && !own ? [2, 2] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+    const stroke = (c: number[], color: string, w: number, head: boolean): void => {
+      const [sx, sy, ax, ay, bx, by, ex, ey] = c, l = Math.hypot(ex - bx, ey - by) || 1, vx = (ex - bx) / l, vy = (ey - by) / l, hw = w * 1.4 + 1;
+      for (const [cl, cw] of [['#FFFFFF', w + 1.8], [color, w]] as const) {
+        ctx.strokeStyle = ctx.fillStyle = cl;
+        ctx.lineWidth = cw;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.bezierCurveTo(ax, ay, bx, by, ex - vx * hw, ey - vy * hw);
+        ctx.stroke();
+        if (!head) continue;
+        const k = cw === w ? 0 : 0.9;
+        ctx.beginPath();
+        ctx.moveTo(ex + vx * (hw * 0.6 + k), ey + vy * (hw * 0.6 + k));
+        ctx.lineTo(ex - vx * (hw + k) - vy * (hw + k), ey - vy * (hw + k) + vx * (hw + k));
+        ctx.lineTo(ex - vx * (hw + k) + vy * (hw + k), ey - vy * (hw + k) - vx * (hw + k));
+        ctx.fill();
+      }
+    };
+    for (const l of ls) {
+      // the line being dragged off fades; hovered thickens
+      if (d?.moved && d.was?.key === l.key) ctx.globalAlpha = 0.3;
+      stroke(l.c, col(l.h.a), !d && linkUI.hover === l.key ? lw * 2 : lw, true);
+      ctx.globalAlpha = 1;
+    }
+    if (d) {
+      const c = d.t ? curve(n, d.h, d.t, moveOf(n, d.h.e, d.t.o)) : [d.h.x, d.h.y, d.h.x + (n.x - d.h.x) * 0.5, d.h.y + (n.y - d.h.y) * 0.5, d.x, d.y, d.x, d.y];
+      if (!d.t) ctx.setLineDash([3, 3]);
+      if (d.moved) stroke(c, col(d.h.a), lw * 1.6, !!d.t);
+      ctx.setLineDash([]);
+    }
+    for (const h of hs) {
+      const hot = linkUI.hover === h.key || d?.h.key === h.key;
+      this.circle(h.x, h.y, (hot ? 3.2 : 2.4) * Math.max(1, 1.4 / z), '#FFFFFF');
+      ctx.strokeStyle = col(h.a);
+      ctx.lineWidth = lw * 0.9;
       ctx.stroke();
     }
   }
