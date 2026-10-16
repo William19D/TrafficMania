@@ -10,6 +10,7 @@ import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
+import { birds, boats, cloudShadows, pedestrians } from './Ambience.ts';
 import { grain, netKey } from './RoadArt.ts';
 import { BEAM_L, BEAM_W, GLOW_R, beam, daylight, glow } from './Lighting.ts';
 import type { Daylight } from './Lighting.ts';
@@ -186,7 +187,10 @@ export class CanvasRenderer {
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
     ctx.drawImage(this.ground.c, 0, 0, this.ground.c.width / gs, this.ground.c.height / gs);
-    shimmer(ctx, terrain, performance.now() / 1000);
+    const now = performance.now() / 1000, hw = innerWidth / 2 / z, hh = innerHeight / 2 / z;
+    const view = { x0: this.cam.x - hw, y0: this.cam.y - hh, x1: this.cam.x + hw, y1: this.cam.y + hh };
+    shimmer(ctx, terrain, now);
+    boats(ctx, terrain, now, view);
 
     // World border, almost invisible
     ctx.strokeStyle = '#DDDBD4';
@@ -236,6 +240,7 @@ export class CanvasRenderer {
     // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
     for (const b of game.buildings) if (b.kind !== 'gate') this.building(b, game.time);
     this.exits(game);
+    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view);
     carsAt(0);
 
     // Elevated layers, lowest first: each covers the roads and cars below it
@@ -250,6 +255,10 @@ export class CanvasRenderer {
       this.controls(nodesL, 'all');
       carsAt(L);
     }
+
+    // Ambience over every level: cloud shadows drifting over the ground, birds above them
+    if (game.overlay === 'none') cloudShadows(ctx, now, view);
+    birds(ctx, now, view);
 
     // Day/night: the world under a multiply tint from the clock (not under an overlay, which must read true), then the night's
     // lamps, windows and headlights over it; labels and tool hints below stay untinted
