@@ -12,7 +12,7 @@ import { PAD, look, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer } from './Scenery.ts';
 import { BEAM_L, BEAM_W, GLOW_R, beam, daylight, glow } from './Lighting.ts';
 import type { Daylight } from './Lighting.ts';
-import { TONES, VH, VPAD, VW, vehicle, vshadow } from './VehicleArt.ts';
+import { VH, VPAD, VW, vehicle, vshadow } from './VehicleArt.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -55,11 +55,9 @@ export class CanvasRenderer {
   // Cached ground of the current map at s px per world px; building sprites' scale
   private ground: { t: Game['terrain']; s: number; c: HTMLCanvasElement } | null = null;
   private artS = 1;
-  // Cars drawn this frame and where, for the headlights over the night tint; each car's tone within its purpose colour
+  // Cars drawn this frame and where, for the headlights over the night tint
   private seen: Car[] = [];
   private seenAt: { x: number; y: number; angle: number }[] = [];
-  private tones = new WeakMap<Car, number>();
-  private nTone = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -1016,9 +1014,7 @@ export class CanvasRenderer {
     const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
     this.seen.push(car);
     this.seenAt.push(p);
-    let tone = this.tones.get(car);
-    if (tone === undefined) this.tones.set(car, tone = this.nTone++ % TONES.length);
-    const c = Math.cos(p.angle), sn = Math.sin(p.angle), img = vehicle(k, car.trip.purpose, tone, s), sh = vshadow(k, s);
+    const c = Math.cos(p.angle), sn = Math.sin(p.angle), img = vehicle(k, car.paint, s), sh = vshadow(k, s);
     const x0 = -h - VPAD, y0 = -VH / 2, dw = img.width / s, dh = img.height / s;
     ctx.save();
     ctx.translate(p.x, p.y);
@@ -1034,6 +1030,18 @@ export class CanvasRenderer {
       ctx.fillStyle = AMBER;
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
+    }
+    // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
+    if (game.purposeDots || game.overlay === 'heat') {
+      const bx = k === 'truck' ? -3.5 : k === 'moto' ? -1.2 : -1;
+      ctx.beginPath();
+      ctx.arc(bx, 0, 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx, 0, 1.4, 0, Math.PI * 2);
+      ctx.fillStyle = PURPOSES[car.trip.purpose].color;
+      ctx.fill();
     }
     ctx.restore();
   }

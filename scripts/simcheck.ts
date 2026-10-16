@@ -19,6 +19,7 @@ import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
+import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
 
 declare const process: { exit(code: number): never };
@@ -938,6 +939,10 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     if (Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 12 || Math.abs(a.night - b.night) > 0.05) fail(`light: the tint jumps at ${h.toFixed(2)}h`);
   }
   if (shade(shade('#5A6FD8', -0.2), 0) !== shade('#5A6FD8', -0.2)) fail('art: a shade does not shade again');
+  // paint: 500 spawns wear every car colour, white the most, and the roll stays off the sim's rng
+  const n = CAR_PAINT.map(() => 0);
+  for (let i = 0; i < 500; i++) n[pick(CAR_PAINT, new Car(g.edges[0]!.lanes[0]!, makeTrip('commute', game.buildings[0]!, game.buildings[1]!)).paint)]!++;
+  if (n.some(x => !x) || Math.max(...n) !== n[0]) fail(`art: paint spread ${n.join(',')}`);
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

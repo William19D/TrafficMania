@@ -1,6 +1,6 @@
 import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
-import { PURPOSES, TIERS } from '../core/config.ts';
+import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { Building } from './Building.ts';
 import type { Trip } from './Trip.ts';
@@ -24,6 +24,10 @@ export const randomKind = (): Kind => {
   for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
   return 'car';
 };
+// Paint roll in [0, 1) per spawned vehicle (VehicleArt maps it to a weighted palette); a hash of a counter, so it never
+// shifts the sim's seeded rng
+let serial = 0;
+const roll = (): number => (Math.imul(++serial, 0x9E3779B1) >>> 0) / 2 ** 32;
 // Centre-to-centre distance of two touching vehicles (s is the centre)
 export const sep = (a: Car, b: Car): number => (a.len + b.len) / 2;
 
@@ -56,6 +60,7 @@ export class Car {
   vmax: number;
   acc: number;
   react: number;
+  paint = roll();
 
   constructor(public lane: Lane, public trip: Trip, public kind: Kind = 'car') {
     const k = KINDS[kind];
@@ -72,7 +77,6 @@ export class Car {
 
   get dest(): Building { return this.trip.to; }
   get origin(): Building { return this.trip.from; }
-  get color(): string { return PURPOSES[this.trip.purpose].color; }
 
   update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
     let lane = this.lane;

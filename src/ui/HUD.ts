@@ -111,6 +111,7 @@ export const CONTROLS: [string, string][] = [
   ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
+  ['Trip purpose dots on vehicles', '<kbd>P</kbd>'],
   ['Mute / unmute sound', '<kbd>Shift</kbd> + <kbd>M</kbd>; volumes in the menu (<kbd>Esc</kbd>), Sound'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
@@ -190,9 +191,10 @@ function spark(v: number[], zero = false, max = -Infinity): [string, number, num
   const pts = v.map((y, i) => `${(i / n * 100).toFixed(1)},${(23 - (y - lo) / k * 22).toFixed(1)}`).join(' ');
   return [`<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`, lo, hi];
 }
-// Legend panel per overlay (the car colours without one)
+// Legend panel per overlay; the trip purposes' roof dots are listed whenever they show (Purpose toggle or the traffic overlay)
+const DOTS = '<b>Roof dot: trip purpose</b>' + Object.values(PURPOSES).map(p => `<span><i class="dot" style="background:${p.color}"></i>${p.label}</span>`).join('');
 const LEGEND: Record<Overlay, string> = {
-  none: Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join(''),
+  none: "<b>Cars</b><span>Paint is the owner's choice</span><span><kbd>P</kbd> shows each trip's purpose</span>",
   heat: '<b>Traffic</b><span class="grad"></span><span class="ends"><small>flowing</small><small>jammed</small></span><span>Discs: cars waiting at a junction</span>',
   noise: '<b>Noise and pollution</b><span><i style="background:#8E7CC3"></i>Road noise</span><span><i style="background:#9A6B2F"></i>Factory pollution</span>'
     + '<span><i class="dot" style="background:#4CC26A"></i>Happy home</span><span><i class="dot" style="background:#FFB020"></i>Content</span><span><i class="dot" style="background:#E5484D"></i>Moving out</span>',
@@ -283,6 +285,7 @@ export class HUD {
       <div class="panel views" role="group" aria-label="Analysis">
         <button class="iconbtn" data-view="heat" aria-pressed="false" aria-label="Traffic heat map" data-tip="Traffic heat map: green roads flow, red ones are jammed; discs show cars waiting at junctions" data-key="C">${icon('heat')}</button>
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
+        <button class="iconbtn" data-view="purpose" aria-pressed="false" aria-label="Trip purpose" data-tip="Trip purpose: a coloured dot on every vehicle's roof (commute, shopping, freight, visitors)" data-key="P">${icon('tag')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
         <button class="iconbtn snd" data-view="sound" data-key="Shift+M"></button>
@@ -399,6 +402,7 @@ export class HUD {
       const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
       else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+      else if (v === 'purpose') game.purposeDots = !game.purposeDots;
       else if (v === 'menu') this.onPause?.();
       else if (v === 'sound') this.toggleSound();
     };
@@ -462,6 +466,8 @@ export class HUD {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
       this.show.feed = !this.show.feed;
+    } else if (e.key === 'p' || e.key === 'P') {
+      g.purposeDots = !g.purposeDots;
     }
   }
 
@@ -790,7 +796,7 @@ export class HUD {
 
   // ---------- analysis panels ----------
   private updateViews(): void {
-    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}|${m}`;
+    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${g.purposeDots}|${this.show.metrics}|${this.show.feed}|${m}`;
     if (key === this.last.views) return;
     this.last.views = key;
     // the speaker shows the sound's state (the menu's Sound page can change it too)
@@ -798,9 +804,10 @@ export class HUD {
     snd.innerHTML = icon(m ? 'mute' : 'sound');
     snd.setAttribute('aria-label', m ? 'Sound off' : 'Sound on');
     snd.dataset.tip = `Sound ${m ? 'off' : 'on'}: click to ${m ? 'turn it on' : 'mute'}. Volumes are in the menu`;
-    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
+    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', purpose: g.purposeDots, ...this.show };
     this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
-    this.q('.legend').innerHTML = LEGEND[g.overlay];
+    const dots = g.purposeDots || g.overlay === 'heat';
+    this.q('.legend').innerHTML = g.overlay === 'none' && dots ? DOTS : LEGEND[g.overlay] + (dots ? DOTS : '');
     this.q('.mpanel').hidden = !this.show.metrics;
     this.q('.fpanel').hidden = !this.show.feed;
     this.last.metrics = this.last.feed = undefined;

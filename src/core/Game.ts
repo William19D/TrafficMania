@@ -99,6 +99,8 @@ export class Game {
   stats = { arrived: 0, smooth: 0, failed: 0, today: outcomes0() };
   metrics = new Metrics();
   overlay: Overlay = 'none';
+  // Purpose toggle (P): a roof dot in the trip purpose's colour on every vehicle
+  purposeDots = false;
   // Edit click: the car the camera follows (its card), the building whose card is open
   follow: Car | null = null;
   picked: Building | null = null;

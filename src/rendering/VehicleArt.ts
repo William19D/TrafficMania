@@ -1,19 +1,31 @@
 import type { Kind } from '../entities/Car.ts';
-import type { Purpose } from '../core/config.ts';
 import { KINDS } from '../entities/Car.ts';
-import { PURPOSES } from '../core/config.ts';
 import { shade } from './BuildingArt.ts';
 
-// Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, purpose, tone and pixel scale; the renderer
-// draws one rotated drawImage per vehicle plus the live lights (brake, indicators) on top.
+// Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, paint and pixel scale; the renderer
+// draws one rotated drawImage per vehicle plus the live lights (brake, indicators, purpose dot) on top.
 export const VW: Record<Kind, number> = { car: 8, truck: 8.5, moto: 4 };
 // Sprite frame: VPAD px round the body lengthwise, VH px tall (room for the side mirrors and the shadow's blur)
 export const VPAD = 2, VH = 14;
-// Tones within a purpose's colour, so a stream of commuters is not one flat blue
-export const TONES = [0, -0.12, 0.12, -0.22, 0.22];
+// Paint by weight, like a real car park: mostly white, black and silver, a rare yellow taxi. Trucks wear fleet liveries
+type Palette = [string, number][];
+export const CAR_PAINT: Palette = [
+  ['#F1F1EC', 20], ['#24272C', 16], ['#B8BDC3', 14], ['#6C737B', 12], ['#C6352B', 9], ['#2E6BB3', 8], ['#1E3454', 6],
+  ['#3D7A4D', 4], ['#CDBA95', 4], ['#6B4A35', 3], ['#E07A28', 2], ['#F2C12E', 2],
+];
+export const TRUCK_LIVERY: Palette = [
+  ['#F4F4F0', 30], ['#C93A30', 14], ['#2F64A8', 14], ['#8A9097', 12], ['#3A8650', 10], ['#E58A2A', 10], ['#EDC339', 6],
+];
+// Palette index for a paint roll in [0, 1)
+export function pick(p: Palette, u: number): number {
+  let r = 0;
+  for (const c of p) r += c[1];
+  r *= u;
+  for (let i = 0; i < p.length; i++) if ((r -= p[i]![1]) < 0) return i;
+  return p.length - 1;
+}
 
 const KI: Record<Kind, number> = { car: 0, truck: 1, moto: 2 };
-const PI: Record<Purpose, number> = { commute: 0, shop: 1, freight: 2, visit: 3 };
 const GLASS = '#2C3949', LAMP = '#FFF4C8';
 const sprites = new Map<number, HTMLCanvasElement>();
 
@@ -45,14 +57,15 @@ export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
   return c;
 }
 
-export function vehicle(kind: Kind, purpose: Purpose, tone: number, s: number): HTMLCanvasElement {
-  const key = ((KI[kind] * 4 + PI[purpose]) * TONES.length + tone) * 16 + Math.log2(s);
+// paint: the car's roll in [0, 1), set at spawn
+export function vehicle(kind: Kind, paint: number, s: number): HTMLCanvasElement {
+  const p = kind === 'truck' ? TRUCK_LIVERY : CAR_PAINT, i = pick(p, paint), key = (KI[kind] * 16 + i) * 16 + Math.log2(s);
   let c = sprites.get(key);
-  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => paint(x, kind, shade(PURPOSES[purpose].color, TONES[tone]), h, w)));
+  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => draw(x, kind, p[i]![0], h, w)));
   return c;
 }
 
-function paint(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, w: number): void {
+function draw(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, w: number): void {
   const rect = (x: number, y: number, rw: number, rh: number, r: number, fill: string, out: string | null = null, lw = 0.5): void => {
     c.beginPath();
     c.roundRect(x, y, rw, rh, r);
@@ -99,7 +112,7 @@ function paint(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, 
     return;
   }
   if (kind === 'truck') {
-    // purpose-coloured box trailer with ribs, a coupling, then a darker cab with its windshield
+    // liveried box trailer with ribs, a coupling, then a darker cab with its windshield
     const tl = 2 * h - 7;
     rect(-h, -w, tl, 2 * w, 1, col, edge);
     c.beginPath();
