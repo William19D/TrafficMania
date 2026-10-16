@@ -11,9 +11,9 @@ No dependencies. Icons are inline SVG strings in `src/ui/icons.ts` (24x24 viewBo
 | [A money · people · happy · Lv · danger]  [B speed | trips | clock]  [C views ≡] [?] |
 |                                                                [G panel column]    |
 |                          (map centre: no HUD)                                      |
-| [H tray]                                                                           |
+| [H tray, Place tool only]  [D' Build menu: Roads | Junctions | Buildings]          |
 | [H legend]                    [E toasts]                      [F tutorial card]    |
-|  [D Road Grid | type | elevation | Light Roundabout Interchange | Buildings | Edit Demolish] |
+|            [D Build^ | shape · type · elevation | Edit Demolish]                     |
 +------------------------------------------------------------------------------------+
 ```
 
@@ -22,11 +22,12 @@ No dependencies. Icons are inline SVG strings in `src/ui/icons.ts` (24x24 viewBo
 | A Resources | top-left | chips that wrap into rows before they reach B |
 | B Status | top-centre (left column under A below 1280px) | speed, trips today, clock |
 | C Views + Help | top-right | overlay and panel buttons and Menu (`.views`), then Help `?` |
-| D Tool dock | bottom-centre | primary interaction |
+| D Tool dock | bottom-centre | Build button, the active tool's options, Edit, Demolish |
+| D' Build menu | above the dock, anchored to the Build button | unfolds upward; every build tool and the building cards |
 | E Toasts | bottom-centre above the dock | `pointer-events: none`, never cover the dock |
 | F Tutorial | bottom-right above the dock | moves left of G while a panel is open |
 | G Panel column | right, under C | junction, interchange, car, building, trip reports, metrics; it scrolls |
-| H Left column | bottom-left above the dock | building tray, then the map legend |
+| H Left column | bottom-left above the dock | building tray (while the Place tool is on), then the map legend |
 | Modals | full-screen scrim, box centred | level up / city complete, game over |
 | Menu | its own `#menu` root above `#hud` | main menu, pause menu; `#hud` goes `inert` while it is open |
 
@@ -61,18 +62,23 @@ Scaling: `#hud { font-size: clamp(13px, .75vw + 4px, 16px) }`. Everything is siz
   - Menu: opens the pause menu (`Esc` does too when nothing else takes it).
 - **Help `?`** (or `H`): the controls popover, with every row of `CONTROLS` and a "Replay tutorial" button. It closes with `×`, `Esc` or a click outside. Focus moves in and returns to the button.
 
-### D. Tool dock
-Order, left to right. Number keys follow the dock order. Buildings is `B`.
+### D. Tool dock and Build menu
+The dock holds only what is used all the time; building lives in a menu that unfolds upward from **Build** (user feedback: the old dock of 9 tools plus the road options was a wall of buttons that wrapped to two rows under 1320px).
 
-| Group | Contents | Key |
+| Dock, left to right | Contents | Key |
 |---|---|---|
-| Build | Road, Grid | `1`, `2` |
-| Type | tier swatches (dirt, street, avenue, boulevard, highway), the tier name and km/h, lanes 1/2/3, One-way, Flip (only for a selected one-way run) | |
-| Elevation | `−` pictogram `Ground` / `L3` `+` (Grid swaps it for the block size 3/4/6) | `PageDown` / `PageUp` |
-| Junctions | Light, Roundabout, Interchange | `3`, `4`, `5` |
-| City | Buildings, with a badge of unplaced buildings that pulses when a batch arrives | `B` |
+| Build | opens the Build menu; wears the active build tool's icon (cone when none), `aria-pressed` while a build tool is on, the badge of unplaced buildings (it pulses when a batch arrives) | |
+| Tool options (`.ctx`, Road, Grid, Edit, Demolish only) | road shape (`V`; Grid swaps it for nothing and the stepper for the block size 3/4/6), tier swatches, the tier name and km/h, lanes 1/2/3, One-way, Flip (only for a selected one-way run), the elevation stepper (`PageDown` / `PageUp`) | |
 | Change | Edit, Demolish | `6`, `7` |
 
+| Build menu group | Contents | Key |
+|---|---|---|
+| Roads | Road, Grid | `1`, `2` |
+| Junctions | Light, Roundabout, Interchange | `3`, `4`, `5` |
+| Buildings | one card per zone with buildings left (picture, name, `×n`); "None waiting" when empty | `B` |
+
+- The options strip shows the same controls for Road, Edit and Demolish, so Edit and Demolish never move under the cursor; for Light, Roundabout, Interchange and Place it hides (the dock re-centres, but those are picked from the menu).
+- **Build menu.** It opens with a 160ms rise and unfold from the Build button (`.bmenu.open`: opacity, translate and scaleY; reduced motion keeps the fade only). It closes on `Esc` (which then does nothing else: the pause menu's `canPause` checks `hud.buildOpen`), on a click outside (a click on the map only closes it: its pointerdown and pointerup are swallowed), and on picking a tool or a building. A tool change from the keyboard closes it too. Focus moves to the active tool in it and back to Build on `Esc`. The number keys and `B` pick the tools without opening it; each item shows its key badge.
 - Button: icon above a label, the key badge top-left, `aria-pressed` for the active tool plus a 3px underline. Demolish uses danger instead of accent.
 - **Locks.** A locked tool (Grid, Roundabout, Interchange), tier, One-way or the next viaduct level:
   - is `aria-disabled` and faded, with a lock icon in the corner;
@@ -108,10 +114,10 @@ Order, left to right. Number keys follow the dock order. Buildings is `B`.
 ### G. Panel column (`.rcol`, newest state, scrolls when full)
 - **Junction** (Edit click on a junction):
   - control picker: None, Yield, Stop, Light, Roundabout, each with its price or refund;
-  - Signals / Turn bans toggle;
-  - arm diagram with L/S/R turn buttons that you can reach from the keyboard;
+  - the hint "Drag from a lane to a road to connect it. Click a line to remove it." (the lane connections are edited on the map) and Reset to auto / Any lane / No lefts;
+  - at a light: arm diagram with L/S/R signal buttons that you can reach from the keyboard (a turn no lane connects shows banned);
   - phase rows (select, `−`/`+` seconds, remove), Add phase, and presets.
-  The phase editor and turn bans are locked below level 4.
+  The phase editor and lane connections are locked below level 4.
 - **Interchange** (Interchange tool on a junction): Diamond / Cloverleaf / Trumpet, the reason or the net price, Build / Cancel.
 - **Car** (Edit click on a car): trip, from -> to, kind, time so far vs on empty roads, speed in km/h, stopped and the longest stop. The camera follows the car, and the route is drawn dashed.
 - **Building** (Edit click on a building):
@@ -122,7 +128,7 @@ Order, left to right. Number keys follow the dock order. Buildings is `B`.
 - **Metrics** `M`: sparklines with now and the range, for waiting cars, average trip, trips per hour, failed trips per hour, money (not in creative), population and happiness.
 
 ### H. Left column
-- **Tray** "To place": one card per zone with buildings left (`[swatch] Home ×6`). A click picks the zone up for the Buildings tool.
+- **Tray** "Pick a building": one card per zone with buildings left (`[swatch] Home ×6`), shown while the Place tool is on so `B` and a click can switch kinds; the Build menu holds the same cards. A click picks the zone up for the Buildings tool.
 - **Legend**: the car colours by trip purpose, or the active overlay's key.
 
 ### Modals
@@ -140,35 +146,43 @@ Order, left to right. Number keys follow the dock order. Buildings is `B`.
 
 ## 3. Visual language
 
+The HUD is a rich game UI, not a flat one (Q8, the visual direction changed from minimal to detailed): panels have depth, icons have colour, numbers and panels move. The palette stays the same.
+
 Tokens (`:root`):
 ```
 --land #ECEAE4  --panel #FFFFFF  --line #D8D6D0  --soft #F4F3EF
 --ink #2B2B2B   --muted #6B6B68
 --accent #2F6FED  --accent-soft #E6EEFD
 --success #2E9E5B --danger #E5484D --danger-soft #FDECEC --warning #E0A100
---radius 12px  --shadow 0 2px 8px rgba(0,0,0,.08)  --ease cubic-bezier(.2,.7,.3,1)
+--radius 12px  --ease cubic-bezier(.2,.7,.3,1)  --spring cubic-bezier(.3,1.4,.5,1)
+--shadow / --shadow-hi   two-layer warm shadows (contact + ambient); -hi for the dock, menus, side panels, dialogs
+--sheen        inset top highlight + inset bottom line on every raised surface
+--panel-bg     white to warm off-white vertical gradient    --grain  a 96px SVG fractal-noise tile at 7% (paper texture)
+--well         inset shadow for sunken things: segmented groups, progress tracks, the day bar
+--accent-grad  lit blue cap for pressed toggles and primary buttons
+--font-ui / --font-display   see Type
 ```
 - **Colour roles.**
   - The accent marks selection, primary buttons and tutorial hints.
   - Danger marks Demolish, errors, debt and game over.
   - Warning marks the level star and long-wait reports.
-- **Contrast.** Text on white is at least 4.5:1, so positive and negative numbers use darker greens and reds (`#1B6E3D`, `#B42F34`). `--warning` is never used as text.
-- **Type.** system-ui, 13px minimum, weights 500/600/700, and `tabular-nums` on every number. The only text under 13px is the hint lines that repeat a pictogram.
-- **Shape.** Panels have a white background, a 1px line border, a 12px radius and a soft shadow. Anything over the map sits on a panel.
+- **Icon colour.** Each tool owns a hue (`--hue` on `.tool[data-tool]` and on the Build button's `.bico[data-t]`): Road slate `#56627A`, Grid violet `#7C5CE6`, Light amber `#E08A00`, Roundabout teal `#0F9C9C`, Interchange indigo `#4F5BD5`, Buildings green `#2E9E5B`, Edit accent, Demolish danger, Build (nothing picked) orange `#EA6F1A`. The icon sits white on a glossy rounded tile of that hue; locked tools go grayscale. Resource chips carry round glossy coins: money green, people blue, happiness amber / green / red by mood, level gold, warnings red.
+- **Contrast.** Text on white is at least 4.5:1, so positive and negative numbers use darker greens and reds (`#1B6E3D`, `#B42F34`). `--warning` is never used as text. Glyphs on hue tiles are decorative; the label under each tool carries the meaning.
+- **Type.** Body: `--font-ui` (Segoe UI Variable / system-ui). Numbers, tool labels, headings and group captions: `--font-display` (Bahnschrift on Windows, DIN on Apple, rounded system faces or Trebuchet MS elsewhere), no font files. 13px minimum, weights 500 to 800, `tabular-nums` on every number. The only text under 13px is the hint lines that repeat a pictogram.
+- **Shape and depth.** Panels: grain over the panel gradient, 1px line border (a shade darker at the bottom), 12px radius, sheen and shadow. Buttons are raised caps (light gradient + sheen); pressed toggles are lit accent caps with a soft blue glow (Demolish: a danger-soft cap with a red glow; tier swatches keep their accent ring). Hover lifts tools 2px onto a light cap and brightens the tile. Anything over the map sits on a panel.
 - **Second cues.** No state relies on colour alone: there is always an icon, a lock, `aria-pressed`, a dashed outline or label text as well.
-- **Focus.** `:focus-visible` gets a 3px accent outline.
-- **Motion.** Transitions are 200ms or less. `prefers-reduced-motion` removes pulses and slides and keeps opacity fades.
-
+- **Focus.** `:focus-visible` gets a 3px accent outline (ink on accent caps).
+- **Motion.** Every button sinks 1px and squeezes to 96% while pressed (spring back). Money and population count to their new value over 400ms (`countTo` in `HUD.ts`) and the money figure bumps. Side panels drop in, the tutorial card rises, dialogs and menus pop in with a spring, toasts spring up, the Build menu's groups rise in a 30ms stagger, tooltips fade. Transitions stay 300ms or less. `prefers-reduced-motion` removes pulses, slides, lifts, squeezes and counting (numbers snap) and keeps opacity fades.
 ## 4. Interaction details
 
-- **Tooltips.** One shared `.tip` element. It shows 300ms after hover or at once on keyboard focus, takes its text from `data-tip`, and renders the shortcut in `data-key` as `<kbd>`. It sits above dock and tutorial controls and below the rest, clamped to the viewport. On touch, a 500ms long-press on a dock button shows its tooltip for 2.5s.
+- **Tooltips.** One shared `.tip` element. It shows 300ms after hover or at once on keyboard focus, takes its text from `data-tip`, and renders the shortcut in `data-key` as `<kbd>`. It sits above dock and tutorial controls and below the rest, clamped to the viewport. On touch, a 500ms long-press on a dock or Build menu button shows its tooltip for 2.5s.
 - **Keys** (`CONTROLS` in `HUD.ts` is the single table, shown by the help popover and the menu's Controls):
-  - Tools: `1`-`7` in dock order, and `B` for Buildings.
+  - Tools: `1`-`5` the Build menu's tools in its order, `6` / `7` Edit / Demolish, and `B` for Buildings. None needs the menu open.
   - `R` turns a free-standing building ghost.
   - `PageUp` / `PageDown` (`+` / `-`) change the elevation.
   - `C` cycles the overlay, and `T` / `M` open the trip reports and the metrics.
   - `Space` pauses.
-  - `Esc` cancels a road, bend or grid. Otherwise it closes the selection, panel or Place tool. With nothing left to close, it opens the pause menu.
+  - `Esc` closes the Build menu first, then cancels a road, bend or grid. Otherwise it closes the selection, panel or Place tool. With nothing left to close, it opens the pause menu.
   - `?` opens help.
 - **Modals capture keys.** The HUD's keydown runs in the capture phase, so modal keys never reach Input. The menu's capture listener is registered first and swallows every key while it is open.
 - **Canvas cursor.** It is set from `body[data-tool]`: road and grid use crosshair, light, roundabout, edit and interchange use pointer, demolish uses cell, and place uses copy.
@@ -192,17 +206,18 @@ Tokens (`:root`):
   - The clock shows `D4 · 08:20` and its day bar shrinks to 3.5em; on narrow phones the clock wraps under the speed buttons.
   - The views stack under Help, and the panel column sits beside them.
   - The dock spans the width and scrolls sideways with scroll-snap. Buttons are 56px and the key badges hide.
+  - The Build menu spans the width above the dock; its groups wrap and it scrolls when taller than the room above.
   - Toasts span the width.
-  - The tutorial card spans the width above the dock (max 40vh, scrolls). While it shows, the left column hides (the dock's Buildings button still opens the tray), the panel column stops above it, and toasts move under the status bar.
+  - The tutorial card spans the width above the dock (max 40vh, scrolls). While it shows, the left column hides (the Build menu still holds the building cards), the panel column stops above it, and toasts move under the status bar.
 
 ## 6. Verification checklist
 - [ ] At 1280x800 and 390x844 nothing overlaps: A/B, C/G, D/F/E/H. The map centre stays clear.
-- [ ] Every dock button shows an icon, a label and its key badge (`1`-`7`, `B`), in dock order. Pressing each key selects that tool.
+- [ ] Build opens the menu upward; every item shows an icon, a label and its key badge (`1`-`5`, `B`), Edit and Demolish theirs (`6`, `7`). Pressing each key selects that tool with the menu closed. `Esc`, a click outside and picking a tool close the menu; at 1280px the dock is one row.
 - [ ] At level 1 in career, Grid, Roundabout, Interchange, avenue and up, One-way and viaducts show a lock. A click toasts `Unlocks at level N: …`, and the lock lifts at that level.
 - [ ] The money chip flashes on spends and gains, goes red in debt, and its tooltip has both days' ledgers.
 - [ ] The clock advances in 10-minute steps, the paused state shows, and Space toggles it.
 - [ ] Error toasts show a warning icon and a "what to do" text. At most 2 show, and duplicates merge.
-- [ ] The junction panel edits phases and bans. The focus survives the re-render on each phase change.
+- [ ] The junction panel edits phases; lane connections are dragged on the map. The focus survives the re-render on each phase change.
 - [ ] The tutorial runs start to end on a new career map: each step waits for its task, hints pulse, and targets ring the right spot.
 - [ ] The level-up modal pauses and resumes, and Enter continues. The game-over modal focuses Play again.
 - [ ] The help popover lists every shortcut and can replay the tutorial.

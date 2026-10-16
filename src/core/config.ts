@@ -23,18 +23,18 @@ export const DIFFICULTY: Record<Difficulty, {
 };
 
 // Terrain mix and palette per biome. rivers: null = the difficulty's count. Water is the same everywhere.
-// patch: [sand, grass] colours; bands: mountain contour fills, outer to inner.
+// patch: [sand, grass] colours; bands: mountain contour fills, outer to inner, lighter toward the peak so it reads raised.
 export const BIOMES: Record<Biome, {
   label: string; land: string; patch: [string, string]; tree: string; bands: [string, string, string];
   trees: Range; lakes: Range; lakeR: Range; rivers: Range | null; mountains: number;
 }> = {
   temperate: {
     label: 'Temperate', land: '#E6ECD8', patch: ['#EEE1C0', '#CFE3A8'], tree: '#79B257',
-    bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [120, 200], lakes: [0, 2], lakeR: [70, 130], rivers: null, mountains: 0,
+    bands: ['#7D7F79', '#9C9E96', '#C9CBC2'], trees: [120, 200], lakes: [0, 2], lakeR: [70, 130], rivers: null, mountains: 0,
   },
   desert: {
     label: 'Desert', land: '#F2E6CB', patch: ['#EBD2A0', '#E0DDAE'], tree: '#A3B266',
-    bands: ['#C9A882', '#B08D68', '#94735A'], trees: [20, 40], lakes: [1, 2], lakeR: [45, 80], rivers: [0, 1], mountains: 0,
+    bands: ['#A8835F', '#C29E78', '#DABE96'], trees: [20, 40], lakes: [1, 2], lakeR: [45, 80], rivers: [0, 1], mountains: 0,
   },
   alpine: {
     label: 'Alpine', land: '#E3EBE1', patch: ['#F5F7F7', '#D3E3C8'], tree: '#5E8F5A',
@@ -43,7 +43,7 @@ export const BIOMES: Record<Biome, {
   // ponytail: islands are the land left between many large lakes and wide channels; a real sea mask if coastlines matter
   archipelago: {
     label: 'Archipelago', land: '#E7EDD6', patch: ['#F0E2BC', '#CDE3A6'], tree: '#74B25A',
-    bands: ['#8C8C88', '#6E6E6A', '#5B5B58'], trees: [90, 150], lakes: [6, 9], lakeR: [130, 230], rivers: [2, 3], mountains: -2,
+    bands: ['#7D7F79', '#9C9E96', '#C9CBC2'], trees: [90, 150], lakes: [6, 9], lakeR: [130, 230], rivers: [2, 3], mountains: -2,
   },
 };
 
@@ -105,7 +105,7 @@ export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
   roundabout: { level: 2, label: 'Roundabouts' },
   oneway: { level: 2, label: 'One-way roads' },
-  junction: { level: 4, label: 'Light phases, protected lefts and turn bans' },
+  junction: { level: 4, label: 'Light phases, protected lefts and lane connections' },
   viaduct: { level: 3, label: 'Viaducts L1-L5 and ramps' },
   tunnel: { level: 5, label: 'Tunnels' },
   high: { level: 5, label: 'Viaducts L6-L10' },

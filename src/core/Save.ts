@@ -9,7 +9,7 @@ import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
 import type { Trip, TripReport } from '../entities/Trip.ts';
 import { RoadGraph } from '../network/RoadGraph.ts';
-import type { Control, RoadType } from '../network/RoadGraph.ts';
+import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 
 type Ref = number;
@@ -25,7 +25,7 @@ export interface SaveData {
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
-  nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number }[];
+  nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number; ring?: RingSize }[];
   edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
@@ -55,7 +55,7 @@ export function serialize(g: Game): string {
     commuters: g.commuters.map(c => ({ ...c, home: bi.get(c.home)!, work: c.work ? bi.get(c.work)! : -1 })),
     nodes: g.graph.nodes.map(n => ({
       x: n.x, y: n.y, b: n.building ? bi.get(n.building)! : -1, control: n.control, controlDay: n.controlDay, phase: n.phase,
-      phaseTimer: n.phaseTimer, plan: n.plan, delay: n.delay,
+      phaseTimer: n.phaseTimer, plan: n.plan, delay: n.delay, ring: n.ring,
     })),
     edges: g.graph.edges.map(e => ({
       a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,

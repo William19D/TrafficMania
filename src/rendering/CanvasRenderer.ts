@@ -1,18 +1,21 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, roadWidth } from '../network/RoadGraph.ts';
-import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
+import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
+import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
-import { PAD, look, sprite, variant } from './BuildingArt.ts';
-import { paintTerrain, shimmer } from './Scenery.ts';
+import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
+import { paintTerrain, shimmer, tree } from './Scenery.ts';
+import { birds, boats, cloudShadows, pedestrians } from './Ambience.ts';
+import { grain, netKey } from './RoadArt.ts';
 import { BEAM_L, BEAM_W, GLOW_R, beam, daylight, glow } from './Lighting.ts';
 import type { Daylight } from './Lighting.ts';
-import { TONES, VH, VPAD, VW, vehicle, vshadow } from './VehicleArt.ts';
+import { VH, VPAD, VW, vehicle, vshadow } from './VehicleArt.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -25,13 +28,19 @@ const RED = '#E5484D';
 const RAIL = '#55657A';
 const PILLAR = '#8A99AD';
 const ACCENT = '#2F6FED';
+// lane connection colours, one per junction approach
+const LINK_COLS = [ACCENT, '#2F8F5B', '#E08A1E', '#8A4FD8', '#D0457A', '#1E9AA8'];
 const BRAKE_ON = '#FF2A2A';
 const BRAKE_OFF = '#8C2A2A';
 const AMBER = '#FFB020';
 const NOISE = '#8E7CC3';
 const SMOG = '#9A6B2F';
 // Sidewalk paving and its outer kerb (street, avenue, boulevard); driveways in concrete; paint near junctions
-const WALK = '#EFECE5', KERB = '#CBC6BA', PAINT = '#B9B9B4';
+const WALK = '#EFECE5', KERB = '#CBC6BA', PAINT = '#B9B9B4', GRANITE = '#B3AEA2', JOINT = '#D9D4C9';
+// a busy junction gets zebras too: a light, or four roads or more
+const zebraAt = (n: Node): boolean => n.control === 'light' || (n.control !== 'roundabout' && n.edges.filter(e => !e.drive).length >= 4);
+// stable 0..1 per world spot, for the scattered details
+const hash01 = (x: number, y: number): number => ((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1 + 1) % 1;
 const DRIVE = { out: '#BDB6A6', fill: '#E3DED3' };
 const walked = (e: Edge): boolean => !e.drive && !e.bridge && !e.tunnel && (e.type.tier === 'street' || e.type.tier === 'avenue' || e.type.tier === 'boulevard');
 // A junction that gets paint: 3+ roads, or a sign or light (a driveway junction is a bend for the road's traffic)
@@ -50,16 +59,17 @@ export class CanvasRenderer {
   private ctx: CanvasRenderingContext2D;
   // Land colour of the current biome, for the roundabout islands
   private land = BIOMES.temperate.land;
+  private treeCol = BIOMES.temperate.tree;
+  // Cached static ground roads (asphalt, kerbs, verges, markings, islands, stop lines) over a world rect at s px per world px
+  private roads: { key: number; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
   // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
   private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
   // Cached ground of the current map at s px per world px; building sprites' scale
   private ground: { t: Game['terrain']; s: number; c: HTMLCanvasElement } | null = null;
   private artS = 1;
-  // Cars drawn this frame and where, for the headlights over the night tint; each car's tone within its purpose colour
+  // Cars drawn this frame and where, for the headlights over the night tint
   private seen: Car[] = [];
   private seenAt: { x: number; y: number; angle: number }[] = [];
-  private tones = new WeakMap<Car, number>();
-  private nTone = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -163,6 +173,7 @@ export class CanvasRenderer {
     // Background: flat land (in screen coordinates), then the cached ground of the map and the water's glints
     const biome = BIOMES[game.terrain.biome], terrain = game.terrain;
     this.land = biome.land;
+    this.treeCol = biome.tree;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = biome.land;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -179,7 +190,10 @@ export class CanvasRenderer {
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
     ctx.drawImage(this.ground.c, 0, 0, this.ground.c.width / gs, this.ground.c.height / gs);
-    shimmer(ctx, terrain, performance.now() / 1000);
+    const now = performance.now() / 1000, hw = innerWidth / 2 / z, hh = innerHeight / 2 / z;
+    const view = { x0: this.cam.x - hw, y0: this.cam.y - hh, x1: this.cam.x + hw, y1: this.cam.y + hh };
+    shimmer(ctx, terrain, now);
+    boats(ctx, terrain, now, view);
 
     // World border, almost invisible
     ctx.strokeStyle = '#DDDBD4';
@@ -220,43 +234,16 @@ export class CanvasRenderer {
     };
     halo(0);
 
-    // Bridges: pillars, deck, cross ticks and railings (white fill comes later)
-    for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain, e.width);
-
-    // Sidewalks with a kerb along town roads, under the road; then a single white ribbon: full outline pass, then fill pass
-    const joints = nodes.filter((n) => n.edges.some((e) => !e.tunnel && e.level === 0));
-    for (const [col, extra] of [[KERB, 12], [WALK, 10]] as const) {
-      for (const e of ground) if (walked(e)) this.line(e, col, e.width + extra);
-      for (const n of joints) {
-        const j = jointEdge(n, 0);
-        if (!j || !walked(j)) continue;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, col, ROAD_W + extra);
-        else this.circle(n.x, n.y, (j.width + extra) / 2, col);
-      }
-    }
-    // Colours per tier; a joint takes the tier of its widest road; a driveway is a narrower concrete strip
-    const pass = (key: 'out' | 'fill', extra: number): void => {
-      // Bridges keep their blue deck as the outline
-      for (const e of ground) if (!(extra && e.bridge)) this.line(e, e.drive ? DRIVE[key] : TIERS[e.type.tier][key], e.width + extra - (e.drive ? 4 : 0));
-      for (const n of joints) {
-        const j = jointEdge(n, 0), color = j?.drive ? DRIVE[key] : TIERS[j?.type.tier ?? 'street'][key];
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
-        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
-      }
-    };
-    pass('out', 3);
-    pass('fill', 0);
-
-    // Lane markings: centre line / median, lane separators, shoulders, one-way chevrons; driveways stay plain. Then lane arrows,
-    // manholes and lamp posts
-    for (const e of ground) if (!e.drive) this.markings(e.a, e.b, e.type);
-    this.details(ground);
-    if (game.overlay === 'heat') this.heatMap(ground, levelNodes(0));
-
-    this.controls(levelNodes(0));
+    // Ground roads: the cached static layer, then the live lane arrows, heat, signals and signs over it
+    const nodes0 = levelNodes(0);
+    this.roadLayer(game, ground, nodes0, dpr);
+    this.laneArrows(ground);
+    if (game.overlay === 'heat') this.heatMap(ground, nodes0);
+    this.controls(nodes0, 'live');
     // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
     for (const b of game.buildings) if (b.kind !== 'gate') this.building(b, game.time);
     this.exits(game);
+    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view);
     carsAt(0);
 
     // Elevated layers, lowest first: each covers the roads and cars below it
@@ -268,9 +255,13 @@ export class CanvasRenderer {
       halo(L);
       this.viaduct(L, layer, nodesL);
       if (game.overlay === 'heat') this.heatMap(layer, nodesL);
-      this.controls(nodesL);
+      this.controls(nodesL, 'all');
       carsAt(L);
     }
+
+    // Ambience over every level: cloud shadows drifting over the ground, birds above them
+    if (game.overlay === 'none') cloudShadows(ctx, now, view);
+    birds(ctx, now, view);
 
     // Day/night: the world under a multiply tint from the clock (not under an overlay, which must read true), then the night's
     // lamps, windows and headlights over it; labels and tool hints below stay untinted
@@ -286,7 +277,7 @@ export class CanvasRenderer {
     }
 
     // Junction open in the Edit panel
-    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; }
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
@@ -450,6 +441,131 @@ export class CanvasRenderer {
     }
   }
 
+  // The static ground roads, cached over the view and a quarter view of margin at a half-power-of-2 zoom bucket: redrawn when the
+  // network signature, the map, the bucket changes or the view leaves the rect, else one blit
+  private roadLayer(game: Game, ground: Edge[], nodes0: Node[], dpr: number): void {
+    const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 60, vw = innerWidth / z, vh = innerHeight / z;
+    const x0 = Math.max(-P, this.cam.x - vw / 2), y0 = Math.max(-P, this.cam.y - vh / 2);
+    const x1 = Math.min(WORLD.w + P, this.cam.x + vw / 2), y1 = Math.min(WORLD.h + P, this.cam.y + vh / 2);
+    const key = netKey(game.graph.edges, game.graph.nodes);
+    let r = this.roads;
+    if (!r || r.key !== key || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
+      // ponytail: no margin past ~20M px (a 4K screen close up), so a pan there redraws every frame; tile the layer if it shows
+      const m = (x1 - x0) * (y1 - y0) * 2.25 * s * s > 2e7 ? 0 : 0.25;
+      const x = Math.max(-P, x0 - vw * m), y = Math.max(-P, y0 - vh * m);
+      const w = Math.min(WORLD.w + P, x1 + vw * m) - x, h = Math.min(WORLD.h + P, y1 + vh * m) - y;
+      const c = r?.c ?? document.createElement('canvas');
+      c.width = Math.max(1, Math.ceil(w * s));
+      c.height = Math.max(1, Math.ceil(h * s));
+      const main = this.ctx;
+      this.ctx = c.getContext('2d')!;
+      this.ctx.setTransform(s, 0, 0, s, -x * s, -y * s);
+      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0);
+      this.ctx = main;
+      r = this.roads = { key, t: game.terrain, s, x, y, w, h, c };
+    }
+    this.ctx.drawImage(r.c, r.x, r.y, r.c.width / r.s, r.c.height / r.s);
+  }
+
+  // Ground roads: bridge decks, kerbs, sidewalks with paving joints, boulevard verges, the asphalt (tier outline, fill, grain, tyre
+  // wear, repairs, cracks), markings, details, then the static junction paint (islands, stop lines, zebras, signs)
+  private paintRoads(terrain: Game['terrain'], ground: Edge[], nodes: Node[], nodes0: Node[]): void {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain, e.width);
+
+    const joints = nodes.filter((n) => n.edges.some((e) => !e.tunnel && e.level === 0));
+    const walkJ = joints.map(n => [n, jointEdge(n, 0)] as const).filter((x): x is [Node, Edge] => !!x[1] && walked(x[1]));
+    const kerbX = (e: Edge): number => e.type.tier === 'boulevard' ? 16 : 12;
+    const band = (col: (e: Edge) => string, extra: (e: Edge) => number, only: (e: Edge) => boolean, edgesOnly = false): void => {
+      for (const e of ground) if (walked(e) && only(e)) this.line(e, col(e), e.width + extra(e));
+      if (edgesOnly) return;
+      for (const [n, j] of walkJ) {
+        if (!only(j)) continue;
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), col(j), ROAD_W + extra(j));
+        else this.circle(n.x, n.y, (j.width + extra(j)) / 2, col(j));
+      }
+    };
+    const all = (): boolean => true;
+    band(e => e.type.tier === 'street' ? KERB : GRANITE, kerbX, all);
+    band(() => WALK, e => kerbX(e) - 2, all);
+    // paving joints: thin dashes across the sidewalk band, the road covers their middle
+    ctx.lineCap = 'butt';
+    ctx.setLineDash([0.45, 3.6]);
+    band(() => JOINT, e => kerbX(e) - 2, all, true);
+    ctx.setLineDash([]);
+    ctx.lineCap = 'round';
+    band(() => '#C3DAA5', () => 7, e => e.type.tier === 'boulevard');
+
+    // Colours per tier; a joint takes the tier of its widest road; a driveway is a narrower concrete strip. The fill is the tier
+    // colour with grain at half a world px
+    const pats = new Map<string, CanvasPattern>();
+    const fillOf = (c: string): CanvasPattern => {
+      let p = pats.get(c);
+      if (!p) { pats.set(c, p = ctx.createPattern(grain(c), 'repeat')!); p.setTransform(new DOMMatrix().scale(0.5)); }
+      return p;
+    };
+    const pass = (key: 'out' | 'fill', extra: number): void => {
+      const col = (c: string): string | CanvasPattern => key === 'fill' ? fillOf(c) : c;
+      // Bridges keep their blue deck as the outline
+      for (const e of ground) if (!(extra && e.bridge)) this.line(e, col(e.drive ? DRIVE[key] : TIERS[e.type.tier][key]), e.width + extra - (e.drive ? 4 : 0));
+      for (const n of joints) {
+        const j = jointEdge(n, 0), color = col(j?.drive ? DRIVE[key] : TIERS[j?.type.tier ?? 'street'][key]);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), color, ROAD_W + extra);
+        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
+      }
+    };
+    pass('out', 3);
+    pass('fill', 0);
+    // markings stop outside a roundabout's ring, and at the edge of a junction's box
+    const cut = (n: Node, o: Node): Vec => {
+      const d = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 : junction(n) ? Math.max(...n.edges.map(x => x.drive || x.a === o || x.b === o ? 0 : x.width / 2 + 1)) : 0;
+      if (!d) return n;
+      const k = Math.min(0.5, d / (Math.hypot(o.x - n.x, o.y - n.y) || 1));
+      return { x: n.x + (o.x - n.x) * k, y: n.y + (o.y - n.y) * k };
+    };
+    // wear: tyre tracks down each lane, now and then a repair patch or a crack
+    ctx.lineCap = 'butt';
+    for (const e of ground) {
+      if (e.drive || e.type.tier === 'dirt') continue;
+      const ux = (e.b.x - e.a.x) / e.length, uy = (e.b.y - e.a.y) / e.length, A = cut(e.a, e.b), B = cut(e.b, e.a);
+      const at = (s: number, o: number): Vec => ({ x: e.a.x + ux * s - uy * o, y: e.a.y + uy * s + ux * o });
+      const s0 = Math.hypot(A.x - e.a.x, A.y - e.a.y) + 4, s1 = e.length - Math.hypot(B.x - e.b.x, B.y - e.b.y) - 4;
+      ctx.beginPath();
+      if (s1 > s0) for (const l of e.lanes) for (const o of [l.offset - 2.2, l.offset + 2.2]) { const p = at(s0, o), q = at(s1, o); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); }
+      ctx.strokeStyle = 'rgba(60,60,52,.05)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      const h = hash01(e.a.x + e.b.x, e.a.y + e.b.y), l0 = e.lanes[0];
+      if (e.length > 50 && h < 0.35 && l0) {
+        const p = at(e.length * (0.25 + h), l0.offset);
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(Math.atan2(uy, ux) + (h - 0.17) * 0.3);
+        ctx.beginPath();
+        ctx.rect(-4 - h * 8, -2.6, 8 + h * 16, 5.2);
+        ctx.fillStyle = 'rgba(70,70,62,.05)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(70,70,62,.09)';
+        ctx.lineWidth = 0.4;
+        ctx.stroke();
+        ctx.restore();
+      } else if (e.length > 40 && h > 0.75) {
+        const s = e.length * (h - 0.4), o = (h - 0.875) * e.width * 2;
+        this.polyline([at(s, o), at(s + 2, o + 1.2), at(s + 3.5, o + 0.6), at(s + 6, o + 2.2), at(s + 7, o + 1.4)]);
+        ctx.strokeStyle = 'rgba(70,70,62,.16)';
+        ctx.lineWidth = 0.35;
+        ctx.stroke();
+      }
+    }
+    ctx.lineCap = 'round';
+
+    for (const e of ground) if (!e.drive) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
+    this.details(ground);
+    this.controls(nodes0, 'static');
+  }
+
   // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
   // saw-tooth factory with a yard), its variant from its position, with a shadow as long as it is tall and smoke off a
   // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
@@ -527,7 +643,7 @@ export class CanvasRenderer {
       }
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
-        this.ring(n.x, n.y, NODE_R + 6, RED, 3);
+        this.ring(n.x, n.y, n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 6, RED, 3);
         label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
@@ -545,11 +661,14 @@ export class CanvasRenderer {
       const n = g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
-      const cost = game.controlPrice(kind) - game.controlRefund(n);
+      const cost = game.controlPrice(kind) - game.controlRefund(n), ring = kind === 'roundabout';
+      const here = n.control === kind && (!ring || n.ring === game.ringSize);
       const reason = n.building || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
-        : n.control !== kind && cost > game.money ? 'Not enough money' : null;
-      this.ring(n.x, n.y, NODE_R + 6, reason ? RED : GREEN, 3);
-      const place = n.control === kind ? 'Already here' : `${kind === 'light' ? 'Place traffic light' : 'Place roundabout'} · ${fmtMoney(cost)}`;
+        : ring && !here && game.ringRoom(n, game.ringSize) || (!here && cost > game.money ? 'Not enough money' : null);
+      // a roundabout previews the ring of the chosen size
+      this.ring(n.x, n.y, ring ? RINGS[game.ringSize].r + ROAD_W / 2 + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
+      const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Resize to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()} roundabout`;
+      const place = here ? 'Already here' : `${what} · ${cost < 0 ? '+' : ''}${fmtMoney(Math.abs(cost))}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
       // a node or road of another level: the road ramps from there to the dock level
@@ -581,7 +700,7 @@ export class CanvasRenderer {
       const j = game.junctionAt(p);
       if (j) {
         this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
-        label('Click to edit junction: control, phases, turn bans', j.x, j.y, ACCENT);
+        label('Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
         return;
       }
       const b = game.buildingUnder(p);
@@ -787,12 +906,40 @@ export class CanvasRenderer {
     const tier = TIERS[t.tier], m = t.oneWay ? 0 : tier.median / 2;
     const at = (o: number, f: (p: Vec, q: Vec) => void) => f({ x: a.x - uy * o, y: a.y + ux * o }, { x: b.x - uy * o, y: b.y + ux * o });
     ctx.lineCap = 'butt';
-    if (!t.oneWay && tier.line === 'yellow') this.seg(a, b, YELLOW, 1.2);
-    else if (!t.oneWay && tier.line === 'median') this.seg(a, b, '#BFD8A0', tier.median - 2);
-    else if (!t.oneWay && tier.line === 'double') for (const o of [1.2, -1.2]) at(o, (p, q) => this.seg(p, q, '#A3A39F', 1));
-    if (tier.shoulder >= 3) {
-      const o = roadWidth(t) / 2 - tier.shoulder;
-      for (const s of [o, -o]) at(s, (p, q) => this.seg(p, q, '#C9C9C5', 1));
+    const W = roadWidth(t) / 2;
+    // highway: darker shoulders, a guardrail on posts outside each edge
+    if (t.tier === 'highway') {
+      for (const s of [1, -1]) {
+        at(s * (W - tier.shoulder / 2), (p, q) => this.seg(p, q, 'rgba(90,100,115,.07)', tier.shoulder));
+        at(s * (W + 3), (p, q) => {
+          this.seg({ x: p.x + 0.6, y: p.y + 0.9 }, { x: q.x + 0.6, y: q.y + 0.9 }, 'rgba(0,0,0,.12)', 1.2);
+          ctx.setLineDash([0.8, 5]);
+          this.seg(p, q, '#6F7884', 2);
+          ctx.setLineDash([]);
+          this.seg(p, q, '#B9C1CB', 0.9);
+        });
+      }
+    }
+    if (!t.oneWay && tier.line === 'yellow') { for (const o of [0.9, -0.9]) at(o, (p, q) => this.seg(p, q, YELLOW, 0.9)); }
+    else if (!t.oneWay && tier.line === 'median') {
+      // raised median: kerb, grass, a small tree every 24px clear of its ends
+      this.seg(a, b, GRANITE, tier.median);
+      this.seg(a, b, '#B9D59B', tier.median - 1.4);
+      for (let s = 22; s <= len - 22; s += 24) {
+        const p = { x: a.x + ux * s, y: a.y + uy * s }, h = hash01(p.x, p.y);
+        this.circle(p.x + 1.2, p.y + 1.7, 2.6, 'rgba(30,50,30,.16)');
+        tree(ctx, p, 2.2 + h * 0.6, 'round', this.treeCol, (h - 0.5) * 0.12, h * 6);
+      }
+      ctx.lineCap = 'butt';
+    } else if (!t.oneWay && tier.line === 'double') {
+      // concrete barrier down the middle
+      this.seg(a, b, '#A9A69E', 3.2);
+      this.seg(a, b, '#E2DFD8', 2.2);
+      this.seg(a, b, '#C4C1B9', 0.5);
+    }
+    if (tier.shoulder >= 1.5) {
+      const o = W - tier.shoulder;
+      for (const s of [o, -o]) at(s, (p, q) => this.seg(p, q, '#C9C9C5', 0.9));
     }
     const offs: number[] = [];
     for (let k = 1; k < t.lanes; k++) {
@@ -882,30 +1029,37 @@ export class CanvasRenderer {
     ctx.strokeStyle = RAIL;
     ctx.lineWidth = 1;
     ctx.stroke();
+    // railings: posts every 4px under a lighter top rail
     const rail = half - 1.5;
-    this.seg(at(0, rail), at(len, rail), RAIL, 1.5);
-    this.seg(at(0, -rail), at(len, -rail), RAIL, 1.5);
+    ctx.lineCap = 'butt';
+    for (const o of [rail, -rail]) {
+      ctx.setLineDash([1, 3]);
+      this.seg(at(0, o), at(len, o), RAIL, 2.2);
+      ctx.setLineDash([]);
+      this.seg(at(0, o), at(len, o), '#A9B6C6', 0.8);
+    }
+    ctx.lineCap = 'round';
   }
 
   // Intersection markings (stop lines), roundabout islands and traffic lights
-  private controls(nodes: Node[]): void {
+  // part: 'static' (islands, stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
+  private controls(nodes: Node[], part: 'static' | 'live' | 'all'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
-      if (n.control === 'roundabout') {
-        // Central island in the land color
-        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, this.land);
-        ctx.strokeStyle = ROAD_OUT;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+      if (part !== 'static' && (n.control === 'roundabout' || junction(n))) {
+        if (n.control === 'light') this.drawLights(n);
       }
+      if (part === 'live') continue;
+      if (n.control === 'roundabout') this.island(n);
       if (n.control !== 'roundabout' && !junction(n)) continue;
       // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way or a plain junction. ponytail: on
       // roundabouts it goes outside the ring (at NODE_R+4 it would fall inside it)
-      const d0 = n.control === 'roundabout' ? NODE_R + 5 + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
+      const d0 = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
       // a light's zebra starts past the widest road crossing the arm, its stop line just behind it. ponytail: cars still stop at
       // stopDist, so on a street meeting an avenue they halt a few px past the line
-      const zebra = (e: Edge): number => n.control === 'light' ? Math.max(d0 - 5.5, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 0.5)) : 0;
-      const at = (e: Edge): number => n.control === 'light' ? Math.max(d0, zebra(e) + 5.2) : d0;
+      const zb = zebraAt(n);
+      const zebra = (e: Edge): number => zb ? Math.max(d0 - 5.5, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 0.5)) : 0;
+      const at = (e: Edge): number => zb ? Math.max(d0, zebra(e) + 5.2) : d0;
       ctx.setLineDash(solid ? [] : [2, 1.6]);
       ctx.strokeStyle = solid ? '#8F8F8B' : '#B4B4B0';
       ctx.lineWidth = 1.5;
@@ -920,8 +1074,8 @@ export class CanvasRenderer {
       }
       ctx.stroke();
       ctx.setLineDash([]);
-      // Zebra crossing on every arm of a light, just inside the stop line
-      if (n.control === 'light') {
+      // Zebra crossing on every arm of a busy junction, just inside the stop line
+      if (zb) {
         ctx.beginPath();
         for (const e of n.edges) {
           if (e.drive) continue;
@@ -931,15 +1085,40 @@ export class CanvasRenderer {
             ctx.lineTo(n.x + ux * z1 + uy * o, n.y + uy * z1 - ux * o);
           }
         }
-        ctx.strokeStyle = '#CDCDC8';
-        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = '#C6C6C1';
+        ctx.lineWidth = 1.7;
         ctx.stroke();
       }
       ctx.lineCap = 'round';
-      if (n.control === 'light') this.drawLights(n);
-      else if (n.control === 'yield' || n.control === 'stop') this.drawSigns(n);
-      if (n.plan) this.drawBans(n);
+      if (n.control === 'yield' || n.control === 'stop') this.drawSigns(n);
     }
+  }
+
+  // Roundabout centre: a cobbled truck apron, a kerb, a planted island with a flower bed, shrubs round it and a tree in the middle
+  private island(n: Node): void {
+    const ctx = this.ctx, R = ringR(n) - ROAD_W / 2, g = shade(this.land, -0.12);
+    this.circle(n.x, n.y, R, '#D9D3C5');
+    ctx.setLineDash([1.2, 1.2]);
+    this.ring(n.x, n.y, R - 1.3, '#C4BDAD', 1.4);
+    ctx.setLineDash([]);
+    this.circle(n.x, n.y, R - 2.6, GRANITE);
+    this.circle(n.x, n.y, R - 3.4, g);
+    this.circle(n.x, n.y, R * 0.5, '#B89A74');
+    this.circle(n.x, n.y, R * 0.5 - 0.8, '#A6875F');
+    const k = Math.floor(R * 0.9);
+    for (let i = 0; i < k; i++) {
+      const a = (i / k) * Math.PI * 2, f = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2'][i % 4];
+      this.circle(n.x + Math.cos(a) * R * 0.34, n.y + Math.sin(a) * R * 0.34, 0.8, f);
+    }
+    const m = Math.max(4, Math.floor(R / 2.6));
+    for (let i = 0; i < m; i++) {
+      const a = (i / m) * Math.PI * 2 + 0.3, p = { x: n.x + Math.cos(a) * R * 0.74, y: n.y + Math.sin(a) * R * 0.74 };
+      this.circle(p.x + 0.8, p.y + 1.1, 1.8, 'rgba(30,50,30,.14)');
+      tree(ctx, p, 1.6 + (i % 3) * 0.25, i % 4 === 3 ? 'blossom' : 'round', this.treeCol, (i % 3 - 1) * 0.06, a);
+    }
+    const r = Math.min(5.5, R * 0.3);
+    this.circle(n.x + 1.6, n.y + 2.3, r + 0.4, 'rgba(30,50,30,.18)');
+    tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
   }
 
   // One elevated layer: ground shadow, pillars, blue-grey deck, white body, railings, centre line
@@ -987,7 +1166,7 @@ export class CanvasRenderer {
     const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
         const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, c, ROAD_W + extra);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), c, ROAD_W + extra);
         else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
@@ -1002,23 +1181,26 @@ export class CanvasRenderer {
 
   // Viaduct railings on both sides of a to b
   private rails(a: Vec, b: Vec, w: number): void {
-    const dx = b.x - a.x, dy = b.y - a.y;
+    const ctx = this.ctx, dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
     const o = w / 2 + 1;
     const px = (-dy / len) * o, py = (dx / len) * o;
-    this.seg({ x: a.x + px, y: a.y + py }, { x: b.x + px, y: b.y + py }, RAIL, 1.2);
-    this.seg({ x: a.x - px, y: a.y - py }, { x: b.x - px, y: b.y - py }, RAIL, 1.2);
+    for (const k of [1, -1]) {
+      const p = { x: a.x + k * px, y: a.y + k * py }, q = { x: b.x + k * px, y: b.y + k * py };
+      this.seg(p, q, RAIL, 1.2);
+      ctx.setLineDash([0.8, 3.5]);
+      this.seg(p, q, '#3F4C5E', 2);
+      ctx.setLineDash([]);
+    }
   }
 
   // A cached model (VehicleArt) on a soft shadow cast down-right, then the live lights: tail lights (bright while braking), the
-  // indicator blinking on game time (so pause freezes it) and the ambulance's red / blue bar
+  // indicator blinking on game time (so pause freezes it)
   private car(game: Game, car: Car): void {
     const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
     this.seen.push(car);
     this.seenAt.push(p);
-    let tone = this.tones.get(car);
-    if (tone === undefined) this.tones.set(car, tone = this.nTone++ % TONES.length);
-    const c = Math.cos(p.angle), sn = Math.sin(p.angle), img = vehicle(k, car.trip.purpose, tone, s), sh = vshadow(k, s);
+    const c = Math.cos(p.angle), sn = Math.sin(p.angle), img = vehicle(k, car.paint, s), sh = vshadow(k, s);
     const x0 = -h - VPAD, y0 = -VH / 2, dw = img.width / s, dh = img.height / s;
     ctx.save();
     ctx.translate(p.x, p.y);
@@ -1035,12 +1217,17 @@ export class CanvasRenderer {
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
     }
-    if (k === 'ambulance') {
-      const on = (game.time * 4 | 0) % 2;
-      ctx.fillStyle = on ? RED : ACCENT;
-      ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
-      ctx.fillStyle = on ? ACCENT : RED;
-      ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
+    // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
+    if (game.purposeDots || game.overlay === 'heat') {
+      const bx = k === 'truck' ? -3.5 : k === 'moto' ? -1.2 : -1;
+      ctx.beginPath();
+      ctx.arc(bx, 0, 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx, 0, 1.4, 0, Math.PI * 2);
+      ctx.fillStyle = PURPOSES[car.trip.purpose].color;
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -1091,8 +1278,8 @@ export class CanvasRenderer {
     }
   }
 
-  // Ground road details: lane arrows into each junction (the turns its roads allow), a manhole on every third road, lamp posts
-  private details(edges: Edge[]): void {
+  // Painted lane arrows into each junction (the turns its roads and its lane arrows allow): live, junction plans change them
+  private laneArrows(edges: Edge[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'miter';
@@ -1110,28 +1297,69 @@ export class CanvasRenderer {
           turns |= Math.abs(a) < 0.6 ? 2 : a > 0 ? 4 : 1;
         }
         if (!turns) continue;
+        // each lane: the turns there are, within its lane connections (set or auto)
+        const m = this.arrowsOf(n, e);
+        let j = 0;
         for (const l of e.lanes) {
           if (l.to !== n) continue;
+          const t = turns & (m ? m[j] : 7);
+          j++;
+          if (!t) continue;
           ctx.save();
           ctx.translate(n.x + ux * (NODE_R + 22) + uy * l.offset, n.y + uy * (NODE_R + 22) - ux * l.offset);
           ctx.rotate(Math.atan2(ty, tx));
-          this.arrow(turns);
+          this.arrow(t);
           ctx.restore();
         }
       }
     }
     ctx.lineJoin = 'round';
-    for (const e of edges) {
-      if (e.drive || e.tunnel || e.bridge || e.type.tier === 'dirt' || e.length < 50 || e.id % 3) continue;
-      const t = 0.62, o = e.type.oneWay ? 0 : e.width / 4, ux = (e.b.x - e.a.x) / e.length, uy = (e.b.y - e.a.y) / e.length;
-      const x = e.a.x + (e.b.x - e.a.x) * t - uy * o, y = e.a.y + (e.b.y - e.a.y) * t + ux * o;
-      this.circle(x, y, 1.8, '#E6E6E2');
-      ctx.strokeStyle = '#ADADA8';
-      ctx.lineWidth = 0.6;
-      ctx.stroke();
-    }
-    this.lamps(edges, (x, y) => { this.circle(x + 0.6, y + 0.9, 1.4, 'rgba(0,0,0,.15)'); this.circle(x, y, 1.3, '#6E747C'); this.circle(x, y, 0.6, '#F3EED8'); });
     ctx.lineCap = 'round';
+  }
+
+  // Static road details: a manhole on every third road, kerb drains, lamp posts, and street trees on boulevard verges
+  private details(edges: Edge[]): void {
+    const ctx = this.ctx;
+    for (const e of edges) {
+      if (e.drive || e.tunnel || e.type.tier === 'dirt') continue;
+      const ux = (e.b.x - e.a.x) / e.length, uy = (e.b.y - e.a.y) / e.length;
+      const at = (s: number, o: number): Vec => ({ x: e.a.x + ux * s - uy * o, y: e.a.y + uy * s + ux * o });
+      if (!e.bridge && e.length >= 50 && !(e.id % 3)) {
+        const p = at(e.length * 0.62, e.type.oneWay ? 0 : e.width / 4);
+        this.circle(p.x, p.y, 1.9, '#9C9C97');
+        this.circle(p.x, p.y, 1.4, '#C9C9C4');
+        ctx.beginPath();
+        for (const k of [-0.7, 0, 0.7]) { ctx.moveTo(p.x - 1, p.y + k); ctx.lineTo(p.x + 1, p.y + k); }
+        ctx.strokeStyle = '#A3A39E';
+        ctx.lineWidth = 0.3;
+        ctx.stroke();
+      }
+      // drains in the gutter, one side per road
+      if (walked(e) && e.length >= 40) {
+        const side = e.id & 1 ? 1 : -1, p = at(e.length * 0.4, side * (e.width / 2 - 1.3));
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(Math.atan2(uy, ux));
+        ctx.fillStyle = '#7D7D78';
+        ctx.fillRect(-2, -0.9, 4, 1.8);
+        ctx.fillStyle = '#B4B4AE';
+        for (let k = -1.5; k < 2; k += 1) ctx.fillRect(k, -0.6, 0.45, 1.2);
+        ctx.restore();
+      }
+      // street trees on the verge: clear of junctions and driveways
+      if (e.type.tier === 'boulevard' && !e.bridge) {
+        const clear = (n: Node): number => junction(n) ? NODE_R + 16 : n.edges.some(x => x.drive) ? 13 : 4;
+        const s0 = clear(e.a), s1 = e.length - clear(e.b);
+        for (let s = s0 + ((e.id * 7) % 10); s <= s1; s += 24) {
+          for (const k of [1, -1]) {
+            const p = at(s, k * (e.width / 2 + 4.5)), h = hash01(p.x, p.y);
+            this.circle(p.x + 1.4, p.y + 2, 3.3, 'rgba(30,50,30,.16)');
+            tree(ctx, p, 2.9 + h * 0.8, 'round', this.treeCol, (h - 0.5) * 0.12, h * 6);
+          }
+        }
+      }
+    }
+    this.lamps(edges, (x, y) => { this.circle(x + 0.7, y + 1, 1.5, 'rgba(0,0,0,.16)'); this.circle(x, y, 1.4, '#5E646C'); this.circle(x - 0.3, y - 0.3, 0.7, '#F3EED8'); });
   }
 
   // Lane arrow in its local frame (+x toward the junction): a shaft and a head per allowed turn (bits: 1 left, 2 straight, 4 right)
@@ -1175,7 +1403,7 @@ export class CanvasRenderer {
     ctx.stroke();
   }
 
-  private line(e: Edge, color: string, width: number): void {
+  private line(e: Edge, color: string | CanvasPattern, width: number): void {
     const ctx = this.ctx;
     ctx.beginPath();
     ctx.moveTo(e.a.x, e.a.y);
@@ -1185,7 +1413,7 @@ export class CanvasRenderer {
     ctx.stroke();
   }
 
-  private ring(x: number, y: number, r: number, color: string, width: number): void {
+  private ring(x: number, y: number, r: number, color: string | CanvasPattern, width: number): void {
     const ctx = this.ctx;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -1212,7 +1440,7 @@ export class CanvasRenderer {
     return [(o.x - n.x) / len, (o.y - n.y) / len];
   }
 
-  private circle(x: number, y: number, r: number, color: string): void {
+  private circle(x: number, y: number, r: number, color: string | CanvasPattern): void {
     const ctx = this.ctx;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -1222,7 +1450,9 @@ export class CanvasRenderer {
 
   // Spot d px out along e from n, right of the lane coming in (traffic flows toward the node, -u; its right is (uy, -ux))
   private spot(n: Node, e: Edge, d: number): [number, number] {
+    // pushed out past the kerb of the widest road crossing the arm
     const off = e.width / 2 + 3, [ux, uy] = this.dir(n, e);
+    d += Math.max(0, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 4 - NODE_R - 6));
     return [n.x + ux * d + uy * off, n.y + uy * d - ux * off];
   }
 
@@ -1233,12 +1463,33 @@ export class CanvasRenderer {
     for (const e of n.edges) {
       const a = approachOf(p, n, e), go = ph.sig[a].some(x => x > 0);
       const amber = go && ph.seconds - n.phaseTimer < 1 && !next.sig[a].some(x => x > 0);
-      const [px, py] = this.spot(n, e, NODE_R + 6);
+      if (e.drive) continue;
+      // a pole on the kerb right of the lanes coming in, a mast arm over them, and a three-lamp head lit by the phase
+      const [ux, uy] = this.dir(n, e), [px, py] = this.spot(n, e, NODE_R + 6);
+      const reach = (e.type.oneWay ? e.width / 2 : e.width / 4) + 3, hx = px - uy * reach, hy = py + ux * reach;
+      this.seg({ x: px + 1.3, y: py + 1.9 }, { x: hx + 1.3, y: hy + 1.9 }, 'rgba(0,0,0,.16)', 1.4);
+      this.seg({ x: px, y: py }, { x: hx, y: hy }, '#5C6168', 1.1);
+      this.circle(px + 0.6, py + 0.9, 1.9, 'rgba(0,0,0,.2)');
+      this.circle(px, py, 1.7, '#4A4F56');
+      this.circle(px - 0.4, py - 0.4, 0.7, '#8E949B');
+      ctx.save();
+      ctx.translate(hx, hy);
+      ctx.rotate(Math.atan2(ux, -uy));
       ctx.beginPath();
-      ctx.roundRect(px - 3.5, py - 3.5, 7, 7, 1.5);
-      ctx.fillStyle = DARK;
+      ctx.roundRect(-4.6, -1.9, 9.2, 3.8, 1.3);
+      ctx.fillStyle = '#2E3136';
       ctx.fill();
-      this.circle(px, py, 1.2, amber ? AMBER : go ? GREEN : RED);
+      const lit = amber ? 1 : go ? 2 : 0;
+      ['#FF4D4F', AMBER, '#3DDC6A'].forEach((c, i) => {
+        const x = (i - 1) * 2.9;
+        if (i === lit) {
+          ctx.globalAlpha *= 0.35;
+          this.circle(x, 0, 2.6, c);
+          ctx.globalAlpha /= 0.35;
+          this.circle(x, 0, 1.15, c);
+        } else this.circle(x, 0, 1, '#4A4D52');
+      });
+      ctx.restore();
     }
   }
 
@@ -1248,10 +1499,18 @@ export class CanvasRenderer {
     for (const e of n.edges) {
       if (main.includes(e)) continue;
       const [px, py] = this.spot(n, e, NODE_R + 6);
-      ctx.beginPath();
-      if (n.control === 'stop') for (let i = 0; i < 8; i++) ctx.lineTo(px + 3.6 * Math.cos((i + 0.5) * Math.PI / 4), py + 3.6 * Math.sin((i + 0.5) * Math.PI / 4));
-      else { ctx.moveTo(px - 3.8, py - 2.6); ctx.lineTo(px + 3.8, py - 2.6); ctx.lineTo(px, py + 3.8); }
-      ctx.closePath();
+      const shape = (x: number, y: number): void => {
+        ctx.beginPath();
+        if (n.control === 'stop') for (let i = 0; i < 8; i++) ctx.lineTo(x + 3.6 * Math.cos((i + 0.5) * Math.PI / 4), y + 3.6 * Math.sin((i + 0.5) * Math.PI / 4));
+        else { ctx.moveTo(x - 3.8, y - 2.6); ctx.lineTo(x + 3.8, y - 2.6); ctx.lineTo(x, y + 3.8); }
+        ctx.closePath();
+      };
+      // its post's shadow and its own, cast down-right
+      this.seg({ x: px, y: py }, { x: px + 2.2, y: py + 3.3 }, 'rgba(0,0,0,.18)', 0.9);
+      shape(px + 2.2, py + 3.3);
+      ctx.fillStyle = 'rgba(0,0,0,.16)';
+      ctx.fill();
+      shape(px, py);
       ctx.fillStyle = n.control === 'stop' ? RED : '#FFFFFF';
       ctx.fill();
       ctx.strokeStyle = n.control === 'stop' ? '#FFFFFF' : RED;
@@ -1260,19 +1519,75 @@ export class CanvasRenderer {
     }
   }
 
-  // A small red no-turn glyph on each approach with a banned movement
-  private drawBans(n: Node): void {
-    const ctx = this.ctx, p = n.plan!;
-    for (const e of n.edges) {
-      if (!p.ban[approachOf(p, n, e)].some(Boolean)) continue;
-      const [px, py] = this.spot(n, e, NODE_R + 15);
-      this.circle(px, py, 3.4, '#FFFFFF');
-      ctx.strokeStyle = RED;
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
+  // Arrows of e's lanes into n: its plan's lane connections (less legacy bans), else auto ones where two lanes or more come in
+  // (roundabouts: set ones only)
+  private arrowsOf(n: Node, e: Edge): number[] | null {
+    const p = n.plan, k = inLanes(n, e);
+    if (p && (laneMasks(p, n, e) || p.ban[approachOf(p, n, e)].some(Boolean))) return links(p, n, e);
+    return k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null;
+  }
+  // Lane connection editor (LaneLinks) of the junction open in the panel: a soft pad, the target zones on the roads out, a curve per
+  // connection in its approach's colour (thicker hovered), the lane handles, and the line being dragged snapping onto a zone
+  private linkEditor(n: Node): void {
+    if (!editable(n)) return;
+    const ctx = this.ctx, z = this.cam.zoom, lw = Math.max(1.5, 2 / z), d = linkUI.drag, ls = linksOf(n), hs = handles(n);
+    const col = (a: number): string => LINK_COLS[a % LINK_COLS.length];
+    const r = Math.max(...hs.map(h => Math.hypot(h.x - n.x, h.y - n.y)), NODE_R) + 10;
+    ctx.globalAlpha = 0.45;
+    this.circle(n.x, n.y, r, '#FFFFFF');
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'round';
+    for (const t of targets(n)) {
+      const own = d?.h.e === t.o, on = d?.t === t, px = -t.uy * t.w, py = t.ux * t.w, ox = t.x + t.ux * 4, oy = t.y + t.uy * 4;
+      ctx.globalAlpha = own ? 0.25 : 1;
       ctx.beginPath();
-      ctx.moveTo(px - 2.2, py - 2.2);
-      ctx.lineTo(px + 2.2, py + 2.2);
+      ctx.moveTo(ox - px, oy - py);
+      ctx.lineTo(ox + px, oy + py);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = (on ? 7 : 5) * lw / 1.5;
+      ctx.stroke();
+      ctx.strokeStyle = own ? '#9A9A96' : d ? col(d.h.a) : '#7C8796';
+      ctx.lineWidth = (on ? 4.5 : 2.5) * lw / 1.5;
+      ctx.setLineDash(d && !on && !own ? [2, 2] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+    const stroke = (c: number[], color: string, w: number, head: boolean): void => {
+      const [sx, sy, ax, ay, bx, by, ex, ey] = c, l = Math.hypot(ex - bx, ey - by) || 1, vx = (ex - bx) / l, vy = (ey - by) / l, hw = w * 1.4 + 1;
+      for (const [cl, cw] of [['#FFFFFF', w + 1.8], [color, w]] as const) {
+        ctx.strokeStyle = ctx.fillStyle = cl;
+        ctx.lineWidth = cw;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.bezierCurveTo(ax, ay, bx, by, ex - vx * hw, ey - vy * hw);
+        ctx.stroke();
+        if (!head) continue;
+        const k = cw === w ? 0 : 0.9;
+        ctx.beginPath();
+        ctx.moveTo(ex + vx * (hw * 0.6 + k), ey + vy * (hw * 0.6 + k));
+        ctx.lineTo(ex - vx * (hw + k) - vy * (hw + k), ey - vy * (hw + k) + vx * (hw + k));
+        ctx.lineTo(ex - vx * (hw + k) + vy * (hw + k), ey - vy * (hw + k) - vx * (hw + k));
+        ctx.fill();
+      }
+    };
+    for (const l of ls) {
+      // the line being dragged off fades; hovered thickens
+      if (d?.moved && d.was?.key === l.key) ctx.globalAlpha = 0.3;
+      stroke(l.c, col(l.h.a), !d && linkUI.hover === l.key ? lw * 2 : lw, true);
+      ctx.globalAlpha = 1;
+    }
+    if (d) {
+      const c = d.t ? curve(n, d.h, d.t, moveOf(n, d.h.e, d.t.o)) : [d.h.x, d.h.y, d.h.x + (n.x - d.h.x) * 0.5, d.h.y + (n.y - d.h.y) * 0.5, d.x, d.y, d.x, d.y];
+      if (!d.t) ctx.setLineDash([3, 3]);
+      if (d.moved) stroke(c, col(d.h.a), lw * 1.6, !!d.t);
+      ctx.setLineDash([]);
+    }
+    for (const h of hs) {
+      const hot = linkUI.hover === h.key || d?.h.key === h.key;
+      this.circle(h.x, h.y, (hot ? 3.2 : 2.4) * Math.max(1, 1.4 / z), '#FFFFFF');
+      ctx.strokeStyle = col(h.a);
+      ctx.lineWidth = lw * 0.9;
       ctx.stroke();
     }
   }

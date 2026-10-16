@@ -41,7 +41,7 @@ const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
   load: key => { const g = load(key); if (g) start(g); return !!g; },
   save: key => store(key, game),
   quit: autosave,
-  canPause: () => !game.gameOver && !game.pendingLevel && !hud.helpOpen && !input.busy && game.tool !== 'place'
+  canPause: () => !game.gameOver && !game.pendingLevel && !hud.helpOpen && !hud.buildOpen && !input.busy && game.tool !== 'place'
     && !game.selected && !game.inspect && !game.follow && !game.picked && !game.ichg,
 });
 

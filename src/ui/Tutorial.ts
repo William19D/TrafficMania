@@ -51,11 +51,11 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Click = start point, click again = end point; hold the end point and drag to bend. A building next to a road gets a free driveway. The label shows the price. Esc cancels.',
       enter: g => { g.setTool('road'); topUp(g); }, targets: () => [...centre, ...door(office)],
       done: g => homes.length ? reaches(g, homes, office) : g.graph.edges.length >= 1,
-      hint: '[data-tool="road"]',
+      hint: '.buildbtn, [data-tool="road"]',
     },
     {
       title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
-      text: `Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift. Car colours show the trip. Press 4x to speed up.`,
+      text: `Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift. P marks each car with its trip purpose. Press 4x to speed up.`,
       // the clock starts again here (start() paused it), so the morning rush is still ahead
       enter: g => { if (!g.speed) g.speed = 1; },
       done: g => g.reports.some(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)),
@@ -66,7 +66,7 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Every level brings a batch of buildings to place; they wait in the tray. Near a road a building turns to face it and gets a free driveway. Keep homes away from factories and busy roads. R turns a building that stands free.',
       // the tray always holds a home for this step
       enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; if (g.tutorialActive) g.tray.home = Math.max(1, g.tray.home); },
-      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '[data-tool="place"], .tray',
+      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '.buildbtn, .bmenu [data-zone="home"], .tray',
     },
     {
       title: 'Open the shop', task: 'Build a road from the shop door to the middle of one of your roads.',
@@ -80,11 +80,11 @@ export function tutorialSteps(g: Game): Step[] {
       text: 'Three or more roads meeting make an intersection; if you have none, draw a road into the middle of one. Without a control cars take turns one at a time.',
       enter: g => topUp(g),
       targets: g => junctions(g).length ? junctions(g).map(at) : mid(g),
-      done: g => lights(g).length > 0, hint: '[data-tool="light"]',
+      done: g => lights(g).length > 0, hint: '.buildbtn, [data-tool="light"]',
     },
     {
       title: 'Time the light', task: 'Press 6 (Edit), click the light, then press + on a phase.',
-      text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases, protected lefts and turn bans. Give the busier road the longer green. In a career game the phase editor unlocks at level 4.',
+      text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases and protected lefts. On the map, drag from a lane to a road to connect it, click a line to remove it: a turn no lane connects is banned. Give the busier road the longer green. In a career game the phase editor unlocks at level 4.',
       targets: g => lights(g).map(at),
       // a replay on a career city below level 4 cannot edit phases yet: nothing to do here
       done: g => !!g.lockOf('junction') || lights(g).some(n => !!n.plan?.phases.some(p => p.seconds > LIGHT_PERIOD)), hint: '[data-tool="edit"]',

@@ -1,19 +1,31 @@
 import type { Kind } from '../entities/Car.ts';
-import type { Purpose } from '../core/config.ts';
 import { KINDS } from '../entities/Car.ts';
-import { PURPOSES } from '../core/config.ts';
 import { shade } from './BuildingArt.ts';
 
-// Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, purpose, tone and pixel scale; the renderer
-// draws one rotated drawImage per vehicle plus the live lights (brake, indicators, the ambulance's bar) on top.
-export const VW: Record<Kind, number> = { car: 8, ambulance: 8, truck: 8.5, bus: 8.5, moto: 4 };
+// Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, paint and pixel scale; the renderer
+// draws one rotated drawImage per vehicle plus the live lights (brake, indicators, purpose dot) on top.
+export const VW: Record<Kind, number> = { car: 8, truck: 8.5, moto: 4 };
 // Sprite frame: VPAD px round the body lengthwise, VH px tall (room for the side mirrors and the shadow's blur)
 export const VPAD = 2, VH = 14;
-// Tones within a purpose's colour, so a stream of commuters is not one flat blue
-export const TONES = [0, -0.12, 0.12, -0.22, 0.22];
+// Paint by weight, like a real car park: mostly white, black and silver, a rare yellow taxi. Trucks wear fleet liveries
+type Palette = [string, number][];
+export const CAR_PAINT: Palette = [
+  ['#F1F1EC', 20], ['#24272C', 16], ['#B8BDC3', 14], ['#6C737B', 12], ['#C6352B', 9], ['#2E6BB3', 8], ['#1E3454', 6],
+  ['#3D7A4D', 4], ['#CDBA95', 4], ['#6B4A35', 3], ['#E07A28', 2], ['#F2C12E', 2],
+];
+export const TRUCK_LIVERY: Palette = [
+  ['#F4F4F0', 30], ['#C93A30', 14], ['#2F64A8', 14], ['#8A9097', 12], ['#3A8650', 10], ['#E58A2A', 10], ['#EDC339', 6],
+];
+// Palette index for a paint roll in [0, 1)
+export function pick(p: Palette, u: number): number {
+  let r = 0;
+  for (const c of p) r += c[1];
+  r *= u;
+  for (let i = 0; i < p.length; i++) if ((r -= p[i]![1]) < 0) return i;
+  return p.length - 1;
+}
 
-const KI: Record<Kind, number> = { car: 0, truck: 1, bus: 2, moto: 3, ambulance: 4 };
-const PI: Record<Purpose, number> = { commute: 0, shop: 1, freight: 2, visit: 3 };
+const KI: Record<Kind, number> = { car: 0, truck: 1, moto: 2 };
 const GLASS = '#2C3949', LAMP = '#FFF4C8';
 const sprites = new Map<number, HTMLCanvasElement>();
 
@@ -45,14 +57,15 @@ export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
   return c;
 }
 
-export function vehicle(kind: Kind, purpose: Purpose, tone: number, s: number): HTMLCanvasElement {
-  const key = ((KI[kind] * 4 + PI[purpose]) * TONES.length + tone) * 16 + Math.log2(s);
+// paint: the car's roll in [0, 1), set at spawn
+export function vehicle(kind: Kind, paint: number, s: number): HTMLCanvasElement {
+  const p = kind === 'truck' ? TRUCK_LIVERY : CAR_PAINT, i = pick(p, paint), key = (KI[kind] * 16 + i) * 16 + Math.log2(s);
   let c = sprites.get(key);
-  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => paint(x, kind, shade(PURPOSES[purpose].color, TONES[tone]), h, w)));
+  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => draw(x, kind, p[i]![0], h, w)));
   return c;
 }
 
-function paint(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, w: number): void {
+function draw(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, w: number): void {
   const rect = (x: number, y: number, rw: number, rh: number, r: number, fill: string, out: string | null = null, lw = 0.5): void => {
     c.beginPath();
     c.roundRect(x, y, rw, rh, r);
@@ -99,7 +112,7 @@ function paint(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, 
     return;
   }
   if (kind === 'truck') {
-    // purpose-coloured box trailer with ribs, a coupling, then a darker cab with its windshield
+    // liveried box trailer with ribs, a coupling, then a darker cab with its windshield
     const tl = 2 * h - 7;
     rect(-h, -w, tl, 2 * w, 1, col, edge);
     c.beginPath();
@@ -117,33 +130,12 @@ function paint(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, 
     heads(h - 0.9, w - 1.4);
     return;
   }
-  if (kind === 'bus') {
-    rect(-h, -w, 2 * h, 2 * w, 1.8, col, edge);
-    // side windows as glazed strips along both flanks, a pale roof with skylights and an AC unit at the back
-    for (const k of [-1, 1]) line(-h + 2, k * (w - 0.9), h - 2.6, k * (w - 0.9), GLASS, 0.9);
-    rect(-h + 1.2, -w + 1.6, 2 * h - 3.4, 2 * w - 3.2, 1.2, shade(col, 0.3));
-    for (let x = -h + 9; x < h - 5; x += 5.5) rect(x, -1.4, 3, 2.8, 0.5, '#A9C6DF', shade(col, -0.2), 0.4);
-    rect(-h + 2.5, -2.2, 4.5, 4.4, 0.6, '#D3D7DC', '#9AA1A8', 0.4);
-    rect(h - 1.9, -w + 0.8, 1.3, 2 * w - 1.6, 0.5, GLASS);
-    mirrors(h - 1.6, edge);
-    heads(h - 0.7, w - 1.3);
-    return;
-  }
-  const amb = kind === 'ambulance', body = amb ? '#F7F7F5' : col;
-  rect(-h, -w, 2 * h, 2 * w, 2.6, body, amb ? '#9A9A96' : edge, 0.6);
-  if (amb) {
-    // boxy rear with a purpose stripe and a red cross
-    rect(-h + 0.8, -w + 0.9, 2 * h - 6.8, 2 * w - 1.8, 1, '#FFFFFF', '#D2D2CE', 0.4);
-    rect(-h + 1, -0.6, 2 * h - 7.2, 1.2, 0, col);
-    rect(-h + 3.2, -2.2, 1.2, 4.4, 0.2, '#E5484D');
-    rect(-h + 1.6, -0.6, 4.4, 1.2, 0.2, '#E5484D');
-  } else {
-    // hood highlight, glazed cabin (rear window, side glass, windshield) and a lighter roof panel
-    rect(h - 4, -w + 1.6, 3.2, 2 * w - 3.2, 1.2, shade(col, 0.12));
-    rect(-h + 2.1, -w + 0.8, 2 * h - 7.5, 2 * w - 1.6, 1.2, GLASS);
-    rect(-h + 4, -w + 1.3, 2 * h - 10, 2 * w - 2.6, 1.1, shade(col, 0.2));
-  }
+  rect(-h, -w, 2 * h, 2 * w, 2.6, col, edge, 0.6);
+  // hood highlight, glazed cabin (rear window, side glass, windshield) and a lighter roof panel
+  rect(h - 4, -w + 1.6, 3.2, 2 * w - 3.2, 1.2, shade(col, 0.12));
+  rect(-h + 2.1, -w + 0.8, 2 * h - 7.5, 2 * w - 1.6, 1.2, GLASS);
+  rect(-h + 4, -w + 1.3, 2 * h - 10, 2 * w - 2.6, 1.1, shade(col, 0.2));
   rect(h - 5.6, -w + 0.9, 1.9, 2 * w - 1.8, 0.8, GLASS);
-  mirrors(h - 5.2, amb ? '#C8C8C4' : shade(col, -0.35));
+  mirrors(h - 5.2, shade(col, -0.35));
   heads(h - 0.95, w - 1.3);
 }

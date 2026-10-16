@@ -1,7 +1,8 @@
-import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
+import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, boxR, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
-import { PURPOSES, TIERS } from '../core/config.ts';
+import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
+import { ANY } from '../network/Junction.ts';
 import type { Building } from './Building.ts';
 import type { Trip } from './Trip.ts';
 import { random } from '../util/rng.ts';
@@ -11,14 +12,12 @@ export const MAX_SPEED = 110, ACCEL = 80, TURN_SPEED = 45;
 export const REROUTE_S = 8, GIVE_UP_S = 20;
 
 // Vehicle kinds: length, top speed and acceleration factors, spawn weight for passenger trips (trucks only carry freight, so 0).
-// Ambulances jump node queues (RoadGraph.update).
-export type Kind = 'car' | 'truck' | 'bus' | 'moto' | 'ambulance';
+// Trips are private, so no buses or ambulances: they read as a bus leaving a home.
+export type Kind = 'car' | 'truck' | 'moto';
 export const KINDS: Record<Kind, { len: number; v: number; a: number; w: number }> = {
-  car: { len: CAR_LEN, v: 1, a: 1, w: 0.72 },
+  car: { len: CAR_LEN, v: 1, a: 1, w: 0.88 },
   truck: { len: 24, v: 0.75, a: 0.55, w: 0 },
-  bus: { len: 26, v: 0.7, a: 0.5, w: 0.06 },
-  moto: { len: 10, v: 1.1, a: 1.4, w: 0.09 },
-  ambulance: { len: CAR_LEN, v: 1.15, a: 1.1, w: 0.03 },
+  moto: { len: 10, v: 1.1, a: 1.4, w: 0.12 },
 };
 const W = Object.values(KINDS).reduce((n, k) => n + k.w, 0);
 export const randomKind = (): Kind => {
@@ -26,6 +25,10 @@ export const randomKind = (): Kind => {
   for (const k in KINDS) if ((r -= KINDS[k as Kind].w) < 0) return k as Kind;
   return 'car';
 };
+// Paint roll in [0, 1) per spawned vehicle (VehicleArt maps it to a weighted palette); a hash of a counter, so it never
+// shifts the sim's seeded rng
+let serial = 0;
+const roll = (): number => (Math.imul(++serial, 0x9E3779B1) >>> 0) / 2 ** 32;
 // Centre-to-centre distance of two touching vehicles (s is the centre)
 export const sep = (a: Car, b: Car): number => (a.len + b.len) / 2;
 
@@ -58,6 +61,7 @@ export class Car {
   vmax: number;
   acc: number;
   react: number;
+  paint = roll();
 
   constructor(public lane: Lane, public trip: Trip, public kind: Kind = 'car') {
     const k = KINDS[kind];
@@ -74,7 +78,6 @@ export class Car {
 
   get dest(): Building { return this.trip.to; }
   get origin(): Building { return this.trip.from; }
-  get color(): string { return PURPOSES[this.trip.purpose].color; }
 
   update(dt: number, graph: RoadGraph): 'ok' | 'arrived' | 'lost' | 'stuck' {
     let lane = this.lane;
@@ -98,13 +101,18 @@ export class Car {
       if (p && p[1] !== lane.from) this.path = p;
     }
 
+    // Past the last lane change in a lane whose arrows don't allow the next move: a route its arrows do allow
+    // ponytail: none (a dead end behind the arrows) keeps the route and takes the turn from the wrong lane
+    if (!isDest && this.path && remaining < LC_M && !graph.arrowLanes(lane.edge, lane.from, this.path[1])?.includes(lane) && graph.arrows(lane) !== ANY)
+      this.path = findPath(graph, node, this.dest.node, null, false, lane.edge, graph.arrows(lane)) ?? this.path;
+
     let nextLane: Lane | null = null;
     if (!isDest && this.path) {
       const next = this.path[1];
       const e = next ? graph.edgeBetween(node, next) : null;
       // Keep the exit once granted or inside the turn arc, so fits()'s lane is the one entered and the drawn arc doesn't jump
       const x = this.exit, keep = x && x.edge === e && x.from === node && e.lanes.includes(x) && (this.granted === node || remaining < 2 * NODE_R);
-      nextLane = keep ? x : e ? graph.pickLane(e, node, graph.turn(this.path, 1)) : null;
+      nextLane = keep ? x : e ? graph.pickLane(e, node, graph.turn(this.path, 1), this.path[2]) : null;
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
     }
@@ -172,7 +180,7 @@ export class Car {
     // (at the next line, or in a queue through a driveway junction): on a link shorter than ~NODE_R + stopDist + the car, holding
     // the box there gridlocks the two junctions.
     // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
-    if (this.clearing && (this.s - this.len / 2 > NODE_R || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
+    if (this.clearing && (this.s - this.len / 2 > boxR(this.clearing) || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
@@ -202,11 +210,14 @@ export class Car {
   private changeLane(graph: RoadGraph, idx: number): number {
     const lane = this.lane, ls = graph.lanesFrom(lane.edge, lane.from);
     if (ls.length < 2 || this.s < LC_M || lane.edge.length - this.s < LC_M) return idx;
-    const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0, w = t > 0 ? ls.length - 1 : 0;
+    // target lane w (-1: none): the nearest lane the junction's arrows allow for the next move, else the turn's outer lane
+    const k = ls.indexOf(lane), t = this.path ? graph.turn(this.path, 0, lane.from) : 0;
+    const ok = this.path ? graph.arrowLanes(lane.edge, lane.from, this.path[1])?.map(l => ls.indexOf(l)) : null;
+    const w = ok ? (ok.includes(k) || !ok.length ? -1 : ok.reduce((b, i) => Math.abs(i - k) < Math.abs(b - k) ? i : b)) : t ? (t > 0 ? ls.length - 1 : 0) : -1;
     const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - sep(this, ahead) : Infinity;
-    const slow = !!ahead && ahead.speed < this.top(lane.edge) * 0.6 && gap < 4 * CAR_LEN;
+    const slow = !!ahead && ahead.speed < this.top(lane.edge) * 0.6 && gap < 4 * CAR_LEN && (!!ok || !t);
     const brake = (v: number) => v * v / (2 * BRAKE);
-    for (const to of t ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [ls[k - 1], ls[k + 1]] : []) {
+    for (const to of w >= 0 ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [k - 1, k + 1].filter(i => !ok || ok.includes(i)).map(i => ls[i]) : []) {
       if (!to) continue;
       let at = to.cars.findIndex(o => o.s > this.s);
       if (at < 0) at = to.cars.length;
@@ -214,7 +225,7 @@ export class Car {
       const room = a ? a.s - this.s - sep(this, a) : Infinity;
       if (a && room < GAP + Math.max(0, brake(this.speed) - brake(a.speed))) continue;
       if (b && this.s - b.s - sep(this, b) < GAP + brake(b.speed)) continue;
-      if (!t && room < gap + 2 * CAR_LEN) continue;
+      if (w < 0 && room < gap + 2 * CAR_LEN) continue;
       lane.cars.splice(idx, 1);
       to.cars.splice(at, 0, this);
       this.lcOff = lane.offset - to.offset;

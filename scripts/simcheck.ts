@@ -3,7 +3,7 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, applyPreset, approachOf, moveOf, planOf, setSeconds, toggleBan } from '../src/network/Junction.ts';
+import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
 import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
@@ -19,7 +19,9 @@ import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
+import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
+import { netKey } from '../src/rendering/RoadArt.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -129,6 +131,7 @@ for (let i = 0; i < STEPS; i++) {
   }
   maxCars = Math.max(maxCars, live.size);
   for (const c of live) { const v = c.vmax / (MAX_SPEED * KINDS[c.kind].v); lo = Math.min(lo, v); hi = Math.max(hi, v); kinds.add(c.kind); }
+  for (const c of live) if ((c.kind === 'truck') !== (c.trip.purpose === 'freight')) fail(`kinds: a ${c.kind} on a ${c.trip.purpose} trip`);
   for (const c of live) {
     const [l, x] = exits.get(c) ?? [null, null];
     if (l === c.lane && x && c.exit && x !== c.exit && x.edge === c.exit.edge && l.edge.length - c.s < 2 * NODE_R) fail(`exit lane switched inside the turn arc at t=${game.time.toFixed(2)}`);
@@ -326,7 +329,7 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (let t = 0; t < 15 * 60 && w.cars.includes(c); t++) w.update(DT);
   if (w.score !== 1) fail(`joint before a junction: car stopped at ${c.lane.from.id}->${c.lane.to.id} s=${c.s.toFixed(1)}, waited ${c.wait.toFixed(1)}s`);
 }
-// Box release: a bus granted at plain J into an exit with just enough room (fits()) gets far enough to free J
+// Box release: a truck granted at plain J into an exit with just enough room (fits()) gets far enough to free J
 {
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), J = wg.addNode(500, 500);
@@ -335,28 +338,28 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   const out = wg.lanesFrom(wg.edgeBetween(J, Y)!, J)[0]!, parked = new Car(out, trip(X, Y));
   parked.s = 54 + parked.len / 2;
   out.cars.push(parked);
-  const e = wg.edgeBetween(X, J)!, bus = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), 'bus');
+  const e = wg.edgeBetween(X, J)!, bus = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), 'truck');
   bus.s = e.length - 80;
   bus.lane.cars.push(bus);
   w.cars.push(bus);
   for (let t = 0; t < 10 * 60; t++) w.update(DT);
-  if (bus.lane !== out || J.occupants.size) fail(`box release: bus at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
+  if (bus.lane !== out || J.occupants.size) fail(`box release: truck at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
 }
-// Ambulance: runs a red light into an empty junction J; a plain car on the same red waits for green
-for (const kind of ['ambulance', 'car'] as const) {
+// Lights: a car on the red waits for green with its brake lights on
+{
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   w.placeControl(J, 'light');
-  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), kind);
+  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y));
   c.s = e.length - 80;
   c.lane.cars.push(c);
   w.cars.push(c);
   J.phase = lightGroup(J, e) ^ 1;
   for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
-  if (kind === 'car' && !c.brake) fail('lights: brake lights off while held at the red');
-  if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`ambulance: ${kind} ${kind === 'ambulance' ? 'held at' : 'ran'} the red light`);
+  if (!c.brake) fail('lights: brake lights off while held at the red');
+  if (c.lane.from === J) fail('lights: a car ran the red light');
 }
 // Tiers: a car never beats its top speed x dirt's limit on dirt (it brakes before the avenue -> dirt joint M);
 // A* takes a longer highway over a shorter dirt road; highways never connect to a building;
@@ -426,7 +429,7 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (const n of [W, E, N, S]) w.commitPath(w.planPath([J, n], 0, ave));
   for (const e of wg.edges) e.day = -1;
   const wj = wg.edgeBetween(W, J)!;
-  w.editPlan(J, p => toggleBan(p, approachOf(p, J, wj), LEFT));
+  w.editPlan(J, p => setLink(p, J, wj, 0, LEFT, false));
   const m0 = w.money, drop = 10 * (TIERS.dirt.cost - TIERS.avenue.cost) * TUNING.REFUND_LATER;
   if (!w.retype([wg.edgeBetween(J, N)!], { tier: 'dirt', lanes: 1, oneWay: false }) || Math.abs(w.money - m0 + drop) > 1e-6) {
     fail(`edits: downgrade refunded ${w.money - m0}, expected ${-drop}`);
@@ -542,15 +545,55 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (const [a, b] of [[X, J], [J, K], [K, Q], [Q, P], [P, J], [P, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   const xj = wg.edgeBetween(X, J)!;
-  w.editPlan(J, p => toggleBan(p, approachOf(p, J, xj), LEFT));
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, false));
   const route = findPath(wg, X, Z);
   if (route?.[1] !== J || route[2] !== K) fail(`turn ban: route ${route?.map(n => n.id)} still turns left at J`);
+  // a legacy turn ban (old saves) shows as the missing connection, and the next connection edit folds it into the lanes
+  const legacy = clonePlan(planOf(J));
+  legacy.lanes = undefined;
+  legacy.ban[approachOf(legacy, J, xj)][LEFT] = true;
+  if (links(legacy, J, xj)[0] !== (1 << STRAIGHT | 1 << RIGHT)) fail(`turn ban: legacy ban shows as ${links(legacy, J, xj)}`);
+  setLink(legacy, J, xj, 0, STRAIGHT, true);
+  if (legacy.ban.flat().some(Boolean) || legacy.lanes?.[approachOf(legacy, J, xj)]?.[0] !== (1 << STRAIGHT | 1 << RIGHT)) fail(`turn ban: legacy ban not folded ${JSON.stringify(legacy)}`);
   w.queueTrip(X.building!, Z.building!, 'commute');
   for (let t = 0; t < 40 * 60 && !w.score; t++) {
     w.update(DT);
     for (const c of w.cars) if (c.prev === X && c.lane.from === J && c.lane.to === P) fail('turn ban: a car took the banned left');
   }
   if (w.score !== 1) fail(`turn ban: the trip did not arrive via the detour (score ${w.score})`);
+  // connecting the lane to the left again lifts the ban: the route turns left at J
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, true));
+  const back = findPath(wg, X, Z);
+  if (back?.[1] !== J || back[2] !== P) fail(`turn ban: route ${back?.map(n => n.id)} does not turn left at J once reconnected`);
+}
+// Lane arrows: X's two lanes into J set to left+straight and right only; no car leaves the right lane but to the right, and every
+// trip arrives. Then no lane allows the left: the Z trip reroutes round the block via K and Q.
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Z = town(w, 500, 60, 'home', true), S = town(w, 500, 940), E = town(w, 1000, 500);
+  const J = wg.addNode(500, 500), K = wg.addNode(800, 500), Q = wg.addNode(800, 200), P = wg.addNode(500, 200);
+  w.commitPath(w.planPath([X, J], 0, { ...flat, lanes: 2 }));
+  for (const [a, b] of [[J, K], [K, Q], [Q, P], [P, J], [P, Z], [J, S], [K, E]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  w.demandOff = true;
+  const xj = wg.edgeBetween(X, J)!, right = wg.lanesFrom(xj, X)[1]!;
+  w.editPlan(J, p => setLink(p, J, xj, 1, STRAIGHT, false));
+  if (wg.arrows(right) !== 1 << RIGHT) fail(`lane arrows: right lane allows ${wg.arrows(right)}`);
+  for (let i = 0; i < 3; i++) for (const to of [Z, S, E]) w.queueTrip(X.building!, to.building!, 'commute');
+  const last = new Map<Car, Lane>();
+  for (let t = 0; t < 90 * 60 && w.score < 9; t++) {
+    w.update(DT);
+    for (const c of w.cars) {
+      if (c.lane.edge === xj) last.set(c, c.lane);
+      else if (c.lane.from === J && last.get(c) === right && c.lane.to !== S.building!.node && c.lane.to !== S) fail(`lane arrows: a car left the right-only lane toward ${c.lane.to.id}`);
+      if (c.lane.from === J) last.delete(c);
+    }
+  }
+  if (w.score !== 9) fail(`lane arrows: ${w.score} of 9 trips arrived`);
+  w.editPlan(J, p => setLink(p, J, xj, 0, LEFT, false));
+  const route = findPath(wg, X, Z);
+  if (route?.[1] !== J || route[2] !== K) fail(`lane arrows: route ${route?.map(n => n.id)} still turns left at J with no lane for it`);
+  const back = deserialize(serialize(w)).graph.nodes[wg.nodes.indexOf(J)]?.plan?.lanes;
+  if (JSON.stringify(back) !== JSON.stringify(J.plan!.lanes)) fail(`lane arrows: saved as ${JSON.stringify(back)}`);
 }
 // Protected lefts: under the preset a left-turner at the light is only granted in a phase that protects its left, and arrives
 {
@@ -567,7 +610,7 @@ for (const kind of ['ambulance', 'car'] as const) {
   for (let t = 0; t < 60 * 60; t++) {
     w.update(DT);
     for (const c of w.cars) {
-      if (c.granted !== J || seen.has(c) || c.kind === 'ambulance') continue; // ambulances run reds
+      if (c.granted !== J || seen.has(c)) continue;
       seen.add(c);
       const p = planOf(J), m = moveOf(J, c.lane.edge, c.exit!.edge), sig = p.phases[J.phase].sig[approachOf(p, J, c.lane.edge)][m];
       if (m === LEFT) lefts++;
@@ -575,6 +618,43 @@ for (const kind of ['ambulance', 'car'] as const) {
     }
   }
   if (lefts < 3 || w.score !== 8) fail(`protected lefts: ${lefts} lefts granted, ${w.score} of 8 trips arrived`);
+}
+// Mountains read raised, not as pits: every biome's peak band is lighter than its foot
+for (const [k, b] of Object.entries(BIOMES)) {
+  const lum = (c: string): number => [1, 3, 5].reduce((n, i) => n + parseInt(c.slice(i, i + 2), 16), 0);
+  if (lum(b.bands[2]) <= lum(b.bands[0])) fail(`mountains: ${k} peak ${b.bands[2]} is darker than its foot ${b.bands[0]}`);
+}
+// Roundabout sizes: a 4-arm cross flooded from every arm; a large ring holds more cars at once than a small one and every car still
+// gets through. A large ring is refused where a road leaves it after 70px, a small one fits there.
+{
+  const most: number[] = [];
+  for (const size of [0, 2] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), arms = [[1000, 550], [1450, 1000], [1000, 1450], [550, 1000]] as const;
+    const H = arms.map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, DEFAULT_TYPE));
+    w.demandOff = true;
+    w.ringSize = size;
+    w.placeControl(J, 'roundabout');
+    if (J.control !== 'roundabout' || J.ring !== size) fail(`ring sizes: size ${size} not placed`);
+    H.forEach((h, i) => {
+      const e = wg.edgeBetween(h, J)!, lane = wg.lanesFrom(e, h)[0]!;
+      for (let k = 0; k < 6; k++) {
+        const c = new Car(lane, trip(h, H[(i + 2) % 4]));
+        c.s = 330 - k * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    let max = 0;
+    for (let t = 0; t < 60 * 60 && w.cars.length; t++) { w.update(DT); max = Math.max(max, J.occupants.size); }
+    if (w.score !== 24) fail(`ring sizes: ${w.score} of 24 cars through a size ${size} ring`);
+    most.push(max);
+    if (size) continue;
+    const K = wg.addNode(1300, 1300);
+    for (const [x, y] of [[1370, 1300], [1300, 1100], [1100, 1300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+    if (w.setControl(K, 'roundabout', 2) || !w.setControl(K, 'roundabout', 0)) fail(`ring sizes: room check on a 70px arm (${w.ringRoom(K, 2)})`);
+  }
+  if (most[1] <= most[0]) fail(`ring sizes: large ring held ${most[1]} cars at once, small ${most[0]}`);
 }
 // Yield: at a junction of an avenue (main road) and a street, a street car at the line waits while an avenue car is queued;
 // at a stop junction a car is only granted from a standstill
@@ -937,6 +1017,23 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     if (Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 12 || Math.abs(a.night - b.night) > 0.05) fail(`light: the tint jumps at ${h.toFixed(2)}h`);
   }
   if (shade(shade('#5A6FD8', -0.2), 0) !== shade('#5A6FD8', -0.2)) fail('art: a shade does not shade again');
+  // paint: 500 spawns wear every car colour, white the most, and the roll stays off the sim's rng
+  const n = CAR_PAINT.map(() => 0);
+  for (let i = 0; i < 500; i++) n[pick(CAR_PAINT, new Car(g.edges[0]!.lanes[0]!, makeTrip('commute', game.buildings[0]!, game.buildings[1]!)).paint)]!++;
+  if (n.some(x => !x) || Math.max(...n) !== n[0]) fail(`art: paint spread ${n.join(',')}`);
+  // road layer cache: its key holds still on an unchanged network and moves with a control, a ring size or a retype
+  const key = (): number => netKey(g.edges, g.nodes), k0 = key(), was = J2.control, t0 = g.edges[0]!.type;
+  if (key() !== k0) fail('art: road key unstable');
+  J2.control = 'stop';
+  const k1 = key();
+  J2.control = was;
+  R.ring = R.ring === 2 ? 0 : 2;
+  const k2 = key();
+  R.ring = R.ring === 2 ? 0 : 2;
+  g.edges[0]!.type = { ...t0, tier: 'boulevard' };
+  const k3 = key();
+  g.edges[0]!.type = t0;
+  if (new Set([k0, k1, k2, k3]).size !== 4 || key() !== k0) fail('art: road key misses a change');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

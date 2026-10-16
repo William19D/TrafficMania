@@ -10,9 +10,10 @@ import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
 import type { Vec } from '../util/geom.ts';
-import type { Control, RoadType } from '../network/RoadGraph.ts';
-import type { Move, Preset } from '../network/Junction.ts';
-import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
+import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
+import { RINGS } from '../network/RoadGraph.ts';
+import type { LinkPreset, Move, Preset } from '../network/Junction.ts';
+import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, linkPreset, links, mainEdges, planOf, removePhase, setSeconds } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
 import { sound } from './Sound.ts';
@@ -21,13 +22,15 @@ import { sound } from './Sound.ts';
 const TOOLS: Record<Tool, { label: string; tip: string }> = {
   road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
-  light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
-  roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and lane connections.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring takes more cars at once and needs longer roads). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
-  edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
+  edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and lane connections (drag from a lane to a road), or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
   demolish: { label: 'Demolish', tip: `Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (${fmtMoney(T.MOVE_COST)} in career; an occupied one takes a second click).` },
 };
+// Tools in the Build menu; Edit and Demolish stay in the dock
+const BUILD: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'place'];
 const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
 const ZONE_PIC: Record<Site, (f: string, o: string, r: string) => string> = {
@@ -62,6 +65,10 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
+const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: ${RINGS[r].cap} cars at once${price ? ` · ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
+// one button per roundabout size; a = the data attribute it sets
+const ringBtns = (a: string, on: number): string => RINGS.map((x, r) =>
+  `<button class="lane wide" ${a}="${r}" aria-pressed="${r === on}" data-tip="${ringTip(r)}"><small>${x.label}</small></button>`).join('');
 // Road tool shape, one toggle showing the active mode (a two-button segment did not fit the dock at 1280px)
 const RMODE_TIP = {
   straight: 'Straight roads: they run straight from click to click. Click for curves',
@@ -94,23 +101,25 @@ const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highwa
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
   [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
+  ['Build menu: roads, junctions, buildings', 'click Build; <kbd>Esc</kbd> or a click outside closes it. The keys pick its tools directly'],
   ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
   ['Road angle in 15° steps', 'hold <kbd>Ctrl</kbd> or <kbd>Alt</kbd> while placing'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
-  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way in the dock: new roads, or the road selected with Edit'],
+  ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way beside Build: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
   ['Street grid', `${kbd('grid')}: click a corner, the end of the first side, then the depth`],
   ['Interchange', `${kbd('interchange')}: click a junction, pick a type, then Build`],
   ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
-  ['Edit junction', `${kbd('edit')}, click a junction: control, light phases, turn bans`],
+  ['Edit junction', `${kbd('edit')}, click a junction: control and light phases; drag from a lane to a road to connect it, click a line to remove it`],
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
   ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
+  ['Trip purpose dots on vehicles', '<kbd>P</kbd>'],
   ['Mute / unmute sound', '<kbd>Shift</kbd> + <kbd>M</kbd>; volumes in the menu (<kbd>Esc</kbd>), Sound'],
   ['Pause / resume', '<kbd>Space</kbd>'],
   ['Menu: save, load, quit', '<kbd>Esc</kbd> with nothing to cancel'],
@@ -127,13 +136,18 @@ const CONTROL_TIP: Record<Control, string> = {
   yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
   stop: 'All-way stop: every car stops at the line, then one at a time',
   light: 'Traffic light: phases you can edit, protected lefts',
-  roundabout: 'Roundabout: up to 3 cars at once, no stopping when it is clear',
+  roundabout: 'Roundabout: several cars at once (more on a bigger ring), no stopping when it is clear',
 };
 const MOVES = ['Left', 'Straight', 'Right'];
 const PRESETS: [Preset, string, string][] = [
   ['two', '2 phases', 'One phase per axis, lefts give way to oncoming traffic'],
   ['lefts', 'Protected lefts', '4 phases: per axis a protected-left phase, then straight and right'],
   ['each', 'One at a time', 'Each approach gets its own phase'],
+];
+const LINK_PRESETS: [LinkPreset, string, string][] = [
+  ['auto', 'Reset to auto', 'Back to the default: the leftmost lane also turns left, the rightmost also right, every turn allowed'],
+  ['any', 'Any lane', 'Every lane takes every turn'],
+  ['nolefts', 'No lefts', 'Removes every left turn (and U-turn); cars reroute'],
 ];
 const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
 const compass = (a: number): string => COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8];
@@ -155,7 +169,7 @@ const tripName = (t: Leg): string => {
 const JAM_AT: Record<Control | 'road', string> = {
   light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
-const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', bus: 'Bus', moto: 'Motorbike', ambulance: 'Ambulance' };
+const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
 function tripLine(r: TripReport): string {
   const to = destOf(r), x = (n: number) => `${n.toFixed(1)}x`;
@@ -190,9 +204,10 @@ function spark(v: number[], zero = false, max = -Infinity): [string, number, num
   const pts = v.map((y, i) => `${(i / n * 100).toFixed(1)},${(23 - (y - lo) / k * 22).toFixed(1)}`).join(' ');
   return [`<svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`, lo, hi];
 }
-// Legend panel per overlay (the car colours without one)
+// Legend panel per overlay; the trip purposes' roof dots are listed whenever they show (Purpose toggle or the traffic overlay)
+const DOTS = '<b>Roof dot: trip purpose</b>' + Object.values(PURPOSES).map(p => `<span><i class="dot" style="background:${p.color}"></i>${p.label}</span>`).join('');
 const LEGEND: Record<Overlay, string> = {
-  none: Object.values(PURPOSES).map(p => `<span><i style="background:${p.color}"></i>${p.label}</span>`).join(''),
+  none: "<b>Cars</b><span>Paint is the owner's choice</span><span><kbd>P</kbd> shows each trip's purpose</span>",
   heat: '<b>Traffic</b><span class="grad"></span><span class="ends"><small>flowing</small><small>jammed</small></span><span>Discs: cars waiting at a junction</span>',
   noise: '<b>Noise and pollution</b><span><i style="background:#8E7CC3"></i>Road noise</span><span><i style="background:#9A6B2F"></i>Factory pollution</span>'
     + '<span><i class="dot" style="background:#4CC26A"></i>Happy home</span><span><i class="dot" style="background:#FFB020"></i>Content</span><span><i class="dot" style="background:#E5484D"></i>Moving out</span>',
@@ -204,6 +219,20 @@ function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.remove(cls, ...others);
   void (el as HTMLElement).offsetWidth;
   el.classList.add(cls);
+}
+
+// Count a number to its new value over ~400ms (ease-out); reduced motion and first fills snap
+const ticking = new WeakMap<HTMLElement, number>();
+function countTo(el: HTMLElement, from: number | undefined, to: number, fmt: (n: number) => string): void {
+  cancelAnimationFrame(ticking.get(el) ?? 0);
+  if (from === undefined || from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) { el.textContent = fmt(to); return; }
+  const t0 = performance.now();
+  const step = (t: number): void => {
+    const k = Math.min(1, (t - t0) / 400);
+    el.textContent = fmt(Math.round(from + (to - from) * (1 - (1 - k) ** 3)));
+    if (k < 1) ticking.set(el, requestAnimationFrame(step));
+  };
+  ticking.set(el, requestAnimationFrame(step));
 }
 
 function toolBtn(t: Tool): string {
@@ -226,7 +255,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; tray?: string; trayN?: number; modal?: string;
     views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -244,8 +273,6 @@ export class HUD {
   // Moves the camera there: the next building without a road (warning chip), a trip report's spot
   onJump: ((p: Vec) => void) | null = null;
   private dangerIdx = 0;
-  // Junction panel: what a turn click edits (light signals of phase jPhase, or bans)
-  private jMode: 'signals' | 'bans' = 'signals';
   private jPhase = 0;
 
   // signal: aborted when this game's HUD is replaced, removing its window, document and root listeners
@@ -283,6 +310,7 @@ export class HUD {
       <div class="panel views" role="group" aria-label="Analysis">
         <button class="iconbtn" data-view="heat" aria-pressed="false" aria-label="Traffic heat map" data-tip="Traffic heat map: green roads flow, red ones are jammed; discs show cars waiting at junctions" data-key="C">${icon('heat')}</button>
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
+        <button class="iconbtn" data-view="purpose" aria-pressed="false" aria-label="Trip purpose" data-tip="Trip purpose: a coloured dot on every vehicle's roof (commute, shopping, freight, visitors)" data-key="P">${icon('tag')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
         <button class="iconbtn snd" data-view="sound" data-key="Shift+M"></button>
@@ -315,12 +343,13 @@ export class HUD {
         </div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        ${toolBtn('road')}
-        ${toolBtn('grid')}
+        <button class="tool buildbtn" data-action="build" aria-expanded="false" aria-controls="bmenu" data-tip="Build: roads, junctions and buildings"><span class="bico"></span><span class="lbl">Build</span>${icon('chev', 'chev')}<b class="badge num" hidden></b></button>
+        <div class="ctx" role="group" aria-label="Tool options">
         <button class="lane wide rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
+        <div class="seg rsz" role="group" aria-label="Roundabout size">${ringBtns('data-ring', 0)}</div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
           <div class="seg tiers" role="group" aria-label="Road tier">
@@ -345,15 +374,18 @@ export class HUD {
           <span class="elev"><b class="lv num"></b><small class="eh"></small></span>
           <button class="iconbtn" data-action="level-up" aria-label="Raise road [PageUp]" data-tip="Raise road" data-key="PageUp"><b>+</b></button>
         </div>
-        <span class="sep brk"></span>
-        ${toolBtn('light')}
-        ${toolBtn('roundabout')}
-        ${toolBtn('interchange')}
-        <span class="sep"></span>
-        ${toolBtn('place')}
+        </div>
         <span class="sep"></span>
         ${toolBtn('edit')}
         ${toolBtn('demolish')}
+      </div>
+      <div class="panel bmenu" id="bmenu" role="group" aria-label="Build menu">
+        <div class="bgrp"><h3>Roads</h3><div class="brow">${toolBtn('road')}${toolBtn('grid')}</div></div>
+        <div class="bgrp"><h3>Junctions</h3><div class="brow">${toolBtn('light')}${toolBtn('roundabout')}${toolBtn('interchange')}</div></div>
+        <div class="bgrp"><h3>Buildings <kbd>B</kbd></h3><div class="brow">
+          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+          <small class="bnone">None waiting: the next level brings more</small>
+        </div></div>
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Buildings to place">
@@ -365,14 +397,15 @@ export class HUD {
       <div class="toasts" role="status" aria-live="polite"></div>
       <div class="modal" hidden></div>
       <div class="tip" role="tooltip" hidden></div>`;
-    this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('.dock [data-tool]'));
+    this.toolBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-tool]'));
     this.speedBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-speed]'));
     this.dayBar = this.q('.day');
     this.tip = this.q('.tip');
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
-    for (const b of this.toolBtns) b.onclick = () => game.setTool(b.dataset.tool as Tool);
-    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => game.startPlacing(b.dataset.zone as Zone); });
+    for (const b of this.toolBtns) b.onclick = () => { game.setTool(b.dataset.tool as Tool); this.setBuild(false); };
+    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.startPlacing(b.dataset.zone as Zone); this.setBuild(false); }; });
+    this.q('[data-action="build"]').onclick = () => this.setBuild(!this.buildOpen);
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
     const setType = (t: RoadType) => { if (game.selected) game.retype(game.selected, t); else game.setRoadType(t); };
@@ -399,6 +432,7 @@ export class HUD {
       const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
       else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+      else if (v === 'purpose') game.purposeDots = !game.purposeDots;
       else if (v === 'menu') this.onPause?.();
       else if (v === 'sound') this.toggleSound();
     };
@@ -418,6 +452,7 @@ export class HUD {
     });
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
     this.q('[data-action="curve"]').onclick = () => { game.roadCurve = !game.roadCurve; };
+    root.querySelectorAll<HTMLButtonElement>('[data-ring]').forEach(b => { b.onclick = () => { game.ringSize = Number(b.dataset.ring) as RingSize; }; });
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
@@ -430,6 +465,15 @@ export class HUD {
     document.addEventListener('pointerdown', e => {
       if (this.helpOpen && !(e.target as Element).closest('.pop, .helpbtn')) this.setHelp(false, false);
     }, { signal });
+    // a click outside the Build menu closes it; on the map that click does nothing else (its pointerup is eaten too)
+    let eat = false;
+    document.addEventListener('pointerdown', e => {
+      const t = e.target as Element;
+      if (!this.buildOpen || t.closest('.bmenu, .buildbtn')) return;
+      this.setBuild(false);
+      if (t.tagName === 'CANVAS') { eat = true; e.stopPropagation(); }
+    }, { capture: true, signal });
+    document.addEventListener('pointerup', e => { if (eat) { eat = false; e.stopPropagation(); } }, { capture: true, signal });
     // capture phase on window: runs before Input's listener, so modal keys never reach the tools
     window.addEventListener('keydown', e => this.onKey(e), { capture: true, signal });
     this.bindTips(signal);
@@ -447,7 +491,10 @@ export class HUD {
       if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else this.closeLevel(); }
       return;
     }
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && this.buildOpen) {
+      e.stopPropagation();
+      this.setBuild(false, true);
+    } else if (e.key === 'Escape') {
       this.hideTip();
       this.setHelp(false);
     } else if (e.ctrlKey || e.metaKey || e.altKey) {
@@ -462,12 +509,28 @@ export class HUD {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
       this.show.feed = !this.show.feed;
+    } else if (e.key === 'p' || e.key === 'P') {
+      g.purposeDots = !g.purposeDots;
     }
   }
 
   private toggleSound(): void {
     sound.toggleMute();
     this.game.say(sound.mix.muted ? 'Sound off · Shift+M turns it on' : 'Sound on');
+  }
+
+  // Build menu: unfolds upward from the Build button, anchored to it
+  buildOpen = false;
+  setBuild(open: boolean, refocus = false): void {
+    if (open === this.buildOpen) return;
+    this.buildOpen = open;
+    const m = this.q('.bmenu'), b = this.q('.buildbtn');
+    if (open) m.style.setProperty('--bx', `${Math.max(8, Math.min(innerWidth - m.offsetWidth - 8, b.getBoundingClientRect().left))}px`);
+    m.classList.toggle('open', open);
+    b.setAttribute('aria-expanded', String(open));
+    this.hideTip();
+    if (open) m.querySelector<HTMLElement>('button[aria-pressed="true"]')?.focus({ preventScroll: true });
+    else if (refocus || m.contains(document.activeElement)) b.focus({ preventScroll: true });
   }
 
   private setHelp(open: boolean, refocus = true): void {
@@ -508,7 +571,7 @@ export class HUD {
     this.root.addEventListener('pointerdown', e => {
       if (e.pointerType !== 'touch') return;
       const el = target(e);
-      if (!el?.closest('.dock')) return;
+      if (!el?.closest('.dock, .bmenu')) return;
       press = setTimeout(() => { this.showTip(el, true); setTimeout(() => this.hideTip(), 2500); }, 500);
     }, { signal });
     const stop = () => clearTimeout(press);
@@ -524,7 +587,7 @@ export class HUD {
     this.tip.classList.toggle('touch', touch);
     this.tip.hidden = false;
     const r = el.getBoundingClientRect(), t = this.tip.getBoundingClientRect();
-    const above = !!el.closest('.dock, .tutorial');
+    const above = !!el.closest('.dock, .bmenu, .tutorial');
     const x = Math.max(8, Math.min(innerWidth - t.width - 8, r.left + r.width / 2 - t.width / 2));
     const y = above ? r.top - t.height - 8 : r.bottom + 8;
     this.tip.style.left = `${x}px`;
@@ -679,29 +742,27 @@ export class HUD {
     const [k, a, b] = cmd.split(':'), i = Number(a);
     if (k === 'close') g.inspect = null;
     else if (k === 'ctl') g.setControl(n, a as Control);
-    else if (k === 'mode') this.jMode = a as 'signals' | 'bans';
+    else if (k === 'ring') g.setControl(n, 'roundabout', i as RingSize);
     else if (k === 'ph') this.jPhase = i;
-    else if (k === 'mv') {
-      const m = Number(b) as Move;
-      if (n.control === 'light' && this.jMode === 'signals') g.editPlan(n, p => cycleSig(p, this.jPhase, i, m));
-      else g.editPlan(n, p => toggleBan(p, i, m));
-    } else if (k === 'sec') g.editPlan(n, p => setSeconds(p, i, p.phases[i].seconds + Number(b)));
+    else if (k === 'mv') g.editPlan(n, p => cycleSig(p, this.jPhase, i, Number(b) as Move));
+    else if (k === 'sec') g.editPlan(n, p => setSeconds(p, i, p.phases[i].seconds + Number(b)));
     else if (k === 'add') g.editPlan(n, p => { addPhase(p); this.jPhase = p.phases.length - 1; });
     else if (k === 'del') g.editPlan(n, p => removePhase(p, i));
     else if (k === 'pre') g.editPlan(n, p => applyPreset(p, a as Preset));
+    else if (k === 'lp') g.editPlan(n, p => linkPreset(p, n, a as LinkPreset));
   }
 
   private updateJunction(): void {
     const g = this.game, n = g.inspect, panel = this.q('.jpanel');
-    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
+    const key = n ? `${n.id}|${n.control}|${n.ring}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
     if (key === this.last.junction) return;
-    if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jMode = 'signals'; this.jPhase = 0; this.setHelp(false, false); }
+    if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jPhase = 0; this.setHelp(false, false); }
     this.last.junction = key;
     panel.hidden = !n;
     if (!n) return;
     const p = planOf(n), light = n.control === 'light', lock = g.lockOf('junction');
     this.jPhase = Math.min(this.jPhase, p.phases.length - 1);
-    const sigs = light && this.jMode === 'signals', ph = p.phases[this.jPhase];
+    const ring = n.control === 'roundabout', ph = p.phases[this.jPhase];
     const main = n.control === 'yield' ? mainEdges(n).map(e => approachOf(p, n, e)) : [];
     const price = (k: Control) => {
       const d = Math.round(g.controlPrice(k) - g.controlRefund(n));
@@ -712,13 +773,14 @@ export class HUD {
       return `<button class="lane wide" data-j="ctl:${k}" aria-pressed="${n.control === k}" aria-disabled="${!!kl}"`
         + ` data-tip="${kl || `${CONTROL_TIP[k]}${n.control === k ? '' : ` · ${price(k)}`}`}"><small>${CONTROL_LABEL[k]}</small></button>`;
     }).join('');
-    // Diagram: one arm per approach, three turn buttons beside its incoming lane (left farthest out)
+    // Light signals diagram: one arm per approach, three turn buttons beside its incoming lane (left farthest out); a turn no lane
+    // connects shows banned
     const arms = p.approaches.map((a, i) => {
+      const e = n.edges.find(x => approachOf(p, n, x) === i), lm = e ? links(p, n, e) : [];
       const ux = Math.cos(a), uy = Math.sin(a), rx = uy * 8, ry = -ux * 8;
       const turns = [42, 31, 20].map((r, m) => {
-        const x = ux * r + rx, y = uy * r + ry, ban = p.ban[i][m], s = ph?.sig[i][m] ?? 0;
-        const cls = sigs ? (ban ? 'off' : `s${s}`) : ban ? 'ban' : 'ok';
-        const state = sigs ? (ban ? 'banned' : ['red', 'yield', 'green'][s]) : ban ? 'banned' : 'allowed';
+        const x = ux * r + rx, y = uy * r + ry, ban = !lm.some(v => v >> m & 1), s = ph?.sig[i][m] ?? 0;
+        const cls = ban ? 'off' : `s${s}`, state = ban ? 'banned' : ['red', 'yield', 'green'][s];
         return `<g data-j="mv:${i}:${m}" class="${cls}" role="button" tabindex="0" aria-label="${MOVES[m]} from the ${compass(a)} arm: ${state}">`
           + `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.2"/><text x="${x.toFixed(1)}" y="${(y + 2.3).toFixed(1)}">${MOVES[m][0]}</text></g>`;
       }).join('');
@@ -726,10 +788,10 @@ export class HUD {
     });
     // all arms first, then the turn buttons on top
     const svg = arms.map(x => x[0]).join('') + arms.map(x => x[1]).join('');
-    const note = lock ? `${lock}.`
-      : sigs ? `Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.`
-      : 'Click a turn to ban or allow it. Cars reroute around banned turns.';
-    const phases = !sigs ? '' : `<div class="jph">${p.phases.map((x, i) => `
+    const note = lock ? `${lock}.` : ring ? '' : 'Drag from a lane to a road to connect it. Click a line to remove it.';
+    const set = !!p.lanes?.some(Boolean) || p.ban.some(x => x.some(Boolean));
+    const lanes = ring || lock ? '' : `<div class="jpre">${LINK_PRESETS.map(([k, l, t]) => `<button class="btn" data-j="lp:${k}" data-tip="${t}"${k === 'auto' && !set ? ' disabled' : ''}>${l}</button>`).join('')}</div>`;
+    const phases = !light || lock ? '' : `<div class="jph">${p.phases.map((x, i) => `
       <div class="row${i === n.phase ? ' now' : ''}">
         <button class="lane wide" data-j="ph:${i}" aria-pressed="${i === this.jPhase}" data-tip="${i === n.phase ? 'Running now. Click to edit' : 'Click to edit this phase'}"><small>Phase ${i + 1}</small></button>
         <button class="iconbtn" data-j="sec:${i}:-1" aria-label="Phase ${i + 1} shorter" ${x.seconds <= PHASE_MIN ? 'disabled' : ''}><b>−</b></button>
@@ -743,11 +805,17 @@ export class HUD {
     const was = (document.activeElement as Element | null)?.closest<HTMLElement>('.jpanel [data-j]')?.dataset.j;
     this.q('.jpanel .jbody').innerHTML = `
       <div class="seg jctl" role="group" aria-label="Control">${ctl}</div>
+      ${n.control === 'roundabout' ? `<div class="seg jctl" role="group" aria-label="Roundabout size">${RINGS.map((x, r) => {
+        const d = Math.round(g.controlPrice('roundabout', r as RingSize) - g.controlRefund(n)), room = r === n.ring ? '' : g.ringRoom(n, r as RingSize);
+        const t = `${ringTip(r, false)}${r === n.ring ? '' : room ? ` · ${room}` : ` · ${d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free'}`}`;
+        return `<button class="lane wide" data-j="ring:${r}" aria-pressed="${r === n.ring}" aria-disabled="${!!room}" data-tip="${t}"><small>${x.label}</small></button>`;
+      }).join('')}</div>` : ''}
       ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
-      ${light ? `<div class="seg jmode" role="group" aria-label="Turn clicks edit"><button class="lane wide" data-j="mode:signals" aria-pressed="${sigs}"><small>Signals</small></button><button class="lane wide" data-j="mode:bans" aria-pressed="${!sigs}"><small>Turn bans</small></button></div>` : ''}
-      <svg class="jsvg${lock ? ' locked' : ''}" viewBox="-54 -54 108 108" role="group" aria-label="Turns at this junction">${svg}<circle class="hub" r="6"/></svg>
-      <p class="jnote">${esc(note)}</p>
-      ${lock ? '' : phases}`;
+      ${note ? `<p class="jnote">${esc(note)}</p>` : ''}
+      ${lanes}
+      ${light ? `${lock ? '' : `<p class="jnote">Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.</p>`}
+      <svg class="jsvg${lock ? ' locked' : ''}" viewBox="-54 -54 108 108" role="group" aria-label="Light signals at this junction">${svg}<circle class="hub" r="6"/></svg>` : ''}
+      ${phases}`;
     if (was) this.root.querySelector<HTMLElement>(`.jpanel [data-j="${was}"]`)?.focus();
   }
 
@@ -790,7 +858,7 @@ export class HUD {
 
   // ---------- analysis panels ----------
   private updateViews(): void {
-    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${this.show.metrics}|${this.show.feed}|${m}`;
+    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${g.purposeDots}|${this.show.metrics}|${this.show.feed}|${m}`;
     if (key === this.last.views) return;
     this.last.views = key;
     // the speaker shows the sound's state (the menu's Sound page can change it too)
@@ -798,9 +866,10 @@ export class HUD {
     snd.innerHTML = icon(m ? 'mute' : 'sound');
     snd.setAttribute('aria-label', m ? 'Sound off' : 'Sound on');
     snd.dataset.tip = `Sound ${m ? 'off' : 'on'}: click to ${m ? 'turn it on' : 'mute'}. Volumes are in the menu`;
-    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', ...this.show };
+    const on: Record<string, boolean> = { heat: g.overlay === 'heat', noise: g.overlay === 'noise', purpose: g.purposeDots, ...this.show };
     this.root.querySelectorAll<HTMLElement>('[data-view][aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(on[b.dataset.view!])));
-    this.q('.legend').innerHTML = LEGEND[g.overlay];
+    const dots = g.purposeDots || g.overlay === 'heat';
+    this.q('.legend').innerHTML = g.overlay === 'none' && dots ? DOTS : LEGEND[g.overlay] + (dots ? DOTS : '');
     this.q('.mpanel').hidden = !this.show.metrics;
     this.q('.fpanel').hidden = !this.show.feed;
     this.last.metrics = this.last.feed = undefined;
@@ -894,7 +963,7 @@ export class HUD {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
       L.net = net;
-      (c.querySelector('.num') as HTMLElement).textContent = fmtMoney(money);
+      countTo(c.querySelector('.num') as HTMLElement, prev, money, fmtMoney);
       const n = c.querySelector('.net') as HTMLElement;
       n.textContent = `${net >= 0 ? '+' : ''}${fmtMoney(net)}/day`;
       n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
@@ -926,13 +995,20 @@ export class HUD {
       L.tool = g.tool;
       for (const b of this.toolBtns) b.setAttribute('aria-pressed', String(b.dataset.tool === g.tool));
       document.body.dataset.tool = g.tool;
+      // the Build button wears the active build tool's icon
+      const bt = BUILD.includes(g.tool), bb = this.q('.buildbtn');
+      bb.setAttribute('aria-pressed', String(bt));
+      const bi = this.q('.bico'); bi.innerHTML = icon(bt ? g.tool : 'build'); bi.dataset.t = bt ? g.tool : 'build';
+      bb.dataset.tip = `Build: roads, junctions and buildings${bt ? `. Now: ${TOOLS[g.tool].label}` : ''}`;
+      this.setBuild(false);
     }
 
     // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
     const pop = Math.round(g.population), next = levelPop(g.cityLevel + 1), prev = levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
     if (pk !== L.pop) {
+      countTo(this.q('.pv'), L.popN, pop, n => n.toLocaleString('en-US'));
       L.pop = pk;
-      this.q('.pv').textContent = pop.toLocaleString('en-US');
+      L.popN = pop;
       this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
       this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
       this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Happy homes fill up; unhappy ones empty out.`;
@@ -956,7 +1032,7 @@ export class HUD {
     }
 
     // Tray: one card per zone with buildings left; the dock badge counts them all
-    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}`;
+    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}|${g.tool}`;
     if (yk !== L.tray) {
       const before = L.trayN;
       L.tray = yk;
@@ -968,10 +1044,12 @@ export class HUD {
         b.setAttribute('aria-pressed', String(g.placing === z));
         (b.querySelector('.zn') as HTMLElement).textContent = `×${count(n)}`;
       });
-      this.q('.tray').hidden = total < 1;
+      // the left tray is the Place tool's picker; the Build menu holds the same cards
+      this.q('.tray').hidden = total < 1 || g.tool !== 'place';
+      this.q('.bnone').hidden = total >= 1;
       const badge = this.q('.badge');
       badge.hidden = total < 1;
-      this.q('[data-tool="place"]').classList.toggle('ready', total >= 1);
+      this.q('.buildbtn').classList.toggle('ready', total >= 1);
       badge.textContent = count(total);
       L.trayN = total;
       if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
@@ -1011,12 +1089,17 @@ export class HUD {
     this.updateBuilding();
     this.updateFeed();
     this.updateMetrics();
-    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}`;
+    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}|${g.ringSize}`;
     if (gk !== L.gsz) {
       L.gsz = gk;
       // the grid is built on the ground: its block size takes the elevation stepper's place
       this.q('.gsz').hidden = g.tool !== 'grid';
       this.q('.stepper').hidden = g.tool === 'grid';
+      // road options beside Build, for the tools that use them; the same for Edit and Demolish so those buttons stay put
+      this.q('.ctx').hidden = !['road', 'grid', 'edit', 'demolish', 'roundabout'].includes(g.tool);
+      // the roundabout tool only shows its ring size there
+      this.q('.ctx').classList.toggle('ring', g.tool === 'roundabout');
+      this.root.querySelectorAll<HTMLElement>('[data-ring]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.ring) === g.ringSize)));
       const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
       rm.hidden = g.tool !== 'road';
       rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;

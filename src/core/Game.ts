@@ -2,10 +2,10 @@ import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, shoreSplits, findStarterTown } from '../world/MapGenerator.ts';
-import type { Control, Node, Edge, EdgeFlags, RoadType } from '../network/RoadGraph.ts';
+import type { Control, Node, Edge, EdgeFlags, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { clonePlan, planFits, planOf } from '../network/Junction.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, RINGS, ringStop, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
@@ -99,6 +99,8 @@ export class Game {
   stats = { arrived: 0, smooth: 0, failed: 0, today: outcomes0() };
   metrics = new Metrics();
   overlay: Overlay = 'none';
+  // Purpose toggle (P): a roof dot in the trip purpose's colour on every vehicle
+  purposeDots = false;
   // Edit click: the car the camera follows (its card), the building whose card is open
   follow: Car | null = null;
   picked: Building | null = null;
@@ -128,6 +130,8 @@ export class Game {
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Grid tool block size in tiles
   gridSize: 3 | 4 | 6 = 4;
+  // Roundabout tool: size of the next ring (RINGS)
+  ringSize: RingSize = 0;
   // Road tool: true = new roads curve to meet the roads they join (tangentAt), false = always straight; a drag bends either
   roadCurve = true;
   // Interchange tool: the junction picked and the template shown on it
@@ -595,7 +599,7 @@ export class Game {
       if (!path || path.length < 2) { this.fail(b.pending.splice(i--, 1)[0], 'noroute'); continue; }
       const e = this.graph.edgeBetween(b.node, path[1]);
       if (!e) continue;
-      const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1));
+      const lane = this.graph.pickLane(e, b.node, this.graph.turn(path, 1), path[2]);
       const f = lane?.cars[0];
       if (!lane || (f && f.s < (f.len + len) / 2 + GAP * 2)) continue;
       b.pending.splice(i, 1);
@@ -837,18 +841,18 @@ export class Game {
     return this.edgePrice(e) * this.refundX(e.day);
   }
 
-  controlPrice(kind: Control): number {
-    return CONTROL_COST[kind];
+  controlPrice(kind: Control, ring: RingSize = this.ringSize): number {
+    return CONTROL_COST[kind] * (kind === 'roundabout' ? RINGS[ring].cost : 1);
   }
 
   controlRefund(n: Node): number {
-    return CONTROL_COST[n.control] * this.refundX(n.controlDay);
+    return this.controlPrice(n.control, n.ring) * this.refundX(n.controlDay);
   }
 
   upkeepPerDay(): number {
     let sum = 0;
     for (const e of this.graph.edges) sum += this.edgePrice(e) * T.UPKEEP_RATE;
-    for (const n of this.graph.nodes) sum += CONTROL_UPKEEP[n.control];
+    for (const n of this.graph.nodes) sum += CONTROL_UPKEEP[n.control] * (n.control === 'roundabout' ? RINGS[n.ring].cost : 1);
     return sum * DIFFICULTY[this.cfg.difficulty].upkeep;
   }
 
@@ -1527,16 +1531,40 @@ export class Game {
   placeControl(p: Vec, kind: Control): void {
     const n = this.graph.nearestNode(p, NODE_R + 6);
     if (!n || n.building || n.edges.length < 3) { this.say('Place on an intersection'); return; }
-    this.setControl(n, kind);
+    this.setControl(n, kind, this.ringSize);
   }
 
-  // Switching sells the old control under the refund rule; 'none' just sells it
-  setControl(n: Node, kind: Control): boolean {
-    if (n.control === kind) return true;
+  // Why a ring of this size does not fit at n ('' = it fits): every approach, followed through the bends of its road up to the next
+  // junction or door, needs room for a queued car behind the stop line and the far end's box. A small ring fits wherever a junction
+  // does (as before sizes).
+  // ponytail: checked when placed only; a road built later onto a large ring can still be short
+  ringRoom(n: Node, ring: RingSize): string {
+    if (!ring) return '';
+    const need = ringStop(ring) + CAR_LEN + GAP + NODE_R;
+    for (const e0 of n.edges) {
+      let e = e0, at = n, len = 0;
+      for (let k = 0; k < 50; k++) {
+        len += e.length;
+        at = e.a === at ? e.b : e.a;
+        if (len >= need || at === n || at.building || at.control !== 'none' || at.edges.length !== 2) break;
+        e = at.edges[0] === e ? at.edges[1] : at.edges[0];
+      }
+      if (len < need) return `Too tight for a ${RINGS[ring].label.toLowerCase()} roundabout: a road leaves it after ${Math.round(len)}px, needs ${Math.round(need)}`;
+    }
+    return '';
+  }
+
+  // Switching sells the old control under the refund rule; 'none' just sells it. A roundabout keeps its size unless one is given
+  // (the tool's for a new one); a resize is a switch.
+  setControl(n: Node, kind: Control, ring: RingSize = n.control === 'roundabout' ? n.ring : this.ringSize): boolean {
+    if (n.control === kind && (kind !== 'roundabout' || n.ring === ring)) return true;
     const locked = kind === 'roundabout' ? this.lockOf('roundabout') : '';
     if (locked) { this.say(locked); return false; }
-    const cost = CONTROL_COST[kind] - this.controlRefund(n);
+    const tight = kind === 'roundabout' ? this.ringRoom(n, ring) : '';
+    if (tight) { this.say(tight); return false; }
+    const cost = this.controlPrice(kind, ring) - this.controlRefund(n);
     if (cost > this.money) { this.say('Not enough money'); return false; }
+    if (kind === 'roundabout') n.ring = ring;
     n.control = kind;
     n.controlDay = this.today;
     n.phase = 0;
@@ -1545,7 +1573,7 @@ export class Game {
     return true;
   }
 
-  // Edits a copy of the junction's plan (phases, protected lefts, turn bans); free. A ban change reroutes every car not already
+  // Edits a copy of the junction's plan (phases, protected lefts, lane connections); free. A connection change reroutes every car not already
   // granted through the junction.
   editPlan(n: Node, edit: (p: JunctionPlan) => void): void {
     const locked = this.lockOf('junction');
@@ -1554,7 +1582,7 @@ export class Game {
     edit(p);
     n.plan = p;
     if (n.phase >= p.phases.length) { n.phase = 0; n.phaseTimer = 0; }
-    if (JSON.stringify(p.ban) !== JSON.stringify(old.ban)) for (const c of this.cars) if (c.granted !== n) c.path = null;
+    if (JSON.stringify([p.ban, p.lanes]) !== JSON.stringify([old.ban, old.lanes])) for (const c of this.cars) if (c.granted !== n) c.path = null;
   }
 
   say(text: string): void {
