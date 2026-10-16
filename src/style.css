@@ -427,6 +427,7 @@ kbd {
 #hud .buildbtn.ready[aria-pressed="false"] > .bico .ico { color: var(--accent); }
 .bico { display: inline-flex; }
 /* the active tool's options beside Build (road shape, type, elevation) */
+.ctx.ring > :not(.rsz), .ctx:not(.ring) > .rsz { display: none; }
 .ctx { display: flex; align-items: center; gap: .375em; padding-left: .375em; border-left: 1px solid var(--soft); }
 /* Build menu: unfolds upward from the Build button (--bx: its left edge, set on open) */
 .bmenu {

@@ -578,6 +578,38 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   }
   if (lefts < 3 || w.score !== 8) fail(`protected lefts: ${lefts} lefts granted, ${w.score} of 8 trips arrived`);
 }
+// Roundabout sizes: a 4-arm cross flooded from every arm; a large ring holds more cars at once than a small one and every car still
+// gets through. A large ring is refused where a road leaves it after 70px, a small one fits there.
+{
+  const most: number[] = [];
+  for (const size of [0, 2] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), arms = [[1000, 550], [1450, 1000], [1000, 1450], [550, 1000]] as const;
+    const H = arms.map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, DEFAULT_TYPE));
+    w.demandOff = true;
+    w.ringSize = size;
+    w.placeControl(J, 'roundabout');
+    if (J.control !== 'roundabout' || J.ring !== size) fail(`ring sizes: size ${size} not placed`);
+    H.forEach((h, i) => {
+      const e = wg.edgeBetween(h, J)!, lane = wg.lanesFrom(e, h)[0]!;
+      for (let k = 0; k < 6; k++) {
+        const c = new Car(lane, trip(h, H[(i + 2) % 4]));
+        c.s = 330 - k * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    let max = 0;
+    for (let t = 0; t < 60 * 60 && w.cars.length; t++) { w.update(DT); max = Math.max(max, J.occupants.size); }
+    if (w.score !== 24) fail(`ring sizes: ${w.score} of 24 cars through a size ${size} ring`);
+    most.push(max);
+    if (size) continue;
+    const K = wg.addNode(1300, 1300);
+    for (const [x, y] of [[1370, 1300], [1300, 1100], [1100, 1300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+    if (w.setControl(K, 'roundabout', 2) || !w.setControl(K, 'roundabout', 0)) fail(`ring sizes: room check on a 70px arm (${w.ringRoom(K, 2)})`);
+  }
+  if (most[1] <= most[0]) fail(`ring sizes: large ring held ${most[1]} cars at once, small ${most[0]}`);
+}
 // Yield: at a junction of an avenue (main road) and a street, a street car at the line waits while an avenue car is queued;
 // at a stop junction a car is only granted from a standstill
 for (const kind of ['yield', 'stop'] as const) {

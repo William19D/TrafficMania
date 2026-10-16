@@ -1,4 +1,4 @@
-import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, stopDist } from '../network/RoadGraph.ts';
+import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, boxR, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
 import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
@@ -174,7 +174,7 @@ export class Car {
     // (at the next line, or in a queue through a driveway junction): on a link shorter than ~NODE_R + stopDist + the car, holding
     // the box there gridlocks the two junctions.
     // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
-    if (this.clearing && (this.s - this.len / 2 > NODE_R || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
+    if (this.clearing && (this.s - this.len / 2 > boxR(this.clearing) || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';

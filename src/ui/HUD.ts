@@ -10,7 +10,8 @@ import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
 import type { Vec } from '../util/geom.ts';
-import type { Control, RoadType } from '../network/RoadGraph.ts';
+import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
+import { RINGS } from '../network/RoadGraph.ts';
 import type { Move, Preset } from '../network/Junction.ts';
 import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, mainEdges, planOf, removePhase, setSeconds, toggleBan } from '../network/Junction.ts';
 import { icon } from './icons.ts';
@@ -22,7 +23,7 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and turn bans.` },
-  roundabout: { label: 'Roundabout', tip: `Click an intersection. Lets 3 cars through at once. ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring takes more cars at once and needs longer roads). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
   edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and turn bans, or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
@@ -64,6 +65,10 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
+const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: ${RINGS[r].cap} cars at once${price ? ` · ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
+// one button per roundabout size; a = the data attribute it sets
+const ringBtns = (a: string, on: number): string => RINGS.map((x, r) =>
+  `<button class="lane wide" ${a}="${r}" aria-pressed="${r === on}" data-tip="${ringTip(r)}"><small>${x.label}</small></button>`).join('');
 // Road tool shape, one toggle showing the active mode (a two-button segment did not fit the dock at 1280px)
 const RMODE_TIP = {
   straight: 'Straight roads: they run straight from click to click. Click for curves',
@@ -131,7 +136,7 @@ const CONTROL_TIP: Record<Control, string> = {
   yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
   stop: 'All-way stop: every car stops at the line, then one at a time',
   light: 'Traffic light: phases you can edit, protected lefts',
-  roundabout: 'Roundabout: up to 3 cars at once, no stopping when it is clear',
+  roundabout: 'Roundabout: several cars at once (more on a bigger ring), no stopping when it is clear',
 };
 const MOVES = ['Left', 'Straight', 'Right'];
 const PRESETS: [Preset, string, string][] = [
@@ -327,6 +332,7 @@ export class HUD {
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
+        <div class="seg rsz" role="group" aria-label="Roundabout size">${ringBtns('data-ring', 0)}</div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
           <div class="seg tiers" role="group" aria-label="Road tier">
@@ -429,6 +435,7 @@ export class HUD {
     });
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
     this.q('[data-action="curve"]').onclick = () => { game.roadCurve = !game.roadCurve; };
+    root.querySelectorAll<HTMLButtonElement>('[data-ring]').forEach(b => { b.onclick = () => { game.ringSize = Number(b.dataset.ring) as RingSize; }; });
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
@@ -718,6 +725,7 @@ export class HUD {
     const [k, a, b] = cmd.split(':'), i = Number(a);
     if (k === 'close') g.inspect = null;
     else if (k === 'ctl') g.setControl(n, a as Control);
+    else if (k === 'ring') g.setControl(n, 'roundabout', i as RingSize);
     else if (k === 'mode') this.jMode = a as 'signals' | 'bans';
     else if (k === 'ph') this.jPhase = i;
     else if (k === 'mv') {
@@ -732,7 +740,7 @@ export class HUD {
 
   private updateJunction(): void {
     const g = this.game, n = g.inspect, panel = this.q('.jpanel');
-    const key = n ? `${n.id}|${n.control}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
+    const key = n ? `${n.id}|${n.control}|${n.ring}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jMode}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
     if (key === this.last.junction) return;
     if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jMode = 'signals'; this.jPhase = 0; this.setHelp(false, false); }
     this.last.junction = key;
@@ -782,6 +790,11 @@ export class HUD {
     const was = (document.activeElement as Element | null)?.closest<HTMLElement>('.jpanel [data-j]')?.dataset.j;
     this.q('.jpanel .jbody').innerHTML = `
       <div class="seg jctl" role="group" aria-label="Control">${ctl}</div>
+      ${n.control === 'roundabout' ? `<div class="seg jctl" role="group" aria-label="Roundabout size">${RINGS.map((x, r) => {
+        const d = Math.round(g.controlPrice('roundabout', r as RingSize) - g.controlRefund(n)), room = r === n.ring ? '' : g.ringRoom(n, r as RingSize);
+        const t = `${ringTip(r, false)}${r === n.ring ? '' : room ? ` · ${room}` : ` · ${d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free'}`}`;
+        return `<button class="lane wide" data-j="ring:${r}" aria-pressed="${r === n.ring}" aria-disabled="${!!room}" data-tip="${t}"><small>${x.label}</small></button>`;
+      }).join('')}</div>` : ''}
       ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
       ${light ? `<div class="seg jmode" role="group" aria-label="Turn clicks edit"><button class="lane wide" data-j="mode:signals" aria-pressed="${sigs}"><small>Signals</small></button><button class="lane wide" data-j="mode:bans" aria-pressed="${!sigs}"><small>Turn bans</small></button></div>` : ''}
       <svg class="jsvg${lock ? ' locked' : ''}" viewBox="-54 -54 108 108" role="group" aria-label="Turns at this junction">${svg}<circle class="hub" r="6"/></svg>
@@ -1059,14 +1072,17 @@ export class HUD {
     this.updateBuilding();
     this.updateFeed();
     this.updateMetrics();
-    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}`;
+    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}|${g.ringSize}`;
     if (gk !== L.gsz) {
       L.gsz = gk;
       // the grid is built on the ground: its block size takes the elevation stepper's place
       this.q('.gsz').hidden = g.tool !== 'grid';
       this.q('.stepper').hidden = g.tool === 'grid';
       // road options beside Build, for the tools that use them; the same for Edit and Demolish so those buttons stay put
-      this.q('.ctx').hidden = !['road', 'grid', 'edit', 'demolish'].includes(g.tool);
+      this.q('.ctx').hidden = !['road', 'grid', 'edit', 'demolish', 'roundabout'].includes(g.tool);
+      // the roundabout tool only shows its ring size there
+      this.q('.ctx').classList.toggle('ring', g.tool === 'roundabout');
+      this.root.querySelectorAll<HTMLElement>('[data-ring]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.ring) === g.ringSize)));
       const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
       rm.hidden = g.tool !== 'road';
       rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;

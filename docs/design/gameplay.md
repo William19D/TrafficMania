@@ -556,3 +556,12 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - The night glows draw over viaducts when a lamp, window or headlight lies underneath.
   - Lane arrows ignore turn bans and lane-by-turn rules: every incoming lane shows every turn the junction allows.
   - Signs and the roundabout island are tinted at night like everything else. Only light heads are redrawn.
+
+**Q4 Roundabout sizes.**
+- `RoadGraph.RINGS`: Small (ring radius `NODE_R` + 5, 3 cars at once, x1 price), Medium (+14, 5 cars, x1.6), Large (+24, 8 cars, x2.4). `Node.ring` holds the size; it is saved (old saves load as Small). Every former use of the global `RING_R` / `RING_IN` reads the node: `ringR(n)`, `ringIn(n)`, `stopDist` (outside the ring), the admission cap, `carPos` / `ringPos`, and `boxR(n)`, how far past a roundabout a car must be before it leaves the box (off the ring, `NODE_R` elsewhere), so a bigger ring holds its cars while they circle.
+- Price and upkeep scale with the multiplier (`controlPrice(kind, ring)`, `controlRefund`, `upkeepPerDay`). A resize is a switch: the old ring is sold under the refund rule and the new one bought.
+- Room (`Game.ringRoom`): Medium and Large need every approach, followed through the bends of its road up to the next junction or door, at least `ringStop + CAR_LEN + GAP + NODE_R` long (71 / 81px), or the placement is refused with `Too tight for a large roundabout: a road leaves it after Npx, needs M`. Small fits wherever a junction does, as before. ponytail: checked when placed only; a road built later onto a large ring can still be short.
+- UI: with the Roundabout tool the dock's options strip shows Small / Medium / Large (`Game.ringSize`); the hover previews the ring of that size with its price or refusal, and clicking an existing roundabout resizes it. The junction panel of a roundabout has the same three sizes with the price difference, or the room reason, in their tooltips.
+- Rendering: ring, sidewalk, island, stop lines, the demolish highlight and the hit test (`nearestNode`, anywhere on the ring) follow the size; lane markings stop at the outside of the ring.
+- simcheck: a 4-arm cross flooded from every arm (24 cars) holds more cars at once on a Large ring than on a Small one and every car gets through; a Large ring is refused where a road leaves it after 70px, a Small one fits.
+- Known gaps: no 2-lane XL ring (the ring is one lane at `LANE_OFFSET`); a car's ride round a bigger ring is the same straight-line distance in the sim (`2 * ringIn`), so it visibly speeds up on the arc.

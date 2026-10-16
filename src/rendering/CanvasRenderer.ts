@@ -1,7 +1,7 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, roadWidth } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
 import { approachOf, mainEdges, planOf } from '../network/Junction.ts';
 import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
@@ -228,7 +228,7 @@ export class CanvasRenderer {
       for (const n of joints) {
         const j = jointEdge(n, 0);
         if (!j || !walked(j)) continue;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, col, ROAD_W + extra);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), col, ROAD_W + extra);
         else this.circle(n.x, n.y, (j.width + extra) / 2, col);
       }
     }
@@ -238,7 +238,7 @@ export class CanvasRenderer {
       for (const e of ground) if (!(extra && e.bridge)) this.line(e, e.drive ? DRIVE[key] : TIERS[e.type.tier][key], e.width + extra - (e.drive ? 4 : 0));
       for (const n of joints) {
         const j = jointEdge(n, 0), color = j?.drive ? DRIVE[key] : TIERS[j?.type.tier ?? 'street'][key];
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, color, ROAD_W + extra);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), color, ROAD_W + extra);
         else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
       }
     };
@@ -247,7 +247,13 @@ export class CanvasRenderer {
 
     // Lane markings: centre line / median, lane separators, shoulders, one-way chevrons; driveways stay plain. Then lane arrows,
     // manholes and lamp posts
-    for (const e of ground) if (!e.drive) this.markings(e.a, e.b, e.type);
+    // they stop outside a roundabout's ring
+    const cut = (n: Node, o: Node): Vec => {
+      if (n.control !== 'roundabout') return n;
+      const k = Math.min(0.5, (ringR(n) + ROAD_W / 2) / (Math.hypot(o.x - n.x, o.y - n.y) || 1));
+      return { x: n.x + (o.x - n.x) * k, y: n.y + (o.y - n.y) * k };
+    };
+    for (const e of ground) if (!e.drive) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
     this.details(ground);
     if (game.overlay === 'heat') this.heatMap(ground, levelNodes(0));
 
@@ -525,7 +531,7 @@ export class CanvasRenderer {
       }
       const n = g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
-        this.ring(n.x, n.y, NODE_R + 6, RED, 3);
+        this.ring(n.x, n.y, n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 6, RED, 3);
         label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
@@ -543,11 +549,14 @@ export class CanvasRenderer {
       const n = g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
-      const cost = game.controlPrice(kind) - game.controlRefund(n);
+      const cost = game.controlPrice(kind) - game.controlRefund(n), ring = kind === 'roundabout';
+      const here = n.control === kind && (!ring || n.ring === game.ringSize);
       const reason = n.building || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
-        : n.control !== kind && cost > game.money ? 'Not enough money' : null;
-      this.ring(n.x, n.y, NODE_R + 6, reason ? RED : GREEN, 3);
-      const place = n.control === kind ? 'Already here' : `${kind === 'light' ? 'Place traffic light' : 'Place roundabout'} · ${fmtMoney(cost)}`;
+        : ring && !here && game.ringRoom(n, game.ringSize) || (!here && cost > game.money ? 'Not enough money' : null);
+      // a roundabout previews the ring of the chosen size
+      this.ring(n.x, n.y, ring ? RINGS[game.ringSize].r + ROAD_W / 2 + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
+      const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Resize to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()} roundabout`;
+      const place = here ? 'Already here' : `${what} · ${cost < 0 ? '+' : ''}${fmtMoney(Math.abs(cost))}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
       // a node or road of another level: the road ramps from there to the dock level
@@ -891,7 +900,7 @@ export class CanvasRenderer {
     for (const n of nodes) {
       if (n.control === 'roundabout') {
         // Central island in the land color
-        this.circle(n.x, n.y, NODE_R + 5 - ROAD_W / 2, this.land);
+        this.circle(n.x, n.y, ringR(n) - ROAD_W / 2, this.land);
         ctx.strokeStyle = ROAD_OUT;
         ctx.lineWidth = 1.5;
         ctx.stroke();
@@ -899,7 +908,7 @@ export class CanvasRenderer {
       if (n.control !== 'roundabout' && !junction(n)) continue;
       // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way or a plain junction. ponytail: on
       // roundabouts it goes outside the ring (at NODE_R+4 it would fall inside it)
-      const d0 = n.control === 'roundabout' ? NODE_R + 5 + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
+      const d0 = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
       // a light's zebra starts past the widest road crossing the arm, its stop line just behind it. ponytail: cars still stop at
       // stopDist, so on a street meeting an avenue they halt a few px past the line
       const zebra = (e: Edge): number => n.control === 'light' ? Math.max(d0 - 5.5, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 0.5)) : 0;
@@ -985,7 +994,7 @@ export class CanvasRenderer {
     const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
         const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, NODE_R + 5, c, ROAD_W + extra);
+        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), c, ROAD_W + extra);
         else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
