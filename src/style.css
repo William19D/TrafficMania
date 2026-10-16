@@ -13,8 +13,19 @@
   --danger-soft: #FDECEC;
   --warning: #E0A100;
   --radius: 12px;
-  --shadow: 0 2px 8px rgba(0, 0, 0, .08);
+  --shadow: 0 1px 2px rgba(60, 50, 30, .10), 0 6px 18px -4px rgba(60, 50, 30, .18);
+  --shadow-hi: 0 2px 4px rgba(60, 50, 30, .12), 0 16px 40px -8px rgba(60, 50, 30, .30);
+  --sheen: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -1px 0 rgba(60, 50, 30, .06);
+  --panel-bg: linear-gradient(180deg, #FFFFFF 0%, #FBFAF7 55%, #F3F1EB 100%);
+  --well: inset 0 1px 3px rgba(60, 50, 30, .16), inset 0 0 0 1px rgba(60, 50, 30, .06);
+  --accent-grad: linear-gradient(180deg, #4F8CF7 0%, #2F6FED 55%, #2459C8 100%);
+  /* paper grain: a tiny turbulence tile, drawn once by the browser */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .3 0 0 0 0 .2 0 0 0 .07 0'/%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)'/%3E%3C/svg%3E");
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  /* display: Bahnschrift (Windows), DIN (macOS/iOS), rounded system faces elsewhere */
+  --font-display: Bahnschrift, 'DIN Alternate', 'DIN Next', ui-rounded, 'SF Pro Rounded', 'Trebuchet MS', system-ui, sans-serif;
   --ease: cubic-bezier(.2, .7, .3, 1);
+  --spring: cubic-bezier(.3, 1.4, .5, 1);
   --edge-t: max(12px, env(safe-area-inset-top));
   --edge-r: max(12px, env(safe-area-inset-right));
   --edge-b: max(16px, env(safe-area-inset-bottom));
@@ -24,7 +35,7 @@
 body {
   margin: 0;
   overflow: hidden;
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: var(--font-ui);
   background: var(--land);
   color: var(--ink);
   user-select: none;
@@ -59,10 +70,12 @@ body[data-tool="interchange"] canvas { cursor: pointer; }
 
 /* ---------- primitives ---------- */
 .panel {
-  background: var(--panel);
+  background: var(--grain), var(--panel-bg);
+  background-color: var(--panel);
   border: 1px solid var(--line);
+  border-bottom-color: #C9C6BE;
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: var(--sheen), var(--shadow);
 }
 
 .ico { display: inline-flex; flex: none; width: 1.5em; height: 1.5em; position: relative; }
@@ -78,9 +91,12 @@ body[data-tool="interchange"] canvas { cursor: pointer; }
   margin: 0;
   padding: 0;
   cursor: pointer;
-  transition: background-color .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease), opacity .15s var(--ease);
+  transition: background-color .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease), opacity .15s var(--ease),
+    box-shadow .15s var(--ease), transform .18s var(--spring);
 }
 :is(#hud, #menu) button:where(:hover:not(:disabled)) { background: var(--soft); }
+/* press feedback: every button sinks a pixel and squeezes a little */
+:is(#hud, #menu) button:active:not(:disabled) { transform: translateY(1px) scale(.96); transition-duration: .05s; }
 :is(#hud, #menu) button:where(:disabled) { opacity: .4; cursor: not-allowed; }
 
 :is(#hud, #menu) :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -869,3 +885,143 @@ kbd {
 #hud .jarm .arr[aria-pressed="true"] { background: var(--accent); color: #fff; }
 #hud .jarm .arr:disabled { opacity: .35; }
 #hud .jarm .jpre .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- finish: depth, colour and motion (docs/hud-design.md, Visual language) ---------- */
+/* type: numbers, labels and headings in the display face */
+.num, #hud b, .tool .lbl, .score, .pop h2, .modal h2, .tutorial h3, .bgrp h3, .tray-h, .lvl-grid h3, #menu h1, #menu h2, #menu .flabel {
+  font-family: var(--font-display);
+}
+.pop h2, .modal h2, .tutorial h3, #menu h2 { font-weight: 700; letter-spacing: .01em; }
+.bgrp h3, .lvl-grid h3, #menu .flabel { letter-spacing: .08em; font-weight: 700; }
+#menu .brand {
+  font-weight: 800;
+  letter-spacing: -.01em;
+  background: linear-gradient(180deg, #5A95F8 0%, #2F6FED 50%, #1D4CB0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 2px 0 rgba(29, 76, 176, .18));
+}
+
+/* surfaces: wells for segmented groups and tracks, raised caps for keys and buttons */
+.seg, #menu .opts { background: #E9E7E0; box-shadow: var(--well); }
+.res { box-shadow: var(--sheen), var(--shadow); }
+.dock { box-shadow: var(--sheen), var(--shadow-hi); }
+.bmenu, .pop, .tutorial { box-shadow: var(--sheen), var(--shadow-hi); }
+kbd { background: linear-gradient(180deg, #FFFFFF, #ECEAE4); box-shadow: inset 0 -1px 0 rgba(60, 50, 30, .12); }
+.tool .kb { background: linear-gradient(180deg, #FFFFFF, #ECEAE4); box-shadow: 0 0 0 1px var(--line); }
+:is(#hud, #menu) .btn:not(.ghost):not(.primary) {
+  background: linear-gradient(180deg, #FFFFFF, #EFEDE7);
+  box-shadow: var(--sheen), 0 1px 2px rgba(60, 50, 30, .10);
+}
+:is(#hud, #menu) .btn:not(.ghost):not(.primary):hover:not(:disabled) { background: linear-gradient(180deg, #FFFFFF, #E7E4DC); border-color: #C9C6BE; }
+:is(#hud, #menu) .btn.primary:not(:disabled) {
+  background: var(--accent-grad);
+  border-color: #2459C8;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), inset 0 -2px 0 rgba(0, 0, 0, .15), 0 3px 10px -3px rgba(47, 111, 237, .7);
+}
+:is(#hud, #menu) .btn.primary:hover:not(:disabled) { filter: brightness(1.07); }
+#menu .slot { background: linear-gradient(180deg, #FFFFFF, #F1EFE9); box-shadow: var(--sheen); }
+
+/* pressed toggles: a lit accent cap (destroy and tier keep their own looks) */
+#hud :is(.speed, .tool, .lane:not(.tier), .jarm .arr)[aria-pressed="true"], #hud .views [aria-pressed="true"] {
+  background: var(--accent-grad);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), inset 0 -2px 0 rgba(0, 0, 0, .18), 0 3px 10px -3px rgba(47, 111, 237, .75);
+}
+#hud .tool.destroy[aria-pressed="true"] { background: linear-gradient(180deg, #FFF4F4, var(--danger-soft)); box-shadow: 0 3px 10px -3px rgba(229, 72, 77, .6); }
+/* hover: unpressed tools lift onto a light cap */
+#hud :is(.tool, .lane, .speed, .zone, .iconbtn, .tline):hover:not(:disabled):not([aria-pressed="true"]) {
+  background: linear-gradient(180deg, #FFFFFF, #EEECE6);
+  box-shadow: inset 0 0 0 1px var(--line), 0 2px 6px -1px rgba(60, 50, 30, .16);
+}
+#hud .tool:hover:not(:disabled):not(:active) { transform: translateY(-2px); }
+#hud .zone[aria-pressed="true"]:hover { background: var(--accent-soft); }
+
+/* coloured icon tiles: every tool has a hue; the tile carries it, the glyph is white */
+.tool[data-tool="road"], .bico[data-t="road"] { --hue: #56627A; }
+.tool[data-tool="grid"], .bico[data-t="grid"] { --hue: #7C5CE6; }
+.tool[data-tool="light"], .bico[data-t="light"] { --hue: #E08A00; }
+.tool[data-tool="roundabout"], .bico[data-t="roundabout"] { --hue: #0F9C9C; }
+.tool[data-tool="interchange"], .bico[data-t="interchange"] { --hue: #4F5BD5; }
+.tool[data-tool="place"], .bico[data-t="place"] { --hue: #2E9E5B; }
+.tool[data-tool="edit"] { --hue: #2F6FED; }
+.tool[data-tool="demolish"] { --hue: #E5484D; }
+.bico[data-t="build"], .bico:not([data-t]) { --hue: #EA6F1A; }
+#hud :is(.tool > .ico:not(.lock, .chev), .bico > .ico) {
+  width: 2em; height: 2em;
+  padding: .25em;
+  border-radius: 9px;
+  color: #fff;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--hue, #6B6B68) 72%, #fff) 0%, var(--hue, #6B6B68) 55%, color-mix(in srgb, var(--hue, #6B6B68) 78%, #000) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), inset 0 -2px 0 rgba(0, 0, 0, .2), 0 2px 4px -1px color-mix(in srgb, var(--hue, #6B6B68) 60%, transparent);
+  transition: filter .15s var(--ease), box-shadow .15s var(--ease);
+}
+#hud .tool:hover > .ico:not(.lock, .chev), #hud .tool:hover > .bico > .ico { filter: brightness(1.1) saturate(1.1); }
+#hud .tool[aria-pressed="true"] > .ico:not(.lock, .chev), #hud .tool[aria-pressed="true"] > .bico > .ico { box-shadow: 0 0 0 2px rgba(255, 255, 255, .9), 0 2px 6px rgba(0, 0, 0, .25); }
+#hud .tool.destroy[aria-pressed="true"] > .ico { box-shadow: 0 0 0 2px #fff, 0 0 0 4px rgba(229, 72, 77, .35); }
+/* waiting buildings: the tile glows instead of turning blue */
+#hud .tool.ready[aria-pressed="false"] > .ico:not(.lock), #hud .buildbtn.ready[aria-pressed="false"] > .bico .ico {
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 0 0 2px var(--accent), 0 0 10px rgba(47, 111, 237, .55);
+}
+#hud [aria-disabled="true"] > .ico:not(.lock) { filter: grayscale(1); }
+.tool .badge { background: linear-gradient(180deg, #4F8CF7, #2459C8); box-shadow: 0 0 0 2px #fff, 0 2px 4px rgba(0, 0, 0, .2); }
+
+/* resource badges: round glossy coins in the resource's colour */
+.chip.money { --hue: #2E9E5B; }
+.chip.people { --hue: #2F6FED; }
+.chip.happy { --hue: #E0A100; }
+.chip.happy.good { --hue: var(--success); }
+.chip.happy.bad, .chip.danger { --hue: var(--danger); }
+.chip.lvl { --hue: #E89B00; }
+#hud .chip > .ico {
+  width: 1.75em; height: 1.75em;
+  padding: .28em;
+  border-radius: 50%;
+  color: #fff;
+  background: radial-gradient(circle at 35% 28%, color-mix(in srgb, var(--hue) 55%, #fff) 0%, var(--hue) 55%, color-mix(in srgb, var(--hue) 75%, #000) 100%);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, .2), 0 1px 3px color-mix(in srgb, var(--hue) 50%, transparent);
+}
+.chip.danger { background: linear-gradient(180deg, #FFF6F6, var(--danger-soft)); }
+#hud .chip:hover { background: linear-gradient(180deg, rgba(255, 255, 255, .9), rgba(236, 234, 228, .9)); }
+#hud .chip.danger:hover { background: var(--danger-soft); }
+
+/* bars: inset tracks, glossy fills */
+.pbar { height: 4px; box-shadow: var(--well); background: #E6E3DC; }
+.tut-head .bar, .pbar2 > i { box-shadow: var(--well); background: #E6E3DC; }
+.pbar i, .tut-head .bar i, .pbar2 > i > i { background-image: linear-gradient(180deg, rgba(255, 255, 255, .45), rgba(255, 255, 255, 0) 70%); }
+.day { box-shadow: var(--well); }
+.stats > div, .lvl-grid > div, .jarm { background: linear-gradient(180deg, #F7F6F2, #EFEDE7); box-shadow: inset 0 0 0 1px rgba(60, 50, 30, .06); }
+
+/* toasts and tooltip */
+.toast { background: var(--grain), var(--panel-bg); box-shadow: var(--sheen), var(--shadow-hi); border-left: 4px solid var(--accent); animation: toast-in .28s var(--spring); }
+.toast.err { background: linear-gradient(180deg, #FFF6F6, var(--danger-soft)); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(12px) scale(.94); } }
+.tip {
+  border-radius: 8px;
+  background: linear-gradient(180deg, #3B3B3B, #222);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 6px 16px rgba(0, 0, 0, .3);
+  animation: fade .12s var(--ease);
+}
+
+/* panels arrive: side panels drop in, bottom cards rise, dialogs pop */
+.pop { animation: drop-in .22s var(--ease); }
+.tutorial { animation: rise-in .26s var(--ease); }
+.modal { animation: fade .2s var(--ease); background: radial-gradient(ellipse at center, rgba(30, 28, 24, .25), rgba(30, 28, 24, .55)); }
+.modal .box, #menu .box { background: var(--grain), var(--panel-bg); box-shadow: var(--sheen), 0 24px 60px -12px rgba(30, 28, 24, .45); animation: pop-in .26s var(--spring); }
+#menu { background: radial-gradient(ellipse at center, rgba(30, 28, 24, .2), rgba(30, 28, 24, .5)); }
+.bmenu.open .bgrp { animation: rise-in .24s var(--ease) both; }
+.bmenu.open .bgrp:nth-child(2) { animation-delay: .03s; }
+.bmenu.open .bgrp:nth-child(3) { animation-delay: .06s; }
+.bmenu.open .bgrp:nth-child(4) { animation-delay: .09s; }
+.chip.gain .num, .chip.spend .num { display: inline-block; animation: bump .3s var(--ease); }
+@keyframes fade { from { opacity: 0; } }
+@keyframes drop-in { from { opacity: 0; transform: translateY(-8px); } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(10px); } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.96); } }
+
+@media (prefers-reduced-motion: reduce) {
+  #menu *, #menu *::before, #menu *::after { animation: none !important; transition-property: opacity !important; }
+  :is(#hud, #menu) button:active:not(:disabled), #hud .tool:hover:not(:disabled) { transform: none !important; }
+  #hud .pop, #hud .tutorial, #hud .modal, #hud .tip { animation: fade .15s linear !important; }
+}

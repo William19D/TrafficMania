@@ -223,6 +223,20 @@ function flash(el: Element, cls: string, others: string[] = []): void {
   el.classList.add(cls);
 }
 
+// Count a number to its new value over ~400ms (ease-out); reduced motion and first fills snap
+const ticking = new WeakMap<HTMLElement, number>();
+function countTo(el: HTMLElement, from: number | undefined, to: number, fmt: (n: number) => string): void {
+  cancelAnimationFrame(ticking.get(el) ?? 0);
+  if (from === undefined || from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) { el.textContent = fmt(to); return; }
+  const t0 = performance.now();
+  const step = (t: number): void => {
+    const k = Math.min(1, (t - t0) / 400);
+    el.textContent = fmt(Math.round(from + (to - from) * (1 - (1 - k) ** 3)));
+    if (k < 1) ticking.set(el, requestAnimationFrame(step));
+  };
+  ticking.set(el, requestAnimationFrame(step));
+}
+
 function toolBtn(t: Tool): string {
   const k = keyOf(t);
   return `<button class="tool${t === 'demolish' ? ' destroy' : ''}" data-tool="${t}" aria-pressed="false" data-tip="${TOOLS[t].tip}" data-key="${k}">`
@@ -243,7 +257,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; tray?: string; trayN?: number; modal?: string;
     views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -972,7 +986,7 @@ export class HUD {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
       L.net = net;
-      (c.querySelector('.num') as HTMLElement).textContent = fmtMoney(money);
+      countTo(c.querySelector('.num') as HTMLElement, prev, money, fmtMoney);
       const n = c.querySelector('.net') as HTMLElement;
       n.textContent = `${net >= 0 ? '+' : ''}${fmtMoney(net)}/day`;
       n.className = `net num ${net < 0 ? 'neg' : 'pos'}`;
@@ -1007,7 +1021,7 @@ export class HUD {
       // the Build button wears the active build tool's icon
       const bt = BUILD.includes(g.tool), bb = this.q('.buildbtn');
       bb.setAttribute('aria-pressed', String(bt));
-      this.q('.bico').innerHTML = icon(bt ? g.tool : 'build');
+      const bi = this.q('.bico'); bi.innerHTML = icon(bt ? g.tool : 'build'); bi.dataset.t = bt ? g.tool : 'build';
       bb.dataset.tip = `Build: roads, junctions and buildings${bt ? `. Now: ${TOOLS[g.tool].label}` : ''}`;
       this.setBuild(false);
     }
@@ -1015,8 +1029,9 @@ export class HUD {
     // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
     const pop = Math.round(g.population), next = levelPop(g.cityLevel + 1), prev = levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
     if (pk !== L.pop) {
+      countTo(this.q('.pv'), L.popN, pop, n => n.toLocaleString('en-US'));
       L.pop = pk;
-      this.q('.pv').textContent = pop.toLocaleString('en-US');
+      L.popN = pop;
       this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
       this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
       this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Happy homes fill up; unhappy ones empty out.`;
