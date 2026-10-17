@@ -461,6 +461,19 @@ profile page's achievements grid and cosmetics picker in `Menu.ts`, paint sets i
 | Rain | at most once per 2 days | 1 h, clouds roll in | 4 h | top speed x0.8, braking x0.7, headway +30%; rain streaks, wet sheen | keep ≥ 70% smooth: $1,000 |
 | Request (Dorfromantik) | a building above tier 1; at most 2 active | pin with a 1-day countdown on the building | 1 day | the building asks for one thing: "commute under 2 min", "a shop within reach", "no jam on my street" (frontage heat < 0.3) | met while the pin runs: $1,000 and an instant tier upgrade (if lots allow; else $2,000) |
 
+### G5 as built (where it differs from the above)
+
+- **Code:** `src/core/Events.ts` (`EVENTS` table, `eventsHour` on the hour, `eventsTick` every tick). The graph's `shut` / `slow` / `wet` are rebuilt from the live events each tick; `findPath` skips `shut` edges and divides cost by `slow`; `Car.top(e, graph)` multiplies by `graph.speedX(e)`. A car whose next edge gets shut re-routes unless its turn is already granted.
+- **Kinds:** roadworks, accident, rain and VIP convoy are events. Match day keeps G2's schedule and adds the countdown ring on the stadium (noon to kickoff) and the $2,000 bonus at ≥ 85% fans on time. Emergency calls stay G2's hospital behaviour (no event wrapper). Requests are not built yet.
+- **Roadworks:** the warning starts 08:00-15:00 (closed 09:00-16:00 at the latest start), only on an edge with a way round in every direction it is driven.
+- **Accident:** ponytail: no lane is physically blocked; cars on the edge drive at x0.35 both ways and routes price it accordingly. The reward pays the moment the queue (stopped cars on the edge) drops under 3, from 15 min in. No Tow-truck shortening.
+- **Rain:** ponytail: top speed x0.8 only (braking and headway unchanged). A dark wash fades in through the warning; streaks while live.
+- **VIP convoy:** 3 `visit` trips flagged `trip.vip` (gold pennant on the roof) from a linked exit to an office tower or the stadium; it ends when all 3 arrive or after 3 h. All 3 within 1.5x ideal pay $3,000.
+- **Smooth share** for roadworks and rain = new smooth trips / new arrivals since it went live (1 when none arrived).
+- **HUD:** an orange chip next to the alarm lists the events with time left (or "in" while warning); its tip gives each quest and reward. Messages go through `say()` until G6's feed.
+- **Gating:** `eventsOn` = not the tutorial, not `demandOff`, and in Creative only with `cfg.events: 'on'` (the Creative setup's Traffic events toggle, Off by default).
+- **Save:** `ev?: { list, next, last }` with edge / building indices; an old save gets no events and `nextEventAt = time + 4 h`. An event whose edge or target is gone (split, demolished) is called off.
+
 ---
 
 ## 9. HUD regions after this round (F2, G1, G3, G6)
