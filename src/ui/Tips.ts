@@ -21,7 +21,7 @@ const open = (g: Game, z: Zone): boolean => g.unlocked(TIER_DEFS[z][0].level);
 const TOOL_TIPS: Partial<Record<Tool, string>> = {
   grid: 'Grid: click a corner, click the end of the first side, then click how deep. The block size sits beside Build.',
   light: 'Lights give each road its turn. Edit a light to stretch the green for the busy road.',
-  roundabout: 'Roundabouts keep traffic rolling with no stops. A bigger ring carries more but needs more room: pick the size beside Build.',
+  roundabout: 'Roundabouts keep traffic rolling with no stops. A bigger ring carries more but needs more room, and 2 or 3 ring lanes more still: pick them beside Build.',
   interchange: 'Interchanges lift turns off the junction: a diamond, cloverleaf or trumpet. The ghost shows it and its price first.',
   edit: 'Edit: click a car to follow it, a building for its details, a junction for its control, or a road to change its type.',
   demolish: 'Demolish refunds a road built today in full, an older one by half. A building goes for free and its lot stays zoned.',

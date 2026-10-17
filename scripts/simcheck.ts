@@ -2,8 +2,8 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
+import { RoadGraph, BRAKE, CAR_LEN, CAR_W, DEFAULT_TYPE, deckH, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
+import { LEFT, PRIORITY, RIGHT, STOP, STRAIGHT, YIELD, applyPreset, approachOf, clonePlan, cycleSign, links, moveOf, planOf, setLink, setSeconds, signOf } from '../src/network/Junction.ts';
 import { stepDone, tutorialSteps } from '../src/ui/Tutorial.ts';
 import { dueTip } from '../src/ui/Tips.ts';
 import type { Edge, Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
@@ -37,7 +37,7 @@ Math.random = () => { throw new Error('Math.random used: route it through random
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
 // Blank world: no terrain, no starter town, every level unlocked
-const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
+const SIM: GameConfig = { ...DEFAULT_CONFIG, biome: 'temperate', seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
   setSeed(12345);
@@ -65,6 +65,13 @@ const trip = (from: Node, to: Node): Trip => makeTrip('commute', from.building!,
   if (maps.size !== Object.keys(BIOMES).length) fail('terrain: two biomes gave the same map');
   const t = generateTerrain({ ...SIM, biome: 'archipelago', size: 'medium' });
   if (t.lakes.length < 4) fail(`terrain: archipelago has only ${t.lakes.length} lakes`);
+  // Forest: dense groves, several lakes, streams, almost no sand; forest and temperate grass reads green (G above R and B)
+  const f = generateTerrain({ ...SIM, biome: 'forest', size: 'medium' });
+  if (f.trees.length < 400 || f.lakes.length < 3 || f.rivers.some(r => r.width > 30) || f.patches.filter(p => p.kind === 'sand').length > 1) fail(`terrain: forest ${f.trees.length} trees, ${f.lakes.length} lakes`);
+  for (const k of ['forest', 'temperate'] as const) {
+    const [r, g, bl] = [1, 3, 5].map(i => parseInt(BIOMES[k].land.slice(i, i + 2), 16));
+    if (g <= r || g <= bl) fail(`terrain: ${k} land ${BIOMES[k].land} is not green`);
+  }
   // Starter town: 4 homes and the 3 workplaces; on easy a starter street gives every home a driveway, on normal nothing has a road
   for (const difficulty of ['easy', 'normal'] as const) {
     const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home'), gates = w.buildings.filter(b => b.kind === 'gate');
@@ -119,7 +126,7 @@ const invariants = (w: Game): void => {
   }
 };
 // Overlaps the lane check misses. Across a node: a car never closer than touching to the first car on its exit lane that came the same
-// way. On screen: two cars on one edge or on consecutive lanes (a junction or ring hand-off) heading the same way (within 30 degrees)
+// way (by its lane, unless the car is granted the node: one waiting in another lane is not on that path yet). On screen: two cars on one edge or on consecutive lanes (a junction or ring hand-off) heading the same way (within 30 degrees)
 // are never drawn closer than 0.8 x touching along their heading while less than a car width apart across it.
 // ponytail: cars entering one lane from two approaches are measured on screen only (their path gap is no distance); O(n^2), so not
 // in the rush hour
@@ -127,7 +134,7 @@ const overlaps = (w: Game, what: string, drawn = true): void => {
   const t = w.time.toFixed(2), g = w.graph;
   for (const c of w.cars) {
     const f = c.exit?.cars[0];
-    if (!f || f === c || c.lane.to !== c.exit!.from || f.prev !== c.lane.from) continue;
+    if (!f || f === c || c.lane.to !== c.exit!.from || f.prev !== c.lane.from || (f.prevOffset !== c.lane.offset && c.granted !== c.lane.to)) continue;
     const gap = c.lane.edge.length - c.s + f.s - sep(c, f);
     if (gap < -0.5) fail(`${what}: cars overlap across node ${c.lane.to.id} by ${(-gap).toFixed(1)}px at t=${t}`);
   }
@@ -145,7 +152,7 @@ const overlaps = (w: Game, what: string, drawn = true): void => {
   }
 };
 const DT = 1 / 60, STEPS = 300 * 60, T_UP = TUNING.UPGRADE_H;
-let maxCars = 0, lo = Infinity, hi = 0;
+let maxCars = 0, lo = Infinity, hi = 0, rushSmooth = 0;
 const kinds = new Set<string>();
 // Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
 const exits = new Map<Car, [Lane, Lane | null]>();
@@ -455,6 +462,53 @@ for (const kind of ['car', 'ambulance'] as const) {
   const across = w.planPath([{ x: 150, y: 445 }, { x: 650, y: 445 }], 0, hw).reason;
   if (across !== 'Highways give no building access') fail(`buildings: a highway across the driveways was '${across || 'ok'}'`);
 }
+// Edit selection: a run stops where the type changes, so selecting the small road selects only it, and a bend of it keeps the big one
+{
+  const w = blank(), wg = w.graph, one: RoadType = { tier: 'street', lanes: 1, oneWay: false }, two: RoadType = { tier: 'street', lanes: 2, oneWay: false };
+  const A = wg.addNode(100, 500), M = wg.addNode(500, 500), B = wg.addNode(900, 500);
+  w.commitPath(w.planPath([A, M], 0, two));
+  w.commitPath(w.planPath([M, B], 0, one));
+  w.select({ x: 700, y: 500 });
+  if (!w.selected || w.selected.some(e => e.type.lanes !== 1)) fail(`edit select: run ${w.selected?.map(e => e.type.lanes)}`);
+  const bend = w.planBend(w.selected!, { x: 700, y: 520 });
+  if (!bend.ok || !w.commitBend(w.selected!, bend)) fail(`edit select: bend refused (${bend.reason})`);
+  if (!wg.edges.some(e => e.type.lanes === 2) || wg.edges.some(e => e.type.lanes === 2 && Math.min(e.a.x, e.b.x) > 450)) fail('edit select: the bend retyped the 2-lane road');
+}
+// Overdraw: a road drawn over a same-level road never leaves two roads on top of each other. The same type is 'Already exists', a
+// longer one follows the road and builds only past its ends, another type retypes the stretch (cars kept, the Edit tool's price), a
+// viaduct passes over, and a ramp tile running over a short road is refused
+{
+  const w = blank(), wg = w.graph, one: RoadType = { tier: 'street', lanes: 1, oneWay: false }, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+  const A = wg.addNode(100, 500), M = wg.addNode(500, 500), B = wg.addNode(900, 500);
+  w.commitPath(w.planPath([A, M], 0, one));
+  w.commitPath(w.planPath([M, B], 0, one));
+  const stacked = (): boolean => wg.edges.some(e => wg.edges.some(f => f !== e && f.level === e.level && dist(e.a, e.b) > 1
+    && Math.abs((e.b.x - e.a.x) * (f.b.y - f.a.y) - (e.b.y - e.a.y) * (f.b.x - f.a.x)) / dist(e.a, e.b) / dist(f.a, f.b) < 0.1
+    && [0.25, 0.5, 0.75].some(k => { const p = { x: e.a.x + (e.b.x - e.a.x) * k, y: e.a.y + (e.b.y - e.a.y) * k }; return Math.hypot(p.x - f.a.x, p.y - f.a.y) + Math.hypot(p.x - f.b.x, p.y - f.b.y) - dist(f.a, f.b) < 0.5; })));
+  const same = w.planPath([A, B], 0, one).reason;
+  if (same !== 'Already exists') fail(`overdraw: the same road over two edges was '${same || 'ok'}'`);
+  const m0 = w.money, n0 = wg.edges.length;
+  w.commitPath(w.planPath([{ x: 40, y: 500 }, { x: 960, y: 500 }], 0, one));
+  if (stacked() || wg.edges.length !== n0 + 2 || Math.abs(m0 - w.money - w.price({ x: 0, y: 0 }, { x: 120, y: 0 }, { bridge: false, tunnel: false, level: 0, type: one })) > 1e-6) {
+    fail(`overdraw: a longer road over it left ${wg.edges.length} edges (stacked ${stacked()}), cost ${m0 - w.money}`);
+  }
+  const run = [wg.edgeBetween(A, M)!, wg.edgeBetween(M, B)!], l = run[0].lanes.find(x => x.from === A)!, c = new Car(l, trip(town(w, 100, 300), town(w, 900, 300)));
+  c.s = 200; l.cars.push(c); w.cars.push(c);
+  const d = w.retypeDelta(run, two), up = w.planPath([A, B], 0, two), m1 = w.money;
+  if (!up.ok || Math.abs(up.cost - d) > 1e-6) fail(`overdraw: upgrade plan ${up.reason || up.cost}, expected ${d}`);
+  w.commitPath(up);
+  if (stacked() || wg.edges.length !== n0 + 2 || run.some(e => !wg.edges.includes(e) || e.type.lanes !== 2) || Math.abs(m1 - w.money - d) > 1e-6) {
+    fail(`overdraw: upgrade left ${wg.edges.map(e => e.type.lanes)} (stacked ${stacked()}), cost ${m1 - w.money}, expected ${d}`);
+  }
+  if (!w.cars.includes(c) || c.lane.edge !== run[0]) fail('overdraw: the upgrade dropped the car on the road');
+  invariants(w);
+  const via = w.planPath([{ x: 300, y: 300 }, { x: 300, y: 700 }], 1, one), over = w.planPath([{ x: 20, y: 500 }, { x: 980, y: 500 }], 1, one);
+  if (!via.ok || !over.ok) fail(`overdraw: a viaduct over it was refused (${via.reason || over.reason})`);
+  const Z = wg.addNode(100, 900), Y = wg.addNode(120, 900);
+  wg.addEdge(Z, Y, { bridge: false, tunnel: false, level: 0, type: one }, w.today);
+  const ramp = w.planPath([Z, { x: 900, y: 900 }], 1, one).reason;
+  if (!ramp.startsWith('Overlaps a road')) fail(`overdraw: a ramp over a short road was '${ramp || 'ok'}'`);
+}
 // Edits: a day-old avenue downgraded to dirt refunds REFUND_LATER of the drop, like a demolish; bending an arm of a junction with a
 // turn ban keeps the ban when the arm still leaves at about the same angle, and charges the plan's net
 {
@@ -681,6 +735,14 @@ for (const [k, b] of Object.entries(BIOMES)) {
   const lum = (c: string): number => [1, 3, 5].reduce((n, i) => n + parseInt(c.slice(i, i + 2), 16), 0);
   if (lum(b.bands[2]) <= lum(b.bands[0])) fail(`mountains: ${k} peak ${b.bands[2]} is darker than its foot ${b.bands[0]}`);
 }
+// Two drawn car bodies overlap, less 1px slack each side (separating axis test of two rectangles)
+const bodies = (p: { x: number; y: number; angle: number }, lp: number, q: { x: number; y: number; angle: number }, lq: number): boolean => {
+  const dx = q.x - p.x, dy = q.y - p.y, h = (CAR_W - 2) / 2;
+  return [p.angle, p.angle + Math.PI / 2, q.angle, q.angle + Math.PI / 2].every(t => {
+    const ux = Math.cos(t), uy = Math.sin(t), ext = (r: { angle: number }, l: number) => Math.abs(Math.cos(r.angle - t)) * (l / 2 - 1) + Math.abs(Math.sin(r.angle - t)) * h;
+    return Math.abs(dx * ux + dy * uy) < ext(p, lp) + ext(q, lq);
+  });
+};
 // Roundabout sizes: a 4-arm cross flooded from every arm (each car to another exit) through a ring of every size. Every car gets
 // through, a large ring holds more cars at once than a small one, nothing overlaps (lanes, across nodes, on screen), and on and around
 // the ring a car never turns more than 35 degrees in 0.1 s nor sheds speed faster than it brakes (no stop-then-jump at the entry).
@@ -741,6 +803,99 @@ for (const [k, b] of Object.entries(BIOMES)) {
     if (wg.rings.length !== 1 || !c || c.edges.length !== 4 || !joined() || Math.abs(w.money - (cash + w.controlPrice('roundabout', 0))) > 1e-6) fail('ring sizes: removal');
   }
   if (most[2]! <= most[0]!) fail(`ring sizes: large ring held ${most[2]} cars at once, small ${most[0]}`);
+}
+// Ring lanes: the same cross flooded harder (avenue arms, each car to the next, opposite or far exit) through a large ring of 1, 2 and 3
+// lanes. Rings saved before lanes load with one; a medium ring takes at most 2 and the lanes cost more. More lanes carry more cars a
+// minute; cars enter further in the further they go (some ride inside), move out at the plain nodes and leave from the outer lane, and
+// one leaving from an inner lane does so only granted (the outer lanes clear there); nothing overlaps, turns sharply or stops dead.
+{
+  const rate: number[] = [];
+  for (const k of [1, 2, 3] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+    const H = [[1000, 450], [1550, 1000], [1000, 1550], [450, 1000]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, av));
+    w.demandOff = true;
+    Object.assign(w, { ringSize: 2, ringLanes: k });
+    const cash = w.money;
+    w.placeControl(J, 'roundabout');
+    const ring = wg.rings[0]!;
+    if (!ring || ring.lanes !== k || ring.nodes.some(v => v.edges.some(e => e.ring && e.lanes.length !== k))) fail(`ring lanes: ${k} lanes not placed (${w.message})`);
+    if (Math.abs(cash - w.money - w.controlPrice('roundabout', 2, k)) > 1e-6 || (k > 1 && w.controlPrice('roundabout', 2, k) <= w.controlPrice('roundabout', 2, (k - 1) as 1 | 2))) fail(`ring lanes: ${k}-lane price ${cash - w.money}`);
+    if (k === 3) {
+      const back = deserialize(serialize(w)).graph.rings[0]!, old = JSON.parse(serialize(w));
+      delete old.rings[0].lanes;
+      for (const e of old.edges) if (e.ring !== undefined) e.type = { ...e.type, lanes: 1 };
+      if (back.lanes !== 3 || deserialize(JSON.stringify(old)).graph.rings[0]!.lanes !== 1) fail('ring lanes: save / load');
+    }
+    H.forEach((h, i) => {
+      for (let j = 0; j < 20; j++) {
+        const lane = wg.lanesFrom(h.edges[0]!, h)[j % 2]!, c = new Car(lane, trip(h, H[(i + 1 + j % 3) % 4]));
+        c.s = 420 - (j >> 1) * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    const was = new Map<Car, { l: Lane; cl: Node | null; a: number[]; v: number }>();
+    let inside = 0, out = 0, inner = 0, t = 0;
+    for (; t < 90 * 60 && w.cars.length; t++) {
+      w.update(DT);
+      invariants(w);
+      // on screen between cars on the ring heading the same way (within 30 degrees, as the shared check): their drawn bodies (CAR_W wide,
+      // 1px slack each side) never overlap. ponytail: an entry and an exit at one arm node still clip in their arcs, as on a 1-lane ring
+      overlaps(w, `ring lanes ${k}`, false);
+      const on = w.cars.filter(c => c.lane.edge.ring), at = on.map(c => wg.carPos(c));
+      on.forEach((a, i) => on.forEach((b, j) => {
+        if (j > i && Math.cos(at[i]!.angle - at[j]!.angle) > Math.cos(Math.PI / 6) && bodies(at[i]!, a.len, at[j]!, b.len)) fail(`ring lanes ${k}: cars drawn on top of each other by the ring at t=${w.time.toFixed(2)}`);
+      }));
+      for (const c of w.cars) {
+        const h = was.get(c), p = wg.carPos(c);
+        if (h && h.l !== c.lane && h.l.edge.ring) {
+          const i0 = h.l.edge.lanes.indexOf(h.l);
+          if (c.lane.edge.ring && c.lane.edge.lanes.indexOf(c.lane) > i0) out++;
+          if (!c.lane.edge.ring && i0 < k - 1) { inner++; if (c.clearing !== h.l.to) fail(`ring lanes: a car left a ${k}-lane ring from lane ${i0} ungranted`); }
+        }
+        if (c.lane.edge.ring && c.lane.edge.lanes.indexOf(c.lane) < k - 1) inside++;
+        const a = [...(h?.a ?? []), p.angle].slice(-7);
+        if (dist(p, ring.hub) < ringOut(2) + 12) {
+          const turn = Math.abs(Math.atan2(Math.sin(p.angle - a[0]!), Math.cos(p.angle - a[0]!))) * 180 / Math.PI;
+          if (turn > 35) fail(`ring lanes: a car turned ${turn.toFixed(0)} degrees in 0.1s on a ${k}-lane ring`);
+          if (h && h.v - c.speed > BRAKE * DT + 1e-6) fail(`ring lanes: a car stopped dead on a ${k}-lane ring (${h.v.toFixed(1)} -> ${c.speed.toFixed(1)}px/s)`);
+        }
+        was.set(c, { l: c.lane, cl: c.clearing, a, v: c.speed });
+      }
+    }
+    if (k > 1 && (!inside || !out)) fail(`ring lanes: on a ${k}-lane ring ${inside} car-ticks inside, ${out} moves out`);
+    if (w.score !== 80) fail(`ring lanes: ${w.score} of 80 cars through a ${k}-lane ring`);
+    console.log(`ring lanes: ${k} lane(s) ${(w.score * 3600 / t).toFixed(1)} cars a minute (inner exits ${inner}, moves out ${out})`);
+    rate.push(w.score * 3600 / t);
+  }
+  if (!(rate[1]! > rate[0]!) || rate[2]! < rate[1]!) fail(`ring lanes: cars a minute by lanes ${rate}`);
+  // steady outer-lane traffic never starves a car leaving from an inner lane: past STARVE_S the outer lanes keep clear for it
+  for (const [size, k] of [[1, 2], [2, 3]] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+    const H = [[1000, 450], [1550, 1000], [1000, 1550], [450, 1000]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, av));
+    Object.assign(w, { demandOff: true, ringSize: size, ringLanes: k });
+    w.placeControl(J, 'roundabout');
+    H.forEach((h, i) => {
+      for (let j = 0; j < 24; j++) {
+        const lane = wg.lanesFrom(h.edges[0]!, h)[j % 2]!, c = new Car(lane, trip(h, H[(i + 1 + j % 2) % 4]));
+        c.s = 420 - (j >> 1) * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    let wait = 0;
+    for (let t = 0; t < 180 * 60 && w.cars.length; t++) {
+      w.update(DT);
+      for (const c of w.cars) if (c.lane.edge.ring) wait = Math.max(wait, c.wait);
+    }
+    if (wait > 8 || w.score !== 96) fail(`ring lanes: a car waited ${wait.toFixed(1)}s on a ${k}-lane ring (${w.score} of 96 through)`);
+  }
+  const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000);
+  for (const [x, y] of [[1000, 700], [1300, 1000], [1000, 1300]]) w.commitPath(w.planPath([J, { x, y }], 0, DEFAULT_TYPE));
+  if (!w.setControl(J, 'roundabout', 1, 3) || wg.rings[0]!.lanes !== 2) fail('ring lanes: a medium ring took 3 lanes');
+  if (!w.setControl(wg.rings[0]!.hub, 'roundabout', 0) || wg.rings[0]!.lanes !== 1) fail('ring lanes: a small ring kept 2 lanes');
 }
 // Ring value: a ring built and taken out puts back the arm pieces it took (type, oldest day), so a street stub by an avenue never comes
 // back as a free avenue spoke, and a road joined to the ring later pays for its spoke: the cash plus every road's and control's refund
@@ -827,6 +982,68 @@ for (const kind of ['yield', 'stop'] as const) {
   if (kind === 'yield' && first !== main) fail('yield: the side road went before the main road');
   if (w.score !== 2) fail(`${kind}: ${w.score} of 2 cars arrived`);
 }
+// Priority signs (TM:PE style): at an avenue / street T with auto signs (the avenue has priority, the street yields), an avenue car at
+// speed keeps it through while a street car turning into its lane waits for it; a street car turning right with only far-lane traffic
+// coming, or left with none, keeps its speed (it came in at 40 px/s); a stop sign halts it at the line first
+{
+  const tee = (stop: boolean) => {
+    const w = blank(), wg = w.graph, ave: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+    const X = town(w, 100, 500), Y = town(w, 900, 500, 'shop', true), Z = town(w, 500, 940), J = wg.addNode(500, 500);
+    w.commitPath(w.planPath([X, J], 0, ave));
+    w.commitPath(w.planPath([J, Y], 0, ave));
+    w.commitPath(w.planPath([Z, J], 0, street));
+    w.demandOff = true;
+    w.placeControl(J, 'yield');
+    const zj = wg.edgeBetween(Z, J)!, xj = wg.edgeBetween(X, J)!, yj = wg.edgeBetween(Y, J)!;
+    if (signOf(J, xj) !== PRIORITY || signOf(J, yj) !== PRIORITY || signOf(J, zj) !== YIELD) fail('signs: auto signs are not avenue priority, street yield');
+    if (stop) { J.plan = clonePlan(planOf(J)); cycleSign(J.plan, J, approachOf(J.plan, J, zj)); }
+    if (stop && signOf(J, zj) !== STOP) fail('signs: cycling yield does not give stop');
+    // a car on edge e from node a, s px short of J, at speed v
+    const car = (e: Edge, a: Node, to: Node, s: number, v: number): Car => {
+      const c = new Car(wg.lanesFrom(e, a)[0]!, trip(a, to));
+      c.s = e.length - s;
+      c.speed = v < 0 ? c.top(e, wg) : v;
+      c.lane.cars.push(c);
+      w.cars.push(c);
+      return c;
+    };
+    // runs until every car arrived: per car its lowest speed on its way in to J, and the time it was granted J
+    const run = (cs: Car[], what: string): { lo: number[]; at: number[] } => {
+      const lo = cs.map(() => Infinity), at = cs.map(() => -1), into = cs.map(c => c.lane);
+      for (let t = 0; t < 30 * 60 && w.score < cs.length; t++) {
+        w.update(DT);
+        invariants(w);
+        cs.forEach((c, i) => { if (c.lane === into[i]) lo[i] = Math.min(lo[i], c.speed); if (at[i] < 0 && c.granted === J) at[i] = t; });
+      }
+      if (w.score !== cs.length) fail(`signs: ${what}: ${w.score} of ${cs.length} cars arrived`);
+      return { lo, at };
+    };
+    return { w, J, X, Y, Z, zj, xj, yj, car, run };
+  };
+  {
+    const { X, Y, Z, zj, xj, car, run } = tee(false);
+    const m = car(xj, X, Y, 260, -1), v0 = m.speed, side = car(zj, Z, Y, 50, 30);
+    const { lo, at } = run([m, side], 'merge');
+    if (lo[0] < 0.97 * v0) fail(`signs: the priority car braked to ${lo[0].toFixed(0)} of ${v0.toFixed(0)} px/s for a yielding car`);
+    if (at[1] < at[0] || lo[1] > 1) fail(`signs: the yielding car did not wait for the priority car into its lane (granted ${at[1]} vs ${at[0]}, lowest ${lo[1].toFixed(0)} px/s)`);
+  }
+  {
+    const { Y, X, Z, zj, yj, car, run } = tee(false);
+    const m = car(yj, Y, X, 120, -1), side = car(zj, Z, Y, 140, 40);
+    const { lo } = run([m, side], 'free right');
+    if (lo[1] < 34) fail(`signs: a right turn slowed to ${lo[1].toFixed(0)} px/s for far-lane traffic it never meets`);
+  }
+  {
+    const { X, Z, zj, car, run } = tee(false);
+    const { lo } = run([car(zj, Z, X, 140, 40)], 'free left');
+    if (lo[0] < 34) fail(`signs: a yield with no traffic slowed a car to ${lo[0].toFixed(0)} px/s`);
+  }
+  {
+    const { X, Z, zj, car, run } = tee(true);
+    const { lo } = run([car(zj, Z, X, 140, 40)], 'stop');
+    if (lo[0] >= 1) fail(`signs: a stop sign let a car through at ${lo[0].toFixed(0)} px/s`);
+  }
+}
 // Ramps: a road at L2 from a ground road's dead end climbs a level per segment (L0, L1, then L2); a 2-tile one is too steep; a viaduct
 // ending at a door comes down to the ground first (doors take ground roads only); a commute over it arrives
 {
@@ -841,6 +1058,13 @@ for (const kind of ['yield', 'stop'] as const) {
   const down = w.planPath([Q, Y], 2, flat), dl = down.segs.map(g => g.level);
   if (!down.ok || dl[0] !== 2 || dl[dl.length - 1] !== 0) fail(`ramps: down to the door ${dl} (${down.reason})`);
   w.commitPath(down);
+  // drawn heights run smoothly: two roads meeting at a joint agree on its height, and no piece climbs more than a level
+  for (const n of w.graph.nodes) {
+    const hs = n.edges.map(e => deckH(e, n));
+    if (n.edges.length === 2 && !n.building && hs[0] !== hs[1]) fail(`ramps: a step at a joint (${hs})`);
+  }
+  if (w.graph.edges.some(e => Math.abs(deckH(e, e.a) - deckH(e, e.b)) > 1)) fail('ramps: a piece climbs more than a level');
+  if (!w.graph.edges.some(e => e.level === 1 && Math.min(deckH(e, e.a), deckH(e, e.b)) === 0)) fail('ramps: no ramp foot at height 0');
   w.queueTrip(X.building!, Y.building!, 'commute');
   for (let t = 0; t < 30 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`ramps: the commute over the viaduct did not arrive (score ${w.score})`);
@@ -856,6 +1080,15 @@ for (const kind of ['yield', 'stop'] as const) {
   if (deg(4) !== 2 || deg(3) !== 6 || deg(2) !== 4 || w.graph.nodes.length !== 12 || Math.abs(m0 - plan.cost - w.money) > 1e-6) {
     fail(`grid: ${deg(4)} crossings, ${deg(3)} T-junctions, ${deg(2)} corners of ${w.graph.nodes.length}, paid ${m0 - w.money} for ${plan.cost}`);
   }
+  // a grid started along a day-old avenue in Challenge leaves it an avenue (the Road tool retypes what it runs over, the Grid tool doesn't)
+  const v = blank(), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false }, p = { x: 200, y: 400 }, q = { x: 840, y: 400 }, r = { x: 200, y: 720 };
+  Object.assign(v, { demandOff: true, cfg: { ...v.cfg, mode: 'challenge' } });
+  v.commitPath(v.planPath([p, q], 0, av));
+  v.time += 24 * HOUR;
+  v.roadType = { tier: 'street', lanes: 1, oneWay: false };
+  const gp = v.planGrid(p, q, r);
+  if (!gp.ok || !v.commitGrid(p, q, r)) fail(`grid: along an avenue ${gp.reason}`);
+  if (v.graph.edges.some(e => e.a.y === 400 && e.b.y === 400 && e.type.tier !== 'avenue')) fail('grid: the avenue it started along was retyped');
 }
 // Interchanges on a boulevard (main road) crossing an avenue: no node joins the two roads at one level any more, and a trip between
 // every pair of arms arrives (the trumpet on a T)
@@ -1046,7 +1279,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     overlaps(w, 'rush hour', false);
     for (const c of w.cars) maxWait = Math.max(maxWait, c.wait);
   }
-  const smooth = w.stats.smooth / w.stats.arrived;
+  const smooth = rushSmooth = w.stats.smooth / w.stats.arrived;
   if (maxWait > GIVE_UP_S - 2 || w.stats.failed || smooth < 0.75) fail(`rush hour: longest stop ${maxWait.toFixed(1)}s, ${w.stats.failed} failed, ${(smooth * 100).toFixed(0)}% smooth of ${w.stats.arrived}`);
 }
 // Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
@@ -1423,6 +1656,17 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const P = w.buildings.find(b => b.special === 'plaza')!, m1 = w.money;
   w.tryDemolish(P);
   if (w.buildings.includes(P) || w.money !== m1 + SPECIALS.plaza.cost * TUNING.SPECIAL_REFUND) fail(`specials: demolish refunded $${w.money - m1}`);
+  // a special set down on zoned lots clears the lots under and right beside it; the brush paints none there afterwards
+  {
+    const pl = planZone(w, { x: 1500, y: 500 }, { x: 1850, y: 500 }, 'shop')!;
+    commitZone(w, pl);
+    const n0 = w.lots.length, why = place('plaza', 1680, 440), Z = w.buildings.filter(b => b.special === 'plaza').at(-1)!;
+    const hits = (): boolean => w.lots.some(l => Z.contains(l, 2)) || Z.outline().some(q => lotAt(w, q));
+    if (why || hits() || w.lots.length >= n0) fail(`specials: zone lots left under a plaza (${why}, ${n0} -> ${w.lots.length} lots)`);
+    const again = planZone(w, { x: 1500, y: 500 }, { x: 1850, y: 500 }, 'shop');
+    if (again?.ok) commitZone(w, again);
+    if (hits()) fail('specials: the brush painted lots under a plaza');
+  }
   // an emergency call: the ambulance drives out and back, fast enough on empty roads to cheer the street
   const home = w.addBuilding(buildingAt('home', { x: 1600, y: 480 }, Math.PI / 2, 1)), hosp = w.buildings.find(b => b.special === 'hospital')!;
   w.connect();
@@ -1663,5 +1907,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
-  + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)}`);
+  + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)} `
+  + `smooth=${(100 * (out.smooth ?? 0) / game.reports.length).toFixed(1)}% rushSmooth=${(100 * rushSmooth).toFixed(1)}%`);
 process.exit(0);

@@ -83,14 +83,18 @@ function free(g: Game, l: Lot, lots: Lot[]): boolean {
   if (pts.some(p => p.x < 4 || p.y < 4 || p.x > WORLD.w - 4 || p.y > WORLD.h - 4)) return false;
   if (pts.some(p => inWater(g.terrain, p) || inMountain(g.terrain, p) || g.graph.nearRing(p))) return false;
   if (g.graph.nodes.some(n => !n.building && n.edges.filter(e => !e.drive).length !== 2 && inRect(r, n, NODE_R + 8))) return false;
-  if (g.buildings.some(b => overlap(r, rectOf(b))) || lots.some(o => overlap(r, lotRect(o)))) return false;
+  if (blocked(g, r) || g.buildings.some(b => overlap(r, rectOf(b))) || lots.some(o => overlap(r, lotRect(o)))) return false;
   return !roadOver(g, r);
 }
 
-// Lots whose road went (demolished, bent away) or that a new road runs through go; a lot with a building stays
+// A building off the lots (a special, a placed or moved one) on the rect or within 4px of it
+const blocked = (g: Game, r: Rect): boolean => g.buildings.some(b => b.kind !== 'gate' && !b.lots.length
+  && dist(r, b) < (Math.hypot(r.w, r.h) + Math.hypot(b.w, b.h)) / 2 + 4 && overlap(r, { ...rectOf(b), w: b.w + 8, h: b.h + 8 }));
+
+// Lots whose road went (demolished, bent away), that a new road runs through, or that a building off the lots blocks go; a lot with a building stays. Demolishing that building gives nothing back.
 export function pruneLots(g: Game): void {
   const roads = g.accessEdges();
-  g.lots = g.lots.filter(l => l.building || (frontage(g, l, roads) && !roadOver(g, lotRect(l))));
+  g.lots = g.lots.filter(l => l.building || (frontage(g, l, roads) && !roadOver(g, lotRect(l)) && !blocked(g, lotRect(l))));
 }
 
 // Old saves and the starter town: each building gets one lot of its zone under it, as wide as it is (it stays legacy, tier 0, until cleared)

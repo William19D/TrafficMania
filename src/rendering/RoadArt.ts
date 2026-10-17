@@ -2,7 +2,7 @@ import type { Edge, Node } from '../network/RoadGraph.ts';
 import { mulberry32 } from '../util/rng.ts';
 
 // Signature of everything the cached road layer draws: geometry, tiers, lanes, flags, controls and ring sizes (FNV-1a over the
-// numbers). Lane arrows and signal colours are drawn live, so junction plans stay out of it.
+// numbers). Lane arrows and signal colours are drawn live, so junction plans stay out of it, but for their priority signs.
 export function netKey(edges: Edge[], nodes: Node[]): number {
   let h = 2166136261;
   const mix = (v: number): void => { h = Math.imul(h ^ Math.round(v * 8), 16777619); };
@@ -11,7 +11,7 @@ export function netKey(edges: Edge[], nodes: Node[]): number {
     mix(e.id); mix(e.a.x); mix(e.a.y); mix(e.b.x); mix(e.b.y); word(e.type.tier); mix(e.type.lanes); mix(e.level);
     mix(+e.type.oneWay | +e.bridge << 1 | +e.tunnel << 2 | +e.drive << 3);
   }
-  for (const n of nodes) { mix(n.id); word(n.control); mix(n.ring); mix(+!!n.building); }
+  for (const n of nodes) { mix(n.id); word(n.control); mix(n.ring); mix(+!!n.building); for (const s of n.plan?.signs ?? []) mix(s ?? 3); }
   return h >>> 0;
 }
 

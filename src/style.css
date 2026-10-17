@@ -790,6 +790,11 @@ button.nrow:hover { background: var(--soft); }
 .jsvg .off circle { fill: var(--soft); stroke: var(--line); stroke-dasharray: 1.5 1; }
 .jsvg .off text { fill: var(--muted); }
 .jsvg.locked g { opacity: .6; cursor: not-allowed; }
+.jsvg [class^="sg"] polygon { stroke-width: 1.5; stroke-linejoin: round; }
+.jsvg .sg0 polygon { fill: #F2C230; stroke: #fff; }
+.jsvg .sg1 polygon { fill: #fff; stroke: var(--danger); stroke-width: 2; }
+.jsvg .sg2 polygon { fill: var(--danger); stroke: #fff; }
+.jsvg g:focus-visible polygon { stroke: var(--accent); }
 .jph { display: flex; flex-direction: column; gap: .25em; }
 .jph .row { display: flex; align-items: center; gap: .25em; padding-left: .5em; border-left: 3px solid transparent; }
 .jph .row.now { border-left-color: var(--success); }

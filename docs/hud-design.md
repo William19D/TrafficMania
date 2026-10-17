@@ -113,7 +113,7 @@ The dock holds only what is used all the time; building lives in a menu that unf
 
 ### G. Panel column (`.rcol`, newest state, scrolls when full)
 - **Junction** (Edit click on a junction):
-  - control picker: None, Yield, Stop, Light, Roundabout, each with its price or refund;
+  - control picker: None, Signs, Stop, Light, Roundabout, each with its price or refund; Signs shows a clickable sign per arm (priority road, yield, stop) and an Auto signs reset;
   - the hint "Drag from a lane to a road to connect it. Click a line to remove it." (the lane connections are edited on the map) and Reset to auto / Any lane / No lefts;
   - at a light: arm diagram with L/S/R signal buttons that you can reach from the keyboard (a turn no lane connects shows banned);
   - phase rows (select, `−`/`+` seconds, remove), Add phase, and presets.

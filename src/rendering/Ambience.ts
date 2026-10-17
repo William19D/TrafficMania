@@ -90,7 +90,7 @@ export function pedestrians(ctx: CanvasRenderingContext2D, edges: Edge[], hour: 
     const near = a.edges.some(x => x.drive) || b.edges.some(x => x.drive), n = Math.round(L / 70 * (near ? 1.2 : 0.35) * busy + (h % 100) / 100);
     for (let k = 0; k < n && drawn < cap; k++) {
       const hk = Math.imul(h ^ (k * 40503), 2246822519) >>> 0, side = k % 2 ? 1 : -1, spd = 5 + (hk % 5);
-      const d = (now * spd + (hk % 997)) % (2 * L), s = Math.min(L - 3, Math.max(3, d < L ? d : 2 * L - d)), off = side * (e.width / 2 + 2.5);
+      const d = (now * spd + (hk % 997)) % (2 * L), s = Math.min(L - 3, Math.max(3, d < L ? d : 2 * L - d)), off = side * (e.width / 2 + 2.5) - (e.ring ? (e.type.lanes - 1) * 4.5 : 0); // a ring's road lies inside its chords' axis
       const x = a.x + ux * s - uy * off, y = a.y + uy * s + ux * off, step = Math.sin(now * spd * 1.6 + k) * 0.5;
       ctx.fillStyle = 'rgba(0,0,0,.18)';
       ctx.beginPath(); ctx.ellipse(x + 0.8, y + 0.9, 1.9, 1.5, 0, 0, Math.PI * 2); ctx.fill();

@@ -15,10 +15,10 @@ import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
 import type { Vec } from '../util/geom.ts';
-import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
+import type { Control, RingLanes, RingSize, RoadType } from '../network/RoadGraph.ts';
 import { RINGS } from '../network/RoadGraph.ts';
 import type { LinkPreset, Move, Preset } from '../network/Junction.ts';
-import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, linkPreset, links, mainEdges, planOf, removePhase, setSeconds } from '../network/Junction.ts';
+import { MAX_PHASES, PHASE_MAX, PHASE_MIN, PRIORITY, addPhase, applyPreset, approachOf, cycleSig, cycleSign, linkPreset, links, planOf, removePhase, setSeconds, signAt } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
 import { sound } from './Sound.ts';
@@ -30,7 +30,7 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and lane connections.` },
-  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring is faster and takes more and wider roads, but needs more room). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size and ring lanes beside Build (a bigger ring is faster and takes more and wider roads, but needs more room; more lanes carry more). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   zone: { label: 'Zones', tip: 'Drag along a road to zone the lots on both sides (Shift: one side); buildings grow there when the zone is in demand and traffic flows. A drag that starts on a lot of the held zone erases. Tab: next zone, Esc stops.' },
   place: { label: 'Place', tip: 'Click where the building goes. Esc puts it back.' },
@@ -91,10 +91,14 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
-const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: up to ${RINGS[r].arms} roads, ${RINGS[r].lanes} lane${RINGS[r].lanes > 1 ? 's' : ''} each way${price ? ` · ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
+const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: up to ${RINGS[r].arms} roads, ${RINGS[r].lanes} lane${RINGS[r].lanes > 1 ? 's' : ''} each way, ${RINGS[r].rl} ring lane${RINGS[r].rl > 1 ? 's' : ''}${price ? ` · from ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
+const LANES_TIP = ['1 ring lane: every car merges into the one lane', '2 ring lanes: cars for the first exit keep to the outer lane, the rest ride inside and move out before their exit. Medium and large rings, +50%',
+  '3 ring lanes: the further round, the further in. Large rings, +100%'];
 // one button per roundabout size; a = the data attribute it sets
 const ringBtns = (a: string, on: number): string => RINGS.map((x, r) =>
   `<button class="lane wide" ${a}="${r}" aria-pressed="${r === on}" data-tip="${ringTip(r)}"><small>${x.label}</small></button>`).join('');
+// one button per ring lane count
+const laneBtns = (): string => [1, 2, 3].map(k => `<button class="lane" data-rlanes="${k}" aria-pressed="${k === 1}" data-tip="${LANES_TIP[k - 1]}"><b>${k}</b><small>lane${k > 1 ? 's' : ''}</small></button>`).join('');
 // Road tool shape, one toggle showing the active mode (a two-button segment did not fit the dock at 1280px)
 const RMODE_TIP = {
   straight: 'Straight roads: they run straight from click to click. Click for curves',
@@ -160,12 +164,16 @@ const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
 const CONTROL_KEYS = Object.keys(CONTROL_LABEL) as Control[];
 const CONTROL_TIP: Record<Control, string> = {
   none: 'No control: one car at a time, first come first served',
-  yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
+  yield: 'Priority signs: the main road (highest tier) has priority, side roads yield; click a sign to change it',
   stop: 'All-way stop: every car stops at the line, then one at a time',
   light: 'Traffic light: phases you can edit, protected lefts',
   roundabout: 'Roundabout: cars merge into gaps in the ring traffic, no stopping when it is clear',
 };
 const MOVES = ['Left', 'Straight', 'Right'];
+const SIGNS = ['Priority road', 'Yield', 'Stop'];
+// diamond, give-way triangle, octagon
+const SIGN_PTS = ['0,-7 7,0 0,7 -7,0', '-6.5,-4.4 6.5,-4.4 0,6.8',
+  Array.from({ length: 8 }, (_, i) => `${(6 * Math.cos((i + 0.5) * Math.PI / 4)).toFixed(2)},${(6 * Math.sin((i + 0.5) * Math.PI / 4)).toFixed(2)}`).join(' ')];
 const PRESETS: [Preset, string, string][] = [
   ['two', '2 phases', 'One phase per axis, lefts give way to oncoming traffic'],
   ['lefts', 'Protected lefts', '4 phases: per axis a protected-left phase, then straight and right'],
@@ -194,7 +202,7 @@ const tripName = (t: Leg): string => {
   return out ? 'Export' : inn && t.purpose === 'freight' ? 'Import' : inn && t.purpose === 'commute' ? 'Commute from outside' : NAME[t.purpose];
 };
 const JAM_AT: Record<Control | 'road', string> = {
-  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
+  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a priority sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
 const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike', ambulance: 'Ambulance' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
@@ -393,6 +401,7 @@ export class HUD {
           ${GRID_SIZES.map(n => `<button class="lane" data-grid="${n}" aria-pressed="false" data-tip="Blocks of about ${n} tiles"><b>${n}</b><small>tiles</small></button>`).join('')}
         </div>
         <div class="seg rsz" role="group" aria-label="Roundabout size">${ringBtns('data-ring', 0)}</div>
+        <div class="seg rsz" role="group" aria-label="Ring lanes">${laneBtns()}</div>
         <span class="sep"></span>
         <div class="lanes" data-tip="New roads">
           <div class="seg tiers" role="group" aria-label="Road tier">
@@ -501,6 +510,7 @@ export class HUD {
     root.querySelectorAll<HTMLButtonElement>('[data-grid]').forEach(b => { b.onclick = () => { game.gridSize = Number(b.dataset.grid) as Game['gridSize']; }; });
     this.q('[data-action="curve"]').onclick = () => { game.roadCurve = !game.roadCurve; };
     root.querySelectorAll<HTMLButtonElement>('[data-ring]').forEach(b => { b.onclick = () => { game.ringSize = Number(b.dataset.ring) as RingSize; }; });
+    root.querySelectorAll<HTMLButtonElement>('[data-rlanes]').forEach(b => { b.onclick = () => { game.ringLanes = Number(b.dataset.rlanes) as RingLanes; }; });
     this.q('.ipanel').onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-i]'); if (t) this.onIchg(t.dataset.i!); };
     const jp = this.q('.jpanel');
     jp.onclick = e => { const t = (e.target as Element).closest<HTMLElement>('[data-j]'); if (t) this.onJunction(t.dataset.j!); };
@@ -833,6 +843,7 @@ export class HUD {
     if (k === 'close') g.inspect = null;
     else if (k === 'ctl') g.setControl(n, a as Control);
     else if (k === 'ring') g.setControl(n, 'roundabout', i as RingSize);
+    else if (k === 'rl') g.setControl(n, 'roundabout', undefined, i as RingLanes);
     else if (k === 'ph') this.jPhase = i;
     else if (k === 'mv') g.editPlan(n, p => cycleSig(p, this.jPhase, i, Number(b) as Move));
     else if (k === 'sec') g.editPlan(n, p => setSeconds(p, i, p.phases[i].seconds + Number(b)));
@@ -840,11 +851,13 @@ export class HUD {
     else if (k === 'del') g.editPlan(n, p => removePhase(p, i));
     else if (k === 'pre') g.editPlan(n, p => applyPreset(p, a as Preset));
     else if (k === 'lp') g.editPlan(n, p => linkPreset(p, n, a as LinkPreset));
+    else if (k === 'sg') g.editPlan(n, p => cycleSign(p, n, i), true);
+    else if (k === 'sga') g.editPlan(n, p => { delete p.signs; }, true);
   }
 
   private updateJunction(): void {
     const g = this.game, n = g.inspect, panel = this.q('.jpanel');
-    const key = n ? `${n.id}|${n.control}|${n.ring}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
+    const key = n ? `${n.id}|${n.control}|${n.ring}|${g.graph.ringOf(n)?.lanes}|${n.edges.map(e => e.id)}|${JSON.stringify(n.plan)}|${n.phase}|${this.jPhase}|${g.cityLevel}|${g.today}|${g.tutorialActive}` : '';
     if (key === this.last.junction) return;
     if (n && !this.last.junction?.startsWith(`${n.id}|`)) { this.jPhase = 0; this.setHelp(false, false); }
     this.last.junction = key;
@@ -853,7 +866,7 @@ export class HUD {
     const p = planOf(n), light = n.control === 'light', lock = g.lockOf('junction');
     this.jPhase = Math.min(this.jPhase, p.phases.length - 1);
     const ring = n.control === 'roundabout', ph = p.phases[this.jPhase];
-    const main = n.control === 'yield' ? mainEdges(n).map(e => approachOf(p, n, e)) : [];
+    const signs = n.control === 'yield', main = signs ? p.approaches.map((_, i) => i).filter(i => signAt(p, n, i) === PRIORITY) : [];
     const price = (k: Control) => {
       const d = Math.round(g.controlPrice(k) - g.controlRefund(n));
       return d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free';
@@ -878,6 +891,13 @@ export class HUD {
     });
     // all arms first, then the turn buttons on top
     const svg = arms.map(x => x[0]).join('') + arms.map(x => x[1]).join('');
+    // Sign junction diagram: per arm its sign beside the incoming lane, a click cycles it
+    const signSvg = !signs ? '' : arms.map(x => x[0]).join('') + p.approaches.map((a, i) => {
+      const s = signAt(p, n, i), ux = Math.cos(a), uy = Math.sin(a), x = ux * 34 + uy * 14, y = uy * 34 - ux * 14, e = n.edges.find(o => approachOf(p, n, o) === i);
+      if (!e || e.drive || (e.type.oneWay && e.a === n)) return '';
+      return `<g data-j="sg:${i}" class="sg${s}" role="button" tabindex="0" aria-label="${SIGNS[s]} on the ${compass(a)} arm" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">`
+        + `<polygon points="${SIGN_PTS[s]}"/></g>`;
+    }).join('');
     const note = lock ? `${lock}.` : ring ? '' : 'Drag from a lane to a road to connect it. Click a line to remove it.';
     const set = !!p.lanes?.some(Boolean) || p.ban.some(x => x.some(Boolean));
     const lanes = ring || lock ? '' : `<div class="jpre">${LINK_PRESETS.map(([k, l, t]) => `<button class="btn" data-j="lp:${k}" data-tip="${t}"${k === 'auto' && !set ? ' disabled' : ''}>${l}</button>`).join('')}</div>`;
@@ -899,8 +919,15 @@ export class HUD {
         const d = Math.round(g.controlPrice('roundabout', r as RingSize) - g.controlRefund(n)), room = r === n.ring ? '' : g.ringRoom(n, r as RingSize);
         const t = `${ringTip(r, false)}${r === n.ring ? '' : room ? ` · ${room}` : ` · ${d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free'}`}`;
         return `<button class="lane wide" data-j="ring:${r}" aria-pressed="${r === n.ring}" aria-disabled="${!!room}" data-tip="${t}"><small>${x.label}</small></button>`;
+      }).join('')}</div>
+      <div class="seg jctl" role="group" aria-label="Ring lanes">${([1, 2, 3] as const).map(k => {
+        const on = k === g.graph.ringOf(n)?.lanes, off = k > RINGS[n.ring].rl, d = Math.round(g.controlPrice('roundabout', n.ring, k) - g.controlRefund(n));
+        const t = `${LANES_TIP[k - 1]}${on ? '' : off ? ` · Needs a ${k > 2 ? 'large' : 'medium or large'} ring` : ` · ${d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free'}`}`;
+        return `<button class="lane" data-j="rl:${k}" aria-pressed="${on}" aria-disabled="${off}" data-tip="${t}"><b>${k}</b><small>lane${k > 1 ? 's' : ''}</small></button>`;
       }).join('')}</div>` : ''}
-      ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
+      ${signs ? `<p class="jnote">Click a sign to cycle priority road, yield, stop. Priority traffic never stops for the others; yield and stop give way only to traffic they cross.</p>
+      <svg class="jsvg" viewBox="-54 -54 108 108" role="group" aria-label="Priority signs at this junction">${signSvg}<circle class="hub" r="6"/></svg>
+      ${p.signs ? `<div class="jpre"><button class="btn" data-j="sga" data-tip="Back to auto: the highest-tier road has priority, side roads yield">Auto signs</button></div>` : ''}` : ''}
       ${note ? `<p class="jnote">${esc(note)}</p>` : ''}
       ${lanes}
       ${light ? `${lock ? '' : `<p class="jnote">Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.</p>`}
@@ -1231,7 +1258,7 @@ export class HUD {
     this.updateFeed();
     this.updateNews();
     this.updateMetrics();
-    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}|${g.ringSize}`;
+    const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}|${g.ringSize}|${g.ringLanes}`;
     if (gk !== L.gsz) {
       L.gsz = gk;
       // the grid is built on the ground: its block size takes the elevation stepper's place
@@ -1242,6 +1269,13 @@ export class HUD {
       // the roundabout tool only shows its ring size there
       this.q('.ctx').classList.toggle('ring', g.tool === 'roundabout');
       this.root.querySelectorAll<HTMLElement>('[data-ring]').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.ring) === g.ringSize)));
+      // ring lanes: the size caps them (the pick is kept for a bigger size)
+      const rl = RINGS[g.ringSize].rl;
+      this.root.querySelectorAll<HTMLElement>('[data-rlanes]').forEach(b => {
+        const k = Number(b.dataset.rlanes);
+        b.setAttribute('aria-pressed', String(k === Math.min(g.ringLanes, rl)));
+        b.setAttribute('aria-disabled', String(k > rl));
+      });
       const rm = this.q('.rmode'), m = g.roadCurve ? 'curve' : 'straight';
       rm.hidden = g.tool !== 'road';
       rm.innerHTML = `${icon(m)}<small>${m === 'curve' ? 'Curve' : 'Straight'}</small>`;

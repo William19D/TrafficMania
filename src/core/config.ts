@@ -3,12 +3,12 @@
 // save loads as endless); creative: everything, no money
 export type Mode = 'campaign' | 'endless' | 'creative' | 'challenge';
 export type Difficulty = 'easy' | 'normal' | 'hard';
-export type Biome = 'temperate' | 'desert' | 'alpine' | 'archipelago';
+export type Biome = 'forest' | 'temperate' | 'desert' | 'alpine' | 'archipelago';
 export type MapSize = 'small' | 'medium' | 'large';
 // map: a campaign map's id (Campaign.ts: its terrain, constraint and objectives); unlock: the tools an endless run has (a map number,
 // absent = all)
 export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize; map?: string; unlock?: number; events?: 'on' | 'off' }
-export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'endless', difficulty: 'normal', biome: 'temperate', size: 'medium' };
+export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'endless', difficulty: 'normal', biome: 'forest', size: 'medium' };
 
 export const SIZES: Record<MapSize, { w: number; h: number }> = {
   small: { w: 2000, h: 1200 }, medium: { w: 2600, h: 1560 }, large: { w: 3200, h: 1920 },
@@ -27,26 +27,33 @@ export const DIFFICULTY: Record<Difficulty, {
 };
 
 // Terrain mix and palette per biome. rivers: null = the difficulty's count. Water is the same everywhere.
-// patch: [sand, grass] colours; bands: mountain contour fills, outer to inner, lighter toward the peak so it reads raised.
+// patch: [sand, grass] colours; sand: share of patches that are sand; bands: mountain contour fills, outer to inner, lighter toward
+// the peak so it reads raised. Optional: riverW (px, default 34-50), grove (tree cluster size x, default 1).
+// Changing a biome's counts or ranges reshapes its maps, and saves regenerate terrain from the seed: change colours only.
 export const BIOMES: Record<Biome, {
-  label: string; land: string; patch: [string, string]; tree: string; bands: [string, string, string];
-  trees: Range; lakes: Range; lakeR: Range; rivers: Range | null; mountains: number;
+  label: string; land: string; patch: [string, string]; sand: number; tree: string; bands: [string, string, string];
+  trees: Range; lakes: Range; lakeR: Range; rivers: Range | null; mountains: number; riverW?: Range; grove?: number;
 }> = {
+  forest: {
+    label: 'Forest', land: '#BFDB9C', patch: ['#D2DDA2', '#A8CF80'], sand: 0.05, tree: '#4F9B47',
+    bands: ['#86AE69', '#A0A992', '#D2D4CB'], trees: [1500, 1900], lakes: [3, 5], lakeR: [50, 105], rivers: [1, 2], mountains: 0,
+    riverW: [20, 30], grove: 3,
+  },
   temperate: {
-    label: 'Temperate', land: '#E6ECD8', patch: ['#EEE1C0', '#CFE3A8'], tree: '#79B257',
+    label: 'Temperate', land: '#D3E6B4', patch: ['#DFE2B2', '#BEDB92'], sand: 0.15, tree: '#67A94C',
     bands: ['#7D7F79', '#9C9E96', '#C9CBC2'], trees: [120, 200], lakes: [0, 2], lakeR: [70, 130], rivers: null, mountains: 0,
   },
   desert: {
-    label: 'Desert', land: '#F2E6CB', patch: ['#EBD2A0', '#E0DDAE'], tree: '#A3B266',
+    label: 'Desert', land: '#F2E6CB', patch: ['#EBD2A0', '#E0DDAE'], sand: 0.4, tree: '#A3B266',
     bands: ['#A8835F', '#C29E78', '#DABE96'], trees: [20, 40], lakes: [1, 2], lakeR: [45, 80], rivers: [0, 1], mountains: 0,
   },
   alpine: {
-    label: 'Alpine', land: '#E3EBE1', patch: ['#F5F7F7', '#D3E3C8'], tree: '#5E8F5A',
+    label: 'Alpine', land: '#D8E6D2', patch: ['#F5F7F7', '#C6DDB8'], sand: 0.4, tree: '#5E8F5A',
     bands: ['#8E9296', '#6F7377', '#F4F5F6'], trees: [200, 280], lakes: [1, 3], lakeR: [60, 110], rivers: null, mountains: 3,
   },
   // ponytail: islands are the land left between many large lakes and wide channels; a real sea mask if coastlines matter
   archipelago: {
-    label: 'Archipelago', land: '#E7EDD6', patch: ['#F0E2BC', '#CDE3A6'], tree: '#74B25A',
+    label: 'Archipelago', land: '#D6E8BA', patch: ['#F0E2BC', '#C2DE98'], sand: 0.3, tree: '#74B25A',
     bands: ['#7D7F79', '#9C9E96', '#C9CBC2'], trees: [90, 150], lakes: [6, 9], lakeR: [130, 230], rivers: [2, 3], mountains: -2,
   },
 };

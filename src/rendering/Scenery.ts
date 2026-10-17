@@ -12,11 +12,12 @@ const FLOWERS = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2', '#FF8A65'];
 const CROPS = ['#E9D58C', '#C4DE8E', '#C8A67A', '#A8CF86', '#C6B5E2', '#F0CB52'];
 type Species = 'round' | 'conifer' | 'snowy' | 'palm' | 'blossom' | 'autumn' | 'cactus';
 // Per biome: species weights, ground detail per 10,000 px² (grass tufts, flower clusters, rocks, bushes), farms and parks per map,
-// the share of rocky shore, the sand bank colour and a bush tone
+// the share of rocky shore, the sand bank colour, a bush tone and (optional) a darker forest floor under the groves (alpha)
 const DECO: Record<Biome, {
-  trees: [Species, number][]; tufts: number; flowers: number; rocks: number; bushes: number; farms: number; parks: number; rocky: number; bank: string; bush: string;
+  trees: [Species, number][]; tufts: number; flowers: number; rocks: number; bushes: number; farms: number; parks: number; rocky: number; bank: string; bush: string; floor?: number;
 }> = {
-  temperate: { trees: [['round', 62], ['conifer', 22], ['blossom', 9], ['autumn', 7]], tufts: 10, flowers: 0.8, rocks: 0.06, bushes: 0.5, farms: 7, parks: 3, rocky: 0.2, bank: '#E8DDBE', bush: '#6FA552' },
+  forest: { trees: [['round', 50], ['conifer', 44], ['autumn', 4], ['blossom', 2]], tufts: 14, flowers: 1.8, rocks: 0.08, bushes: 1, farms: 3, parks: 2, rocky: 0.3, bank: '#B9CF92', bush: '#4F9446', floor: 0.5 },
+  temperate: { trees: [['round', 62], ['conifer', 22], ['blossom', 9], ['autumn', 7]], tufts: 10, flowers: 0.8, rocks: 0.06, bushes: 0.5, farms: 7, parks: 3, rocky: 0.2, bank: '#D8D9AE', bush: '#5E9C46' },
   desert: { trees: [['palm', 50], ['cactus', 30], ['round', 20]], tufts: 2, flowers: 0.05, rocks: 0.4, bushes: 0.35, farms: 2, parks: 1, rocky: 0.3, bank: '#E9D4A2', bush: '#A3A865' },
   alpine: { trees: [['conifer', 50], ['snowy', 40], ['round', 10]], tufts: 5, flowers: 0.35, rocks: 0.3, bushes: 0.4, farms: 4, parks: 2, rocky: 0.75, bank: '#DCD8CC', bush: '#5E8F5A' },
   archipelago: { trees: [['round', 55], ['palm', 35], ['blossom', 10]], tufts: 6, flowers: 0.5, rocks: 0.08, bushes: 0.5, farms: 3, parks: 2, rocky: 0.3, bank: '#EEE0B8', bush: '#6FAE58' },
@@ -114,7 +115,7 @@ export function paintTerrain(t: Terrain, s: number): HTMLCanvasElement {
   tile.width = tile.height = 96;
   const tc = tile.getContext('2d')!;
   for (let i = 0; i < 900; i++) {
-    tc.fillStyle = rng() < 0.55 ? 'rgba(70,90,40,.08)' : 'rgba(255,255,235,.12)';
+    tc.fillStyle = rng() < 0.55 ? 'rgba(60,90,40,.09)' : 'rgba(240,255,225,.10)';
     tc.fillRect(Math.floor(rng() * 96), Math.floor(rng() * 96), rng() < 0.3 ? 2 : 1, 1);
   }
   ctx.save();
@@ -299,6 +300,14 @@ export function paintTerrain(t: Terrain, s: number): HTMLCanvasElement {
     for (const [s, w] of deco.trees) if ((k -= w) < 0) { sp = s; break; }
     return { p, sp, r: 5 + rng() * 2.6, tone: (rng() - 0.5) * 0.16, a: rng() * Math.PI };
   }).sort((u, v) => u.p.y - v.p.y);
+  if (deco.floor) {
+    ctx.globalAlpha = deco.floor;
+    ctx.fillStyle = shade(b.land, -0.16);
+    ctx.beginPath();
+    for (const p of t.trees) { ctx.moveTo(p.x + 12, p.y); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = 'rgba(40,60,30,.18)';
   for (const { p, r } of trees) { ctx.beginPath(); ctx.ellipse(p.x + r * 0.5, p.y + r * 0.65, r * 1.05, r * 0.85, 0, 0, Math.PI * 2); ctx.fill(); }
   for (const tr of trees) tree(ctx, tr.p, tr.r, tr.sp, b.tree, tr.tone, tr.a);
