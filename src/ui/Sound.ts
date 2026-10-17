@@ -1,12 +1,12 @@
 // Synthesized sound (Web Audio, no files): UI clicks and hover ticks, build / demolish / place cues from the sim (Game.sfx),
-// an income blip, the level-up fanfare, the fail-countdown alarm, the error buzz (from the HUD), a city hum that follows the
-// traffic on screen and the zoom, a horn now and then from a car that has waited long, and a calm generative music loop.
+// an income blip, the level-up, star and achievement fanfares, a chime when a jam clears, the fail-countdown alarm, the error buzz (from the HUD), a city hum that follows the
+// traffic on screen and the zoom, a horn now and then from a car that has waited long, and a calm generative music loop whose shaker and arpeggio layers come in as traffic on screen flows.
 // The AudioContext starts on the first gesture (autoplay policy) and is suspended while muted or the tab is hidden.
 import type { Game, Sfx } from '../core/Game.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 
 export interface Mix { master: number; music: number; sfx: number; muted: boolean; musicOn: boolean }
-type Cue = Sfx | 'click' | 'tick' | 'income' | 'level' | 'alarm' | 'error' | 'horn';
+type Cue = Sfx | 'click' | 'tick' | 'income' | 'level' | 'stars' | 'trophy' | 'alarm' | 'error' | 'horn';
 
 const KEY = 'tm_audio';
 const DEFAULT_MIX: Mix = { master: 0.7, music: 0.5, sfx: 0.8, muted: false, musicOn: true };
@@ -16,6 +16,8 @@ const HORN_WAIT = 8, HORN_GAP = 5;
 const BEAT = 0.6;
 const CHORDS = [[53, 57, 60, 64], [52, 55, 59, 62], [50, 53, 57, 60], [48, 52, 55, 62]];
 const SCALE = [72, 74, 76, 79, 81, 84]; // C major pentatonic, over the pad
+// the jam-clear chime at most every CLEAR_GAP real seconds
+const CLEAR_GAP = 2;
 const hz = (m: number): number => 440 * 2 ** ((m - 69) / 12);
 
 function loadMix(): Mix {
@@ -28,6 +30,10 @@ class Sound {
   private out!: GainNode;
   private fx!: GainNode;
   private music!: GainNode;
+  // music layers: shaker (traffic moving) and arpeggio (busy and flowing), faded by update
+  private layerA!: GainNode;
+  private layerB!: GainNode;
+  private lastClear = 0;
   private echo!: DelayNode;
   private hum!: GainNode;
   private humLp!: BiquadFilterNode;
@@ -78,6 +84,11 @@ class Sound {
     this.fx.connect(this.out);
     this.music = c.createGain();
     this.music.connect(this.out);
+    this.layerA = c.createGain();
+    this.layerB = c.createGain();
+    this.layerA.gain.value = this.layerB.gain.value = 0;
+    this.layerA.connect(this.music);
+    this.layerB.connect(this.music);
     // the melody's echo: a feedback delay into the music bus
     this.echo = c.createDelay(1);
     this.echo.delayTime.value = BEAT * 0.75;
@@ -159,6 +170,22 @@ class Sound {
       case 'demolish': this.burst(t, 0.35, 0.8, 1400); this.tone(130, t, 0.25, 0.2, 'triangle', 45); break;
       case 'income': this.tone(1568, t, 0.1, 0.05); this.tone(2093, t + 0.06, 0.16, 0.045); break;
       case 'error': this.tone(155, t, 0.11, 0.12, 'sawtooth', 140); this.tone(155, t + 0.13, 0.14, 0.12, 'sawtooth', 120); break;
+      case 'clear': {
+        const now = performance.now() / 1000;
+        if (now - this.lastClear < CLEAR_GAP) break;
+        this.lastClear = now;
+        this.tone(1319, t, 0.5, 0.06); this.tone(1976, t + 0.08, 0.7, 0.05); this.tone(2637, t + 0.16, 0.6, 0.025);
+        break;
+      }
+      case 'stars':
+        [392, 523, 659, 784].forEach((f, i) => { this.tone(f, t + i * 0.13, 0.3, 0.16, 'sawtooth', f, this.fx, 0.02); this.tone(f * 2, t + i * 0.13, 0.3, 0.05); });
+        [523, 659, 784, 1047].forEach(f => this.tone(f, t + 0.6, 1.6, 0.1, 'triangle', f, this.fx, 0.03, 1));
+        [1568, 2093, 2637].forEach((f, i) => this.tone(f, t + 0.75 + i * 0.22, 0.5, 0.05));
+        break;
+      case 'trophy':
+        [784, 988, 1175, 1568].forEach((f, i) => this.tone(f, t + i * 0.07, 0.9, 0.08, 'sine'));
+        this.tone(392, t, 0.9, 0.12, 'triangle');
+        break;
       case 'level':
         [523, 659, 784, 1047].forEach((f, i) => this.tone(f, t + i * 0.11, 0.35, 0.2, 'triangle'));
         [659, 784, 1047].forEach(f => this.tone(f, t + 0.48, 1.1, 0.12, 'triangle'));
@@ -191,6 +218,20 @@ class Sound {
         this.tone(hz(m), t + (Math.random() < 0.3 ? BEAT / 2 : 0), BEAT * 1.6, 0.05, 'sine', hz(m), this.echo, 0.02);
         this.tone(hz(m), t, BEAT * 1.6, 0.04, 'sine', hz(m), this.music, 0.02);
       }
+      // layers (silent until update fades them in): a shaker on the off-beat, chord tones in eighths
+      const sh = c.createBufferSource(), hp = c.createBiquadFilter(), g = c.createGain();
+      sh.buffer = this.noise;
+      hp.type = 'highpass';
+      hp.frequency.value = 6000;
+      g.gain.setValueAtTime(0.25, t + BEAT / 2);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT / 2 + 0.08);
+      sh.connect(hp).connect(g).connect(this.layerA);
+      sh.start(t + BEAT / 2, Math.random());
+      sh.stop(t + BEAT / 2 + 0.1);
+      for (let i = 0; i < 2; i++) {
+        const m = chord[(this.beat * 2 + i) % 4] + 12;
+        this.tone(hz(m), t + i * BEAT / 2, BEAT * 0.45, 0.035, 'triangle', hz(m), this.layerB, 0.01);
+      }
     }
   }
 
@@ -214,17 +255,22 @@ class Sound {
     s.at = now;
     // cars on screen (capped count), any of them waiting long enough to honk
     const a = view.screenToWorld(0, 0), b = view.screenToWorld(innerWidth, innerHeight);
-    let n = 0, honk: { car: object; x: number } | null = null;
+    let n = 0, moving = 0, honk: { car: object; x: number } | null = null;
     for (const car of g.cars) {
       const p = g.graph.carPos(car);
       if (p.x < a.x || p.y < a.y || p.x > b.x || p.y > b.y) continue;
       if (car.wait > HORN_WAIT && !this.honked.has(car)) honk = { car, x: p.x };
+      moving += +(car.speed > 2);
       if (++n >= 80) break;
     }
     const busy = Math.min(1, n / 50), near = Math.min(1, Math.max(0, (view.cam.zoom - 0.3) / 1.7));
     const vol = (0.03 + 0.22 * busy) * (0.45 + 0.55 * near) * (paused ? 0.25 : 1);
     this.hum.gain.setTargetAtTime(vol, c.currentTime, 0.4);
     this.humLp.frequency.setTargetAtTime(220 + 520 * busy * near, c.currentTime, 0.4);
+    // the layers follow the flow: moving share of the cars on screen, slow fades so a jam lets the music thin out
+    const flow = n ? moving / n : 0, on = !paused && n >= 4;
+    this.layerA.gain.setTargetAtTime(on && flow > 0.4 ? 0.5 + 0.5 * busy : 0, c.currentTime, 3);
+    this.layerB.gain.setTargetAtTime(on && busy > 0.35 && flow > 0.65 ? 1 : 0, c.currentTime, 4);
     if (honk && !paused && now - this.lastHorn > HORN_GAP && Math.random() < 0.5) {
       this.lastHorn = now;
       this.honked.add(honk.car);

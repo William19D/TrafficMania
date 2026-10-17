@@ -35,7 +35,11 @@ export type GameOver = '' | 'bankrupt' | 'unhappy' | 'gridlock' | 'deadline';
 // Map overlays: congestion heat map, or road noise and factory pollution with each home's happiness
 export type Overlay = 'none' | 'heat' | 'noise';
 // Sound cues the sim raises (a set: one per kind per frame); the audio drains it, headless nobody does and it stays this small
-export type Sfx = 'build' | 'demolish' | 'place';
+export type Sfx = 'build' | 'demolish' | 'place' | 'clear';
+// Map juice the renderer draws and ages out: a coin pop on income, sparkles where a jam cleared (not saved, the last FX_MAX, FX_LIFE game s)
+export interface Fx { kind: 'coin' | 'clear'; x: number; y: number; at: number; n: number }
+export const FX_LIFE = 2;
+const FX_MAX = 40, JAM_HI = 0.7, JAM_LO = 0.35;
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
 // Match day quest (game-v3 8): this share of fans on time pays the bonus
@@ -180,7 +184,7 @@ export class Game {
   // Highway exits linked at the last spend (the toast when one more links)
   private exitsLinked = 0;
   // Bumped on every build, demolish and driveway: interchange previews are cached against it
-  private version = 0;
+  version = 0;
   private ichgCache = new Map<string, PathPlan>();
   // Run selected with the Edit tool (edges in run order), or the junction it inspects (never both)
   selected: Edge[] | null = null;
@@ -188,6 +192,13 @@ export class Game {
   // Edges created by the last commitPath, in build order (reused edges not included)
   lastBuilt: Edge[] = [];
   sfx = new Set<Sfx>();
+  fx: Fx[] = [];
+  // Bumped on every spend (a build, paint, demolish or refund): main.ts records an undo step when it moves
+  edits = 0;
+  // Edges jammed (heat over JAM_HI) until they cool under JAM_LO, checked once a game second; the last coin pop's time
+  private jammed = new Set<Edge>();
+  private jamAt = 0;
+  private coinAt = -1;
   gameOver: GameOver = '';
   // City happiness 0..100 (EMA of the residents-weighted home mean) and its weighted parts
   happiness = 60;
@@ -320,6 +331,7 @@ export class Game {
     for (const b of this.buildings) this.trySpawnCar(b, dt);
 
     this.graph.update(dt);
+    this.juice();
 
     for (let i = this.cars.length - 1; i >= 0; i--) {
       const car = this.cars[i];
@@ -360,6 +372,29 @@ export class Game {
     this.money += pay;
     if (trade) { this.ledger.today.trade += pay; this.metrics.trade(); }
     else this.ledger.today.business += pay;
+    // ponytail: one pop per quarter game second, the rest of the income is silent
+    if (pay > 0 && this.time - this.coinAt > 0.25) { this.coinAt = this.time; this.pop({ kind: 'coin', x: t.to.x, y: t.to.y, at: this.time, n: pay }); }
+  }
+
+  private pop(f: Fx): void {
+    this.fx.push(f);
+    if (this.fx.length > FX_MAX) this.fx.shift();
+  }
+
+  // Ages out the map juice; once a game second, a jammed road that cooled sparkles and chimes
+  private juice(): void {
+    while (this.fx.length && this.time - this.fx[0].at > FX_LIFE) this.fx.shift();
+    if (this.time < this.jamAt) return;
+    this.jamAt = this.time + 1;
+    for (const e of this.jammed) if (!this.graph.edges.includes(e)) this.jammed.delete(e);
+    for (const e of this.graph.edges) {
+      if (e.drive || e.ring) continue;
+      if (e.heat > JAM_HI) this.jammed.add(e);
+      else if (e.heat < JAM_LO && this.jammed.delete(e)) {
+        this.pop({ kind: 'clear', x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2, at: this.time, n: 0 });
+        this.sfx.add('clear');
+      }
+    }
   }
 
   // Residential taxes per day at the current population and happiness
@@ -935,6 +970,7 @@ export class Game {
   // net: counts toward the campaign's network spend (zoning does not)
   spend(cost: number, net = true): void {
     this.money -= cost;
+    this.edits++;
     if (net) this.run.spent += cost;
     if (cost) this.sfx.add(cost > 0 ? 'build' : 'demolish');
     this.ledger.today.build += cost;

@@ -134,6 +134,7 @@ export const CONTROLS: [string, string][] = [
   ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
   ['Road angle in 15° steps', 'hold <kbd>Ctrl</kbd> or <kbd>Alt</kbd> while placing'],
   ['Cancel road', '<kbd>Esc</kbd> or right-click'],
+  ['Undo / redo a build, paint or demolish', '<kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Y</kbd> (not in Challenge)'],
   ['Road type', 'tier (dirt to highway), lanes 1 / 2 / 3 and One-way beside Build: new roads, or the road selected with Edit'],
   ['Raise / lower road', '<kbd>PageUp</kbd> / <kbd>PageDown</kbd> or <kbd>+</kbd> / <kbd>-</kbd>'],
   ['Ramp', 'start or end a road on a road of another level: it climbs one level per tile'],
@@ -692,7 +693,7 @@ export class HUD {
     el.className = 'toast ach';
     el.innerHTML = `${icon('trophy')}<span class="txt"><b>Achievement: ${esc(d.name)}</b><small>${esc(d.text)}${d.reward ? ` · ${esc(rewardText(d))}` : ''}</small></span>`;
     this.q('.toasts').appendChild(el);
-    sound.play('level');
+    sound.play('trophy');
     this.game.note(`Achievement: ${d.name}`, null, true);
     setTimeout(() => el.remove(), 5000);
   }
@@ -740,7 +741,7 @@ export class HUD {
     } else if (g.pendingGrade) {
       if (g.speed) this.resume = g.speed;
       g.speed = 0;
-      sound.play('level');
+      sound.play('stars');
       const r = g.pendingGrade, m = g.map!, row = (ok: boolean, label: string, val: string) => `<p class="${ok ? '' : 'miss'}">${icon(ok ? 'check' : 'close')}${esc(label)}<b class="num">${val}</b></p>`;
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">

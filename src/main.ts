@@ -8,7 +8,8 @@ import { Menu } from './ui/Menu.ts';
 import { attachInput } from './ui/Input.ts';
 import { sound } from './ui/Sound.ts';
 import { GameLoop } from './core/GameLoop.ts';
-import { AUTO, load, store } from './core/Save.ts';
+import { AUTO, load, restore, serialize, store } from './core/Save.ts';
+import { HOUR } from './core/Game.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
 import type { GameConfig, Mode } from './core/config.ts';
 import type { Vec } from './util/geom.ts';
@@ -43,6 +44,34 @@ const tourFor = (cfg: GameConfig): boolean => !tutorialDone() && cfg.mode === 'c
 let game: Game, hud: HUD, tutorial: Tutorial, tips: Tips, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0, arrived = 0, achKey = '';
 // the profile's lifetime trips grow by what this game arrived since the last count (each midnight and on quitting)
 const tally = (): void => { profile().stats.trips += game.stats.arrived - arrived; arrived = game.stats.arrived; saveProfile(); };
+// Undo / redo (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z): every press snapshots the game; when a spend follows (a build, paint or demolish) that
+// snapshot becomes an undo step. Steps older than UNDO_AGE game time go (an undo rewinds the clock to its step); off in Challenge.
+// ponytail: a whole save per press, ~ms on a big city; snapshot on the tool's press only if it ever shows in a profile
+const UNDO_MAX = 30, UNDO_AGE = 6 * HOUR;
+type Step = { json: string; at: number };
+let undo: Step[] = [], redo: Step[] = [], pend: Step | null = null, pendEdits = 0;
+const snap = (): Step => ({ json: serialize(game), at: game.time });
+window.addEventListener('pointerdown', () => { if (!menu.open) { pend = snap(); pendEdits = game.edits; } }, true);
+const step = (from: Step[], to: Step[], verb: string): void => {
+  if (game.challenge) { game.say('Undo is off in Challenge'); return; }
+  const fresh = from.findIndex(s => game.time - s.at <= UNDO_AGE);
+  from.splice(0, fresh < 0 ? from.length : fresh);
+  const s = from.pop();
+  if (!s) { game.say(`Nothing to ${verb.toLowerCase()}`); return; }
+  input.cancel();
+  to.push(snap());
+  restore(game, s.json);
+  pend = null;
+  game.say(verb === 'Undo' ? 'Undone' : 'Redone');
+  sound.play(verb === 'Undo' ? 'demolish' : 'build');
+};
+window.addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.metaKey) || menu.open || (e.target as Element).closest?.('input, textarea')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); step(undo, redo, 'Undo'); }
+  else if (k === 'y' || k === 'z') { e.preventDefault(); step(redo, undo, 'Redo'); }
+});
+
 const autosave = (): void => { tally(); if (!game.gameOver) store(AUTO, game); };
 
 const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
@@ -59,6 +88,9 @@ function start(g: Game, tour = false): void {
   ctl.abort();
   ctl = new AbortController();
   game = g;
+  undo = [];
+  redo = [];
+  pend = null;
   day = g.day;
   arrived = g.stats.arrived;
   // a map grade with stars goes to the profile; an Endless run gains the tools starred since it began
@@ -103,6 +135,7 @@ new GameLoop(
       game.update(step);
       acc -= step;
     }
+    if (pend && game.edits !== pendEdits) { undo.push(pend); undo.splice(0, undo.length - UNDO_MAX); redo = []; pend = null; }
     if (game.day !== day) { day = game.day; autosave(); }
     // achievements: on the hour and on each counted event (fv)
     const k = `${game.lastHour}|${game.fv}`;

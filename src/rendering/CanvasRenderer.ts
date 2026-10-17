@@ -10,7 +10,7 @@ import type { Building } from '../entities/Building.ts';
 import type { Lot } from '../core/Zones.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
-import { CONTROL_LABEL, HOUR, exitEdge, fmtMoney } from '../core/Game.ts';
+import { CONTROL_LABEL, FX_LIFE, HOUR, exitEdge, fmtMoney } from '../core/Game.ts';
 import { corners, lotAt, lotRect } from '../core/Zones.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
@@ -400,6 +400,7 @@ export class CanvasRenderer {
       ctx.stroke();
     }
 
+    this.juice(game);
     if (hover && (!preview || game.tool === 'interchange')) this.hoverFx(game, hover, preview);
 
     // No road access: red badge on the roof, and a label while the cursor is over the building
@@ -814,6 +815,27 @@ export class CanvasRenderer {
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
+  // Coin pops rise and fade over income; a cleared jam throws a ring of green sparkles
+  private juice(game: Game): void {
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const f of game.fx) {
+      const k = Math.min(1, Math.max(0, (game.time - f.at) / FX_LIFE));
+      ctx.globalAlpha = 1 - k * k;
+      if (f.kind === 'coin') {
+        const y = f.y - 14 - 22 * k;
+        this.circle(f.x - 9, y, 5, '#E8B23A');
+        this.circle(f.x - 9, y, 3, '#F7D774');
+        this.text(`+${fmtMoney(f.n)}`, f.x + 6, y, 'bold 10px system-ui', '#2E8B4A');
+      } else for (let i = 0; i < 10; i++) {
+        const a = i * Math.PI / 5 + f.x, r = 6 + 26 * Math.sqrt(k);
+        this.circle(f.x + Math.cos(a) * r, f.y + Math.sin(a) * r, 2.5 * (1 - k) + 0.5, i % 2 ? '#7FD88F' : '#FFFFFF');
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private hoverFx(game: Game, p: Vec, preview: PathPlan | null): void {
     const ctx = this.ctx, g = game.graph;
     const label = (s: string, x: number, y: number, color: string) => {

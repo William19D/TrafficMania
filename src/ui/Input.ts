@@ -21,6 +21,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   readonly preview: PathPlan | null; readonly anchor: Vec | null; readonly handle: Vec | null; readonly hover: Vec | null;
   // a road, bend or grid in progress (Esc cancels it before it opens the pause menu)
   readonly busy: boolean;
+  // drops a road, bend, grid or brush in progress (an undo swaps the objects under it)
+  cancel(): void;
 } {
   let hover: Vec | null = null;
   let panning = false;
@@ -263,5 +265,6 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     get handle() { live(); return handle; },
     get hover() { live(); return blocked() ? null : hover; },
     get busy() { return mode !== 'idle' || !!run || grid.length > 0 || !!brush || !!linkUI.drag; },
+    cancel,
   };
 }

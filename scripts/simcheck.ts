@@ -18,7 +18,7 @@ import type { Biome, GameConfig, Special, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
-import { deserialize, serialize } from '../src/core/Save.ts';
+import { deserialize, restore, serialize } from '../src/core/Save.ts';
 import { ZONE_LIST, commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
 import { CHALLENGE_MONEY, MAPS, cfgFor, grade, milestonePop, milestonesAt, takeOffer } from '../src/core/Campaign.ts';
 import { checkAch, owned } from '../src/core/Achievements.ts';
@@ -1608,6 +1608,26 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   delete d.ev;
   const old = deserialize(JSON.stringify(d));
   if (old.events.length || old.nextEventAt !== d.time + 4 * HOUR) fail('events: an old save loads with events');
+}
+// G7 undo: a build bumps edits; restoring the pre-build save in place takes the road and its cost back on the same Game object.
+// Juice: a road that jammed and cooled throws one 'clear' sparkle and chime; income pops a coin
+{
+  const w = blank(), a = { x: 100, y: 500 }, b = { x: 500, y: 500 }, before = serialize(w), m0 = w.money, e0 = w.edits;
+  w.commitPath(w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }));
+  if (w.edits === e0 || !w.graph.edges.length || w.money === m0) fail('undo: a build did not count as an edit');
+  const self = w, tool = w.tool = 'demolish';
+  restore(w, before);
+  if (w !== self || w.graph.edges.length || w.money !== m0 || w.tool !== tool || w.edits === e0) fail('undo: restore did not rewind the build in place');
+  w.commitPath(w.planPath([a, b], 0, { tier: 'avenue', lanes: 1, oneWay: false }));
+  const e = w.graph.edges[0];
+  e.heat = 0.95;
+  w.update(DT);
+  e.heat = 0.1;
+  w.sfx.clear();
+  for (let t = 0; t < 70; t++) w.update(DT);
+  if (w.fx.filter(f => f.kind === 'clear').length !== 1 || !w.sfx.has('clear')) fail('juice: a cleared jam did not sparkle and chime');
+  for (let t = 0; t < 3 * 60; t++) w.update(DT);
+  if (w.fx.length) fail('juice: fx did not age out');
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

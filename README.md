@@ -75,6 +75,7 @@ Requires Node.js 18 or newer.
 | Tools, in dock order | Click a dock button | `1` Road · `2` Grid · `3` Light · `4` Roundabout · `5` Interchange · `6` Edit · `7` Demolish |
 | Place buildings | **Buildings** in the dock, or a card in the tray | `B`, `R` turns a free-standing one |
 | Place / bend a road | Click the start, click the end; hold the end and drag to bend | `Esc` or right-click cancels |
+| Undo / redo | A build, zone paint or demolish (recent ones; not in Challenge) | `Ctrl+Z` / `Ctrl+Y` |
 | Road type | Tier, lanes 1 / 2 / 3 and **One-way** in the dock | applies to new roads, or to the road selected with Edit |
 | Elevation | `−` / `+` in the dock | `PageDown` / `PageUp` |
 | Edit | Click a car (follow), a building (details), a junction (control, phases, drag lane connections) or a road (retype, drag to bend) | `6` |

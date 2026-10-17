@@ -147,6 +147,15 @@ export function deserialize(json: string): Game {
   return g;
 }
 
+// Undo / redo: the save loaded into the running game in place (the HUD, input and sound keep their reference). The player's tool
+// settings, the feed, the camera hooks and the terrain stay; picks and selections into the old objects go.
+// ponytail: a whole save per step (cars go back to their doors, the clock rewinds to the step); diff the graph if undo must keep the sim
+export function restore(g: Game, json: string): void {
+  const n = deserialize(json), { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version } = g;
+  Object.assign(g, n, { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version: version + 1 });
+  if (tool === 'place') g.setTool('road');
+}
+
 // ---- localStorage: the autosave (every midnight and on quitting to the menu) and three slots ----
 export const AUTO = 'tm_save_auto';
 export const SLOTS = ['tm_save_1', 'tm_save_2', 'tm_save_3'];
