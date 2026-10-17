@@ -2,7 +2,7 @@ import { profile } from '../core/Profile.ts';
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, deckH, onRing, rampJoint, ringOut, roadWidth } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, deckH, onRing, rampJoint, ringIn, ringMid, ringOut, roadWidth } from '../network/RoadGraph.ts';
 import { PRIORITY, STOP, YIELD, approachOf, autoMasks, inLanes, laneMasks, links, moveOf, planOf, signOf } from '../network/Junction.ts';
 import { armSpot, curve, editable, linkUI, linksOf, handles, signPost, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
@@ -676,7 +676,8 @@ export class CanvasRenderer {
     ctx.lineJoin = 'round';
     for (const e of ground) if (e.bridge) this.bridge(e.a, e.b, terrain, e.width);
 
-    const joints = nodes.filter((n) => n.edges.some((e) => !e.tunnel && e.level === 0));
+    // a plain ring node needs no joint: the ring is drawn as arcs (its node sits on the outer lane, off the road's middle)
+    const joints = nodes.filter((n) => n.edges.some((e) => !e.tunnel && e.level === 0) && !n.edges.every(e => e.ring));
     const walkJ = joints.map(n => [n, jointEdge(n, 0)] as const).filter((x): x is [Node, Edge] => !!x[1] && walked(x[1]));
     const kerbX = (e: Edge): number => e.type.tier === 'boulevard' ? 16 : 12;
     const band = (col: (e: Edge) => string, extra: (e: Edge) => number, only: (e: Edge) => boolean, edgesOnly = false): void => {
@@ -760,7 +761,7 @@ export class CanvasRenderer {
     for (const e of ground) if (!e.drive && !e.ring) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
     this.details(ground.filter(e => !e.ring));
     this.controls(nodes0, 'static');
-    for (const r of rings) this.island(r);
+    for (const r of rings) { this.ringMarks(r); this.island(r); }
   }
 
   // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
@@ -880,12 +881,12 @@ export class CanvasRenderer {
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
       const cost = game.controlPrice(kind) - game.controlRefund(n), ring = kind === 'roundabout';
-      const here = n.control === kind && (!ring || n.ring === game.ringSize);
+      const lanes = Math.min(game.ringLanes, RINGS[game.ringSize].rl), here = n.control === kind && (!ring || (n.ring === game.ringSize && r?.lanes === lanes));
       const reason = n.building || (!r && n.edges.length < 3) ? 'Needs an intersection (3+ roads)'
         : ring && !here && game.ringRoom(n, game.ringSize) || (!here && cost > game.money ? 'Not enough money' : null);
       // a roundabout previews the ring of the chosen size
       this.ring(n.x, n.y, ring ? ringOut(game.ringSize) + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
-      const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Resize to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()} roundabout`;
+      const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Change to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()}${lanes > 1 ? ` ${lanes}-lane` : ''} roundabout`;
       const place = here ? 'Already here' : `${what} · ${cost < 0 ? '+' : ''}${fmtMoney(Math.abs(cost))}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
     } else if (game.tool === 'road') {
@@ -1315,10 +1316,41 @@ export class CanvasRenderer {
     }
   }
 
+  // A multi-lane ring's markings: a dashed line between its lanes, and before each arm an arrow in every inner lane bending out (cars
+  // move out a lane per arm they pass, RoadGraph.ringPick: a spiral to their exit)
+  private ringMarks(ring: Ring): void {
+    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r, L = ring.lanes;
+    if (L < 2) return;
+    ctx.setLineDash([3, 3]);
+    for (let k = 1; k < L; k++) this.ring(n.x, n.y, R - (k - 0.5) * LANE_W, PAINT, 0.9);
+    ctx.setLineDash([]);
+    const step = 2 * Math.PI / RINGS[n.ring].n, at = (a: number, r: number): Vec => ({ x: n.x + Math.cos(a) * r, y: n.y + Math.sin(a) * r });
+    ctx.strokeStyle = ctx.fillStyle = PAINT;
+    ctx.lineWidth = 1.1;
+    for (const v of ring.nodes) {
+      if (v.edges.every(e => e.ring)) continue;
+      const a0 = Math.atan2(v.y - n.y, v.x - n.x) + 1.8 * step;
+      for (let k = 1; k < L; k++) {
+        // travel runs toward falling angle; from lane k in to the next lane out over ~12px
+        const r = R - k * LANE_W, a1 = a0 - 12 / r, p = at(a0, r), c = at((a0 + a1) / 2, r), q = at(a1, r + LANE_W * 0.8);
+        const dx = q.x - c.x, dy = q.y - c.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.quadraticCurveTo(c.x, c.y, q.x - ux * 1.5, q.y - uy * 1.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(q.x + ux * 1.2, q.y + uy * 1.2);
+        ctx.lineTo(q.x - ux * 1.6 - uy * 1.6, q.y - uy * 1.6 + ux * 1.6);
+        ctx.lineTo(q.x - ux * 1.6 + uy * 1.6, q.y - uy * 1.6 - ux * 1.6);
+        ctx.fill();
+      }
+    }
+  }
+
   // Roundabout centre: a cobbled truck apron, a kerb, a planted island with shrubs round it and, by the profile's decor (Achievements.ts),
   // a tree on grass, a flower bed, a fountain or a statue in the middle
   private island(ring: Ring): void {
-    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r - RING_W / 2, g = shade(this.land, -0.12), decor = profile().cosmetics.island;
+    const ctx = this.ctx, n = ring.hub, R = ringIn(n.ring, ring.lanes), g = shade(this.land, -0.12), decor = profile().cosmetics.island;
     this.circle(n.x, n.y, R, '#D9D3C5');
     ctx.setLineDash([1.2, 1.2]);
     this.ring(n.x, n.y, R - 1.3, '#C4BDAD', 1.4);
@@ -1683,7 +1715,7 @@ export class CanvasRenderer {
   private line(e: Edge, color: string | CanvasPattern, width: number): void {
     const ctx = this.ctx, r = e.ring?.hub;
     ctx.beginPath();
-    if (r) ctx.arc(r.x, r.y, RINGS[r.ring].r, Math.atan2(e.a.y - r.y, e.a.x - r.x), Math.atan2(e.b.y - r.y, e.b.x - r.x), true);
+    if (r) ctx.arc(r.x, r.y, ringMid(r.ring, e.ring!.lanes), Math.atan2(e.a.y - r.y, e.a.x - r.x), Math.atan2(e.b.y - r.y, e.b.x - r.x), true);
     else {
       ctx.moveTo(e.a.x, e.a.y);
       ctx.lineTo(e.b.x, e.b.y);
@@ -1882,8 +1914,9 @@ export class CanvasRenderer {
 const hubR = (n: Node): number => n.control === 'roundabout' ? ringOut(n.ring) + 8 : NODE_R + 26;
 
 // Joint disc: the widest non-tunnel road of that level meeting at the node sets its width and tier colour
+// (on a ring node its arm: the ring's own arcs need none)
 function jointEdge(n: Node, level: number): Edge | null {
-  return n.edges.reduce<Edge | null>((w, e) => (!e.tunnel && e.level === level && e.width > (w?.width ?? 0) ? e : w), null);
+  return n.edges.reduce<Edge | null>((w, e) => (!e.tunnel && !e.ring && e.level === level && e.width > (w?.width ?? 0) ? e : w), null);
 }
 
 // Convex hull (monotone chain), counter-clockwise
