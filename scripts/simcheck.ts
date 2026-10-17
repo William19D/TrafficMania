@@ -21,6 +21,7 @@ import { deserialize, serialize } from '../src/core/Save.ts';
 import { commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
 import { CHALLENGE_MONEY, MAPS, cfgFor, grade, milestonePop, milestonesAt, takeOffer } from '../src/core/Campaign.ts';
 import { checkAch, owned } from '../src/core/Achievements.ts';
+import { RAIN_V, WRECK_V, eventsOn, startEvent } from '../src/core/Events.ts';
 import { mapOpen, parseProfile, profile0, recordGrade, toolLevel, totalStars } from '../src/core/Profile.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
@@ -1552,6 +1553,45 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const old = deserialize(JSON.stringify(d));
   if (old.cfg.mode !== 'endless' || old.goals || old.unlockLevel !== Infinity || old.run.spent !== 0) fail(`save: an old career save loaded as ${old.cfg.mode}`);
   if (old.milestone !== milestonesAt(old, old.population) || old.offers || old.upgrades.length) fail(`save: an old save's milestones ${old.milestone}`);
+}
+// Events: roadworks warn for an hour, then shut J-K (a car already routed over it turns off at J and arrives round P-Q, no new route
+// uses it), the road reopens when they end; a wreck slows its edge, rain every road; active events round-trip a save; off in Creative
+{
+  const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 200, 300), Z = town(w, 1000, 300, 'shop', true);
+  const J = wg.addNode(400, 300), K = wg.addNode(800, 300), P = wg.addNode(400, 600), Q = wg.addNode(800, 600);
+  for (const [a, b] of [[X, J], [J, K], [K, Z], [J, P], [P, Q], [Q, K]]) w.commitPath(w.planPath([a!, b!], 0, flat));
+  w.demandOff = true;
+  const jk = wg.edgeBetween(J, K)!, ev = startEvent(w, 'roadworks', jk);
+  w.queueTrip(X.building!, Z.building!, 'commute');
+  for (let t = 0; t < 60 && !w.cars.length; t++) w.update(DT);
+  if (!w.cars.length || wg.shut.size || w.cars[0]!.path?.[1] !== K) fail(`events: the car does not set off over J-K during the warning (${w.cars[0]?.path?.map(n => n.id)})`);
+  w.time = ev.at;
+  w.update(DT);
+  if (!wg.shut.has(jk) || findPath(wg, X, Z)?.[2] === K) fail('events: roadworks did not shut J-K');
+  for (let t = 0; t < 40 * 60 && !w.score; t++) {
+    w.update(DT);
+    if (w.cars.some(c => c.lane.edge === jk)) fail('events: a car drove onto the closed road');
+  }
+  if (w.score !== 1) fail(`events: the trip did not arrive round the roadworks (score ${w.score})`);
+  const json = serialize(w), back = deserialize(json), be = back.events[0];
+  if (back.events.length !== 1 || be?.kind !== 'roadworks' || be.edge?.a.x !== jk.a.x || be.edge.b.x !== jk.b.x || serialize(back) !== json) fail('events: an active event does not round-trip a save');
+  w.time = ev.end;
+  w.update(DT);
+  if (w.events.length || wg.shut.size || findPath(wg, X, Z)?.[2] !== K) fail('events: the road did not reopen after the roadworks');
+  const wreck = startEvent(w, 'accident', jk), rain = startEvent(w, 'rain');
+  w.time = rain.at;
+  w.update(DT);
+  if (wreck.base === null || wg.slow.get(jk) !== WRECK_V || wg.wet !== RAIN_V || wg.speedX(jk) !== WRECK_V * RAIN_V || wg.speedX(wg.edgeBetween(J, P)!) !== RAIN_V) fail('events: a wreck or rain does not slow traffic');
+  w.time = rain.end;
+  w.update(DT);
+  if (w.events.length || wg.wet !== 1 || wg.slow.size) fail('events: the wreck and rain did not end');
+  if (eventsOn(new Game({ ...SIM, mode: 'creative' })) || !eventsOn(new Game({ ...SIM, mode: 'creative', events: 'on' })) || !eventsOn(new Game(SIM))) fail('events: the Creative toggle');
+  // an old save has no events: none run and the first may start 4 hours on
+  const d = JSON.parse(json) as { ev?: unknown; time: number };
+  delete d.ev;
+  const old = deserialize(JSON.stringify(d));
+  if (old.events.length || old.nextEventAt !== d.time + 4 * HOUR) fail('events: an old save loads with events');
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

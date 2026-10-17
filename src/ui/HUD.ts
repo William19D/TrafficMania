@@ -8,6 +8,7 @@ import { DIFFICULTY, PURPOSES, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, ZONES, 
 import { upgradeBlock } from '../core/Zones.ts';
 import { grade, milestonePop, objLabel, objText, objValue, offerText, takeOffer, unlockAt } from '../core/Campaign.ts';
 import { rewardText } from '../core/Achievements.ts';
+import { EVENTS } from '../core/Events.ts';
 import type { AchDef } from '../core/Achievements.ts';
 import type { Purpose, Site, Special, Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
@@ -278,7 +279,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; event?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
     views?: string; tokens?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -312,6 +313,7 @@ export class HUD {
         <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
         <div class="chip danger alarm" hidden tabindex="0" data-tip="">${icon('warning')}<b class="atxt"></b></div>
+        <div class="chip event" hidden tabindex="0" data-tip="">${icon('warning')}<b class="etxt"></b></div>
         <div class="obj" hidden role="group" aria-label="Objectives">
           <button class="ohead" data-action="obj" aria-expanded="true" data-tip="Objectives: meet them all for a star. Click to fold"><b class="oname"></b><span class="ostars"></span>${icon('chev', 'chev')}</button>
           <div class="obody"></div>
@@ -1268,6 +1270,19 @@ export class HUD {
           ? 'Below $0 at midnight counts toward bankruptcy. Earn more (grow the city, get trips through) or demolish roads you do not need.'
           : 'Happiness is too low. Give homes jobs and shops they can reach, smooth trips, and keep factories and loud roads away from them.';
       }
+    }
+
+    // Traffic events: name and time left (or until it starts), the quest and reward in the tip
+    const ev = g.events.map(e => {
+      const d = EVENTS[e.kind], w = g.time < e.at, m = Math.max(1, Math.ceil(((w ? e.at : e.end) - g.time) / HOUR * 60 / 10) * 10);
+      return { txt: `${d.name} ${w ? 'in' : '·'} ${m < 60 ? `${m} min` : `${Math.round(m / 60)} h`}`, tip: `${d.name}: ${d.quest}. Reward ${fmtMoney(d.reward * DIFFICULTY[g.cfg.difficulty].tax)}.` };
+    }), ek = ev.map(e => e.txt).join(' | ');
+    if (ek !== L.event) {
+      L.event = ek;
+      const c = this.q('.event');
+      c.hidden = !ek;
+      this.q('.etxt').textContent = ek;
+      c.dataset.tip = ev.map(e => e.tip).join(' ');
     }
 
     const off = g.buildings.reduce((n, b) => n + +!b.connected, 0);

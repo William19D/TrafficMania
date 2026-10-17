@@ -14,6 +14,7 @@ import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
 import { milestonesAt, run0 } from './Campaign.ts';
 import type { Offer, RunState, Upgrade } from './Campaign.ts';
+import type { ActiveEvent, EventKind } from './Events.ts';
 
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
@@ -32,6 +33,8 @@ export interface SaveData {
   run?: RunState; // absent before the campaign
   // absent before milestone choices and achievements (milestones then count as reached at the saved population)
   ms?: { n: number; offers: Offer[] | null; spare: Offer | null; upgrades: Upgrade[]; tokens: Special[] }; feats?: Record<string, number>;
+  // absent before traffic events: edge / buildings by index (-1 = none)
+  ev?: { list: (Omit<ActiveEvent, 'edge' | 'to' | 'from'> & { edge: Ref; to: Ref; from: Ref })[]; next: number; last: Partial<Record<EventKind, number>> };
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
@@ -49,6 +52,7 @@ const revive = (k: string, v: unknown): unknown => v === 'Infinity' && k !== 'se
 
 export function serialize(g: Game): string {
   const bi = new Map(g.buildings.map((b, i) => [b, i])), ci = new Map(g.commuters.map((c, i) => [c, i]));
+  const ei = new Map(g.graph.edges.map((e, i) => [e, i]));
   const ni = new Map(g.graph.nodes.map((n, i) => [n, i])), ri = new Map(g.graph.rings.map((r, i) => [r, i]));
   const trip = (t: Trip, queued = t.queued): TripData => {
     const { jam: _, ...rest } = t;
@@ -58,6 +62,7 @@ export function serialize(g: Game): string {
     v: 1, cfg: g.cfg, time: g.time, lastHour: g.lastHour, assignAt: g.assignAt, money: g.money, score: g.score, upkeepDay: g.upkeepDay,
     cityLevel: g.cityLevel, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
     stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc, run: g.run,
+    ev: { list: g.events.map(e => ({ ...e, edge: e.edge ? ei.get(e.edge) ?? -1 : -1, to: e.to ? bi.get(e.to)! : -1, from: e.from ? bi.get(e.from)! : -1 })), next: g.nextEventAt, last: g.eventLast },
     ms: { n: g.milestone, offers: g.offers, spare: g.spare, upgrades: g.upgrades, tokens: g.tokens }, feats: g.feats,
     lots: g.lots.map(l => ({ x: l.x, y: l.y, angle: l.angle, w: l.w, zone: l.zone, b: l.building ? bi.get(l.building)! : -1 })),
     buildings: g.buildings.map(b => ({
@@ -119,6 +124,11 @@ export function deserialize(json: string): Game {
     n.plan = null;
     for (let s = n.ring; s >= 0 && !graph.buildRing(n, s as RingSize, n.controlDay); s--);
   }
+  if (d.ev) {
+    const E = graph.edges.slice(0, d.edges.length);
+    Object.assign(g, { nextEventAt: d.ev.next, eventLast: d.ev.last });
+    g.events = d.ev.list.map(e => ({ ...e, edge: E[e.edge] ?? null, to: B[e.to] ?? null, from: B[e.from] ?? null }));
+  } else g.nextEventAt = d.time + 4 * HOUR;
   g.reports = d.reports.map(r => ({ ...r, from: B[r.from], to: B[r.to] }));
   Object.assign(g.metrics, d.metrics);
   const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;

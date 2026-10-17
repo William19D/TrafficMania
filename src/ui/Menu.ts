@@ -266,7 +266,7 @@ export class Menu {
       const d = this.draft ??= { ...DEFAULT_CONFIG, seed: randomSeed() };
       const group = <K extends keyof GameConfig>(k: K, label: string, opts: [string, string][], tip: string) => `
         <div class="field" role="group" aria-label="${label}"><span class="flabel">${label}</span>
-          <div class="opts">${opts.map(([x, l]) => `<button class="opt" data-m="opt" data-v="${k}:${x}" aria-pressed="${d[k] === x}">${l}</button>`).join('')}</div>
+          <div class="opts">${opts.map(([x, l]) => `<button class="opt" data-m="opt" data-v="${k}:${x}" aria-pressed="${(d[k] ?? opts[0][0]) === x}">${l}</button>`).join('')}</div>
           <small>${tip}</small></div>`;
       // Endless plays starred maps, Creative any open one
       const p = profile(), maps = MAPS.filter(m => d.mode === 'endless' ? endlessOpen(m) : mapOpen(p, m)), map = mapById(d.map);
@@ -276,6 +276,7 @@ export class Menu {
       body = `<h2 id="mn-title">${d.mode === 'endless' ? 'Endless' : 'Creative'}</h2>
         <p class="sub">${MODE_TIP[d.mode]}</p>
         ${mg}
+        ${d.mode === 'creative' ? group('events', 'Traffic events', [['off', 'Off'], ['on', 'On']], 'Roadworks, accidents, rain and VIP convoys now and then, each with a reward.') : ''}
         ${d.mode === 'endless' ? group('difficulty', 'Difficulty', (Object.keys(DIFFICULTY) as Difficulty[]).map(x => [x, cap(x)]), diffTip(d.difficulty)) : ''}
         ${map ? '' : `${group('biome', 'Biome', (Object.keys(BIOMES) as Biome[]).map(x => [x, BIOMES[x].label]), '')}
         ${group('size', 'Map size', (Object.keys(SIZES) as MapSize[]).map(x => [x, cap(x)]), '')}

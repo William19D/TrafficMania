@@ -92,6 +92,11 @@ export class RoadGraph {
   edges: Edge[] = [];
   // Edges ignored by snapping / crossings / edgeBetween; only set while planning a bend
   hidden: Set<Edge> = new Set();
+  // Traffic events (Events.ts, rebuilt each tick): edges closed to new routes, edges with a top speed factor, the rain's speed factor
+  shut: Set<Edge> = new Set();
+  slow: Map<Edge, number> = new Map();
+  wet = 1;
+  speedX(e: Edge): number { return this.wet * (this.slow.get(e) ?? 1); }
   rings: Ring[] = [];
   private nextId = 1;
 
@@ -545,7 +550,7 @@ export class RoadGraph {
     const k = Math.min(1, dt / TUNING.HEAT_TAU);
     for (const e of this.edges) {
       let n = 0, slow = 0;
-      for (const l of e.lanes) for (const c of l.cars) { n++; slow += 1 - Math.min(1, c.speed / c.top(e)); }
+      for (const l of e.lanes) for (const c of l.cars) { n++; slow += 1 - Math.min(1, c.speed / c.top(e, this)); }
       const x = n ? Math.max(n * (CAR_LEN + GAP) / (e.length * e.lanes.length), slow / n) : 0;
       e.heat += (Math.min(1, x) - e.heat) * k;
     }

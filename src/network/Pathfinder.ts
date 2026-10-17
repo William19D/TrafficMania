@@ -7,7 +7,8 @@ import { ANY, banned, moveOf } from './Junction.ts';
 // Heuristic speed: the fastest tier, so the straight-line time never overestimates
 const VMAX = Math.max(...Object.values(TIERS).map(t => t.limit));
 
-// A* on travel time: length / tier limit × congestion of the outgoing lanes (free: empty roads); 'avoid' is treated as closed.
+// A* on travel time: length / tier limit (/ an event's slow factor) × congestion of the outgoing lanes (free: empty roads); 'avoid' and
+// edges shut by an event are treated as closed.
 // States are (node, edge it was entered by), so a turn ban depends on the approach and a detour may come back through a junction;
 // via: the edge the start was entered by; mask: the moves allowed at the start (a car's lane arrows). No U-turns past the start.
 interface State { n: Node; e: Edge | null; g: number; prev: State | null }
@@ -57,13 +58,13 @@ export function findPath(graph: RoadGraph, start: Node, goal: Node, avoid: Edge 
     closed.add(k);
     for (const e of cur.n.edges) {
       const next = e.a === cur.n ? e.b : e.a, nk = key(next, e);
-      if (closed.has(nk) || e === avoid || (e === cur.e && cur.prev) || (cur.e && banned(cur.n, cur.e, e))
+      if (closed.has(nk) || e === avoid || graph.shut.has(e) || (e === cur.e && cur.prev) || (cur.e && banned(cur.n, cur.e, e))
         || (cur.e && !cur.prev && !(mask >> moveOf(cur.n, cur.e, e) & 1))) continue;
       const lanes = graph.lanesFrom(e, cur.n);
       if (!lanes.length) continue;
       const cars = free ? 0 : lanes.reduce((n, l) => n + l.cars.length, 0);
       const load = cars * (CAR_LEN + GAP) / (e.length * lanes.length);
-      const cost = cur.g + e.length / TIERS[e.type.tier].limit * (1 + 3 * load);
+      const cost = cur.g + e.length / TIERS[e.type.tier].limit / (graph.slow.get(e) ?? 1) * (1 + 3 * load);
       if (cost < (g.get(nk) ?? Infinity)) {
         g.set(nk, cost);
         push(cost + dist(next, goal) / VMAX, { n: next, e, g: cost, prev: cur });

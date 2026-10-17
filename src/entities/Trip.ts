@@ -17,6 +17,7 @@ export interface Trip {
   purpose: Purpose; from: Building; to: Building; back: boolean; who: Commuter | null;
   queued: number; departed: number; leave: number; ideal: number; idealLen: number; driven: number; stopped: number; retries: number;
   jam: Node | null; jamS: number;
+  vip?: boolean; // a VIP convoy car (Events.ts)
 }
 export const makeTrip = (purpose: Purpose, from: Building, to: Building, back = false, who: Commuter | null = null, queued = 0): Trip =>
   ({ purpose, from, to, back, who, queued, departed: 0, leave: 0, ideal: 0, idealLen: 0, driven: 0, stopped: 0, retries: 0, jam: null, jamS: 0 });

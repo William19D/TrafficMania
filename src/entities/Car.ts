@@ -73,9 +73,10 @@ export class Car {
     this.react = 0.2 * random();
   }
 
-  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit (a ring's own)
-  top(e: Edge): number {
-    return this.vmax * (e.ring ? RINGS[e.ring.hub.ring].v : TIERS[e.type.tier].limit) / MAX_SPEED;
+  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit (a ring's own) and the events' factor (rain, a wreck)
+  // ponytail: rain only lowers top speed; braking and headway stay dry
+  top(e: Edge, g: RoadGraph): number {
+    return this.vmax * (e.ring ? RINGS[e.ring.hub.ring].v : TIERS[e.type.tier].limit) / MAX_SPEED * g.speedX(e);
   }
 
   get dest(): Building { return this.trip.to; }
@@ -93,7 +94,9 @@ export class Car {
     if (this.wait > GIVE_UP_S) return 'stuck';
 
     // Recompute route from the node we are heading to; U-turn back down our own edge only when nothing else leads there
-    if (!isDest && (!this.path || this.path[0] !== node)) {
+    // an event shut the next edge: a new route unless the turn is already granted
+    const shut = !isDest && graph.shut.size > 0 && this.path?.[0] === node && this.granted !== node && graph.shut.has(graph.edgeBetween(node, this.path[1]!)!);
+    if (!isDest && (!this.path || this.path[0] !== node || shut)) {
       this.path = findPath(graph, node, this.dest.node, lane.edge, false, lane.edge) ?? findPath(graph, node, this.dest.node, null, false, lane.edge);
       if (!this.path) return 'lost';
     } else if (!isDest && w <= REROUTE_S && this.wait > REROUTE_S) {
@@ -173,7 +176,7 @@ export class Car {
       }
     }
 
-    let target = this.top(lane.edge);
+    let target = this.top(lane.edge, graph);
     // approach a junction slowly until granted; once granted only the corner speed below applies
     if (needs && remaining < 60 && this.granted !== node) target = Math.min(target, TURN_SPEED);
     if (nextLane) {
@@ -181,7 +184,7 @@ export class Car {
       // braked down to by the node box; so a car also slows down before a slower tier
       // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
       const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
-      const v = Math.max(TURN_SPEED, Math.min(this.top(lane.edge), this.top(nextLane.edge)) * cos);
+      const v = Math.max(TURN_SPEED, Math.min(this.top(lane.edge, graph), this.top(nextLane.edge, graph)) * cos);
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
@@ -232,7 +235,7 @@ export class Car {
     const ok = this.path ? graph.arrowLanes(lane.edge, lane.from, this.path[1])?.map(l => ls.indexOf(l)) : null;
     const w = ok ? (ok.includes(k) || !ok.length ? -1 : ok.reduce((b, i) => Math.abs(i - k) < Math.abs(b - k) ? i : b)) : t ? (t > 0 ? ls.length - 1 : 0) : -1;
     const ahead = lane.cars[idx + 1], gap = ahead ? ahead.s - this.s - sep(this, ahead) : Infinity;
-    const slow = !!ahead && ahead.speed < this.top(lane.edge) * 0.6 && gap < 4 * CAR_LEN && (!!ok || !t);
+    const slow = !!ahead && ahead.speed < this.top(lane.edge, graph) * 0.6 && gap < 4 * CAR_LEN && (!!ok || !t);
     const brake = (v: number) => v * v / (2 * BRAKE);
     for (const to of w >= 0 ? (w === k ? [] : [ls[k + Math.sign(w - k)]]) : slow ? [k - 1, k + 1].filter(i => !ok || ok.includes(i)).map(i => ls[i]) : []) {
       if (!to) continue;

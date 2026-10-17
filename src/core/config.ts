@@ -7,7 +7,7 @@ export type Biome = 'temperate' | 'desert' | 'alpine' | 'archipelago';
 export type MapSize = 'small' | 'medium' | 'large';
 // map: a campaign map's id (Campaign.ts: its terrain, constraint and objectives); unlock: the tools an endless run has (a map number,
 // absent = all)
-export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize; map?: string; unlock?: number }
+export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize; map?: string; unlock?: number; events?: 'on' | 'off' }
 export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'endless', difficulty: 'normal', biome: 'temperate', size: 'medium' };
 
 export const SIZES: Record<MapSize, { w: number; h: number }> = {

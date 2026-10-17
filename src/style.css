@@ -1015,6 +1015,7 @@ kbd { background: #F3F1EB; box-shadow: 0 1px 0 rgba(60, 50, 30, .14); }
 .chip.happy.good { --hue: var(--success); }
 .chip.happy.bad, .chip.danger { --hue: var(--danger); }
 .chip.lvl { --hue: #E89B00; }
+.chip.event { --hue: #E8731C; border: 2px solid #E8731C; margin-left: .25em; }
 #hud .chip > .ico {
   width: 1.75em; height: 1.75em;
   padding: .28em;

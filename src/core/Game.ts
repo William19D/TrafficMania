@@ -23,6 +23,8 @@ import { adoptLots, demandOf, pruneLots, zoneHour } from './Zones.ts';
 import type { Lot, ZonePlan } from './Zones.ts';
 import { CHALLENGE_MONEY, DEADLINE, GRIDLOCK, GRIDLOCK_MIN, MAPS, closeHour, grade, mapById, milestonePop, offersFor, run0, unlockAt } from './Campaign.ts';
 import type { Grade, MapDef, Offer, RunState, Upgrade } from './Campaign.ts';
+import { eventsHour, eventsTick, vipArrived } from './Events.ts';
+import type { ActiveEvent, EventKind } from './Events.ts';
 
 // zone: the zone brush; place: setting a building down (moving a legacy one)
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place' | 'grid' | 'interchange' | 'zone';
@@ -36,6 +38,8 @@ export type Overlay = 'none' | 'heat' | 'noise';
 export type Sfx = 'build' | 'demolish' | 'place';
 // Game seconds per in-game hour
 export const HOUR = T.DAY_SECONDS / 24;
+// Match day quest (game-v3 8): this share of fans on time pays the bonus
+const MATCH_Q = 0.85, MATCH_BONUS = 2000;
 const SHOP_SUM = T.SHOP_CURVE.reduce<number>((n, x) => n + x, 0);
 export const OUTCOME_LABEL: Record<Outcome, string> = { smooth: 'smooth run', wait: 'long wait', detour: 'detour', gaveup: 'gave up', noroute: 'no route' };
 const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map(o => [o, 0])) as Record<Outcome, number>;
@@ -145,6 +149,10 @@ export class Game {
   zonePlan: ZonePlan | null = null;
   // Bank loan balance (soft fail outside Challenge)
   loan = 0;
+  // Traffic events (Events.ts): the running ones, the earliest time the next may start, when each kind last started
+  events: ActiveEvent[] = [];
+  nextEventAt = 4 * HOUR;
+  eventLast: Partial<Record<EventKind, number>> = {};
   // Campaign / Challenge: counters, spend and the best grade (Campaign.ts); the grade the HUD has not shown yet; onGrade: a new best
   // (main.ts writes it to the profile)
   run: RunState = run0();
@@ -293,12 +301,14 @@ export class Game {
         waiting: this.cars.reduce((n, c) => n + +(c.speed < 1), 0) + this.buildings.reduce((n, b) => n + b.pending.length, 0),
       });
       this.hourly(h);
+      eventsHour(this, h);
       this.runHour(h);
       this.payHour();
       this.bank();
       if (!h) this.midnight();
     }
     this.checkLevel();
+    eventsTick(this);
     if (this.time >= this.assignAt) this.assign();
     if (!this.demandOff) this.departures();
 
@@ -318,6 +328,7 @@ export class Game {
         if (!t.back) this.business(t);
         if (t.purpose === 'emergency' && !t.back && secs <= T.FAST_X * t.ideal) { this.cheer(t.to); this.feat('amb', (this.feats.amb ?? 0) + 1); }
         if (!t.back) this.count(t, secs);
+        if (t.vip) vipArrived(this, secs, t.ideal);
         const o = this.outcome(t, secs);
         this.report(t, o, secs);
         if (car === this.follow) this.say(`Arrived: ${OUTCOME_LABEL[o]}, ${fmtMin(secs)}`);
@@ -420,7 +431,12 @@ export class Game {
   private runHour(h: number): void {
     const r = this.run;
     closeHour(r, (h + 23) % 24);
-    if (h === T.MATCH_END && r.fans[0]) { r.match = Math.max(r.match, r.fans[1] / r.fans[0]); r.fans = [0, 0]; }
+    if (h === T.MATCH_END && r.fans[0]) {
+      const share = r.fans[1] / r.fans[0], x = MATCH_BONUS * DIFFICULTY[this.cfg.difficulty].tax;
+      if (share >= MATCH_Q) { this.money += x; this.ledger.today.grants += x; this.say(`Match day: ${Math.round(share * 100)}% of fans on time, +${fmtMoney(x)}`); }
+      r.match = Math.max(r.match, share);
+      r.fans = [0, 0];
+    }
     if (!this.goals || this.gameOver || this.tutorialActive) return;
     const m = this.map!, g = grade(this, m);
     if (r.done ? !h && g.stars > r.stars : g.stars > 0) {

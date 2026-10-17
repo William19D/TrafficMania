@@ -10,7 +10,7 @@ import type { Building } from '../entities/Building.ts';
 import type { Lot } from '../core/Zones.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
-import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
+import { CONTROL_LABEL, HOUR, exitEdge, fmtMoney } from '../core/Game.ts';
 import { corners, lotAt, lotRect } from '../core/Zones.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
@@ -280,6 +280,9 @@ export class CanvasRenderer {
       this.night(game, light, ground);
     }
 
+    // events over the tint, so their markers read at night
+    this.events(game);
+    this.rain(game, now);
     // Junction open in the Edit panel
     if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, hubR(game.inspect), ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
@@ -438,6 +441,85 @@ export class CanvasRenderer {
     }
     const left = Math.ceil(TUNING.DOWN_H - b.downH);
     this.text(`${b.cause.text} · ${b.abandoned ? 'cleared' : 'abandoned'} in ${left} h`, b.x, y - 16, 'bold 11px system-ui', b.abandoned ? RED : DARK);
+  }
+
+  // Traffic events (Events.ts): each a badge with a ring counting down its warning (dashed) or what is left of it; roadworks cones along
+  // the road (a barrier at both ends once shut), a wreck on its road, a flag over the VIP target; on match day the stadium counts down
+  // to kickoff from noon
+  private events(game: Game): void {
+    const ctx = this.ctx, t = game.time;
+    const badge = (x: number, y: number, col: string, k: number, glyph: string, warn: boolean): void => {
+      this.circle(x, y, 10, '#FFFFFF');
+      this.circle(x, y, 7.5, col);
+      ctx.beginPath();
+      ctx.arc(x, y, 10, -Math.PI / 2, -Math.PI / 2 + Math.max(0, Math.min(1, k)) * 2 * Math.PI);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2.5;
+      if (warn) ctx.setLineDash([3, 2]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      this.text(glyph, x, y + 0.5, 'bold 10px system-ui', '#FFFFFF');
+    };
+    const cone = (x: number, y: number): void => { this.circle(x, y, 2.8, '#E8731C'); this.circle(x, y, 1.1, '#FFFFFF'); };
+    for (const ev of game.events) {
+      const warn = t < ev.at, k = warn ? (ev.at - t) / HOUR : (ev.end - t) / (ev.end - ev.at);
+      if (ev.edge) {
+        const e = ev.edge, dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, hw = e.width / 2;
+        const at = (f: number, o: number): [number, number] => [e.a.x + dx * f - uy * o, e.a.y + dy * f + ux * o];
+        if (ev.kind === 'roadworks') {
+          // warning: cones along the kerb; shut: a row across each end and a striped barrier in the middle
+          for (let f = 0.2; f <= 0.8; f += 0.15) cone(...at(f, hw + 2));
+          if (!warn) for (const f of [Math.min(0.45, 14 / L), Math.max(0.55, 1 - 14 / L)]) for (let o = -hw + 2; o <= hw - 2; o += 5) cone(...at(f, o));
+          if (!warn) { ctx.setLineDash([4, 4]); this.seg({ x: at(0.5, -hw)[0], y: at(0.5, -hw)[1] }, { x: at(0.5, hw)[0], y: at(0.5, hw)[1] }, '#E8731C', 3); ctx.setLineDash([]); }
+        } else {
+          // two cars askew and a flashing light
+          const [x, y] = at(0.5, 0), a = Math.atan2(dy, dx);
+          for (const [f, r, col] of [[-5, 0.5, '#C9CED6'], [5, -0.3, '#D9534F']] as const) {
+            ctx.save();
+            ctx.translate(x + ux * f, y + uy * f);
+            ctx.rotate(a + r);
+            ctx.fillStyle = col;
+            ctx.fillRect(-6, -3.5, 12, 7);
+            ctx.restore();
+          }
+          this.circle(x, y - 8, 2.5, (t * 4 | 0) % 2 ? RED : ACCENT);
+        }
+        const [bx, by] = at(0.5, -hw - 16);
+        badge(bx, by, ev.kind === 'roadworks' ? '#E8731C' : RED, k, '!', warn);
+      } else if (ev.to) {
+        const b = ev.to, top = b.y - Math.max(b.w, b.h) / 2 - 18;
+        badge(b.x, top, YELLOW, k, '★', warn);
+      }
+    }
+    const st = game.buildings.find(b => b.special === 'stadium' && b.connected), h = game.hour;
+    if (st && !(game.day % TUNING.MATCH_DAYS) && h >= 12 && h < TUNING.KICKOFF)
+      badge(st.x, st.y - Math.max(st.w, st.h) / 2 - 18, ACCENT, (TUNING.KICKOFF - h) / (TUNING.KICKOFF - 12), '⚽', true);
+  }
+
+  // Rain (Events.ts): clouds darken the screen through the warning hour, then streaks fall while it lasts
+  private rain(game: Game, now: number): void {
+    const ev = game.events.find(e => e.kind === 'rain');
+    if (!ev || game.overlay !== 'none') return;
+    const ctx = this.ctx, W = this.canvas.width, H = this.canvas.height, k = game.time < ev.at ? 1 - (ev.at - game.time) / HOUR : 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = `rgba(52,66,90,${0.16 * k})`;
+    ctx.fillRect(0, 0, W, H);
+    if (ev.base) {
+      ctx.strokeStyle = 'rgba(210,225,245,0.45)';
+      ctx.lineWidth = 1.2 * (devicePixelRatio || 1);
+      ctx.beginPath();
+      // ponytail: 160 streaks on a fixed lattice scrolled by time; no splashes
+      for (let i = 0; i < 160; i++) {
+        const x = ((i * 397.3 + now * 90) % (W + 60)) - 30, y = ((i * 211.7 + now * (520 + i % 7 * 40)) % (H + 60)) - 30;
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 6, y + 16);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // Zoned lots: an empty one a dashed plot in its zone's colours, a built one a faint plot under its building
@@ -1323,6 +1405,13 @@ export class CanvasRenderer {
       ctx.fillStyle = AMBER;
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
+    }
+    // a VIP convoy car: a gold pennant on the roof
+    if (car.trip.vip) {
+      ctx.fillStyle = YELLOW;
+      ctx.fillRect(-2, -w + 1, 4, 2 * w - 2);
+      ctx.fillStyle = CAR_OUT;
+      ctx.fillRect(-0.5, -w + 1, 1, 2 * w - 2);
     }
     if (k === 'ambulance') {
       const on = (game.time * 4 | 0) % 2;
