@@ -384,7 +384,7 @@ Code: `src/ui/Tutorial.ts` (`tutorialSteps`, `stepDone`, the card), `src/ui/Tips
 - **Region O** shows the 8 steps as a checklist (done, current with its bar, to come) while the script runs; the card (region F) holds the
   explanation, the step's `n / of` and Skip. A save made mid-script loads without it.
 - **Seen once per profile:** `profile.tips` gets `'tutorial'` on Skip or Finish (`tm_tutorial_done` still counts). The help panel's button
-  starts a new Meadowbrook with the script (after a confirm when the city is past day 1; the city is autosaved first).
+  starts a new Meadowbrook with the script (after a confirm when the city is past day 1; that city is saved to the first empty slot first, as the tutorial's own midnight autosave replaces the autosave, and the confirm says so, or that every slot is full).
 - **Tips:** checked twice a second, not while the script runs, a modal is up or the menu is open; a tip closes itself after 20 s and has
   Show me (jumps) when it has a spot. Thresholds simplified: jam = any road heat > 0.7 now; demand > 0.5 (not 0.8 for a day) with
   100+ residents; unhappy = under `GROW_LO`. Added: "Homes stopped growing: people need jobs" (R <= 0, O > 0.2). The milestone tip

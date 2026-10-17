@@ -8,7 +8,7 @@ import { Menu } from './ui/Menu.ts';
 import { attachInput } from './ui/Input.ts';
 import { sound } from './ui/Sound.ts';
 import { GameLoop } from './core/GameLoop.ts';
-import { AUTO, load, restore, serialize, store } from './core/Save.ts';
+import { AUTO, SLOTS, load, peek, restore, serialize, store } from './core/Save.ts';
 import { HOUR } from './core/Game.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
 import type { GameConfig, Mode } from './core/config.ts';
@@ -102,9 +102,12 @@ function start(g: Game, tour = false): void {
   tutorial = new Tutorial(hudRoot, g, jump);
   tips = new Tips(hudRoot, g, jump);
   hud.tut = tutorial;
-  // the help panel's tutorial: a new game on map 1 (the city in progress is autosaved first)
+  // the help panel's tutorial: a new game on map 1. A city past day 1 goes to the first empty slot first (the tutorial's own midnight
+  // autosave would replace it in the autosave)
   hud.onTutorial = () => {
-    if (g.day > 1 && !confirm(`Start the tutorial on a new ${MAPS[0].name}? Your city is autosaved first.`)) return;
+    const slot = g.day > 1 ? SLOTS.find(k => !peek(k)) : undefined;
+    if (g.day > 1 && !confirm(`Start the tutorial on a new ${MAPS[0].name}? ${slot ? `Your city is saved to Slot ${SLOTS.indexOf(slot) + 1} first.` : 'Every save slot is full, so your city is not kept: save it over a slot first to keep it.'}`)) return;
+    if (slot && !store(slot, g)) { g.say('Could not save your city: the tutorial did not start'); return; }
     autosave();
     start(new Game(cfgFor(MAPS[0], 'campaign')), true);
   };
