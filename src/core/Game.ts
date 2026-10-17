@@ -10,7 +10,7 @@ import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
-import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
+import { FAILED, makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
 import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_POP, LEVELS, SPECIALS, TIERS, TIER_DEFS, UNLOCKS, ZONES, ZONE_NAME, TUNING as T } from './config.ts';
@@ -21,8 +21,8 @@ import { Metrics } from './Metrics.ts';
 import type { Ichg } from './Templates.ts';
 import { adoptLots, demandOf, pruneLots, zoneHour } from './Zones.ts';
 import type { Lot, ZonePlan } from './Zones.ts';
-import { CHALLENGE_MONEY, DEADLINE, GRIDLOCK, GRIDLOCK_MIN, MAPS, closeHour, grade, mapById, run0, unlockAt } from './Campaign.ts';
-import type { Grade, MapDef, RunState } from './Campaign.ts';
+import { CHALLENGE_MONEY, DEADLINE, GRIDLOCK, GRIDLOCK_MIN, MAPS, closeHour, grade, mapById, milestonePop, offersFor, run0, unlockAt } from './Campaign.ts';
+import type { Grade, MapDef, Offer, RunState, Upgrade } from './Campaign.ts';
 
 // zone: the zone brush; place: setting a building down (moving a legacy one)
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place' | 'grid' | 'interchange' | 'zone';
@@ -123,9 +123,19 @@ export class Game {
   tool: Tool = 'road';
   // Elevation for new roads: 0 = ground, 1..10 = viaducts
   level = 0;
-  // City level (population milestones); pendingLevel = the last level-up the HUD has not shown yet, 0 = none
+  // City level (LEVELS, Endless): counted only, the milestone choices are the reward
   cityLevel = 1;
-  pendingLevel = 0;
+  // Milestone choices (Campaign.ts): milestones reached, the cards on offer (the modal), the card passed over (offered first next time),
+  // upgrades taken and free special tokens held
+  milestone = 0;
+  offers: Offer[] | null = null;
+  spare: Offer | null = null;
+  upgrades: Upgrade[] = [];
+  tokens: Special[] = [];
+  // Achievement counters (Achievements.ts): paint (most lots in one drag), streak (trips since one gave up), amb (fast ambulances),
+  // clover, debtfree, loaned (flags); fv bumps on each, so main.ts checks at once
+  feats: Record<string, number> = {};
+  fv = 0;
   // Zones: the painted lots; demand -1..1 and the buildings each zone has accrued toward its next spawn (hourly); the zone the brush
   // holds (null = Unzone) and its preview while dragging
   lots: Lot[] = [];
@@ -250,27 +260,20 @@ export class Game {
   get unlockLevel(): number { return this.creative ? Infinity : this.goals ? this.mapNo : this.cfg.unlock ?? Infinity; }
   // Challenge: the objectives by this day
   get deadline(): number { return DEADLINE + this.mapNo; }
-  // A modal is up: game over, a level-up or a map grade
-  get modal(): boolean { return !!this.gameOver || !!this.pendingLevel || !!this.pendingGrade; }
-  get loanCap(): number { return T.LOAN_CAP * DIFFICULTY[this.cfg.difficulty].money / 40000; }
+  // A modal is up: game over, a map grade or a milestone choice
+  get modal(): boolean { return !!this.gameOver || !!this.pendingGrade || !!this.offers; }
+  get loanCap(): number { return T.LOAN_CAP * DIFFICULTY[this.cfg.difficulty].money / 40000 + (this.has('bank') ? 25000 : 0); }
+  get loanRate(): number { return T.LOAN_RATE * (this.has('bank') ? 0.5 : 1); }
+  has(u: Upgrade): boolean { return this.upgrades.includes(u); }
+  feat(k: string, v: number): void { this.feats[k] = v; this.fv++; }
   // At the loan cap and still in debt: nothing grows and zoning is refused until money is back over $0
   get frozen(): boolean { return !this.creative && !this.challenge && this.money < 0 && this.loan >= this.loanCap; }
   get population(): number { return this.buildings.reduce((n, b) => n + b.residents, 0); }
 
-  // Each milestone passed: the next level and its grant (Endless; creative only counts the level, maps with objectives have none)
+  // City levels count up (not on maps with objectives); the next milestone reached offers its cards (one modal at a time)
   private checkLevel(): void {
-    while (!this.goals && this.population >= levelPop(this.cityLevel + 1)) {
-      const n = ++this.cityLevel;
-      if (this.creative) continue;
-      const grant = this.levelGrant(n);
-      this.money += grant;
-      this.ledger.today.grants += grant;
-      this.pendingLevel = n;
-    }
-  }
-
-  levelGrant(n: number): number {
-    return T.LEVEL_GRANT * n * DIFFICULTY[this.cfg.difficulty].tax;
+    while (!this.goals && this.population >= levelPop(this.cityLevel + 1)) this.cityLevel++;
+    if (!this.offers && !this.tutorialActive && this.population >= milestonePop(this, this.milestone + 1)) this.offers = offersFor(this, ++this.milestone);
   }
 
   // Buildings or roads changed: commuters are re-assigned an in-game hour later (so a road being drawn is not chased)
@@ -313,7 +316,7 @@ export class Game {
         this.stats.arrived++;
         const t = car.trip, secs = this.time - t.departed;
         if (!t.back) this.business(t);
-        if (t.purpose === 'emergency' && !t.back && secs <= T.FAST_X * t.ideal) this.cheer(t.to);
+        if (t.purpose === 'emergency' && !t.back && secs <= T.FAST_X * t.ideal) { this.cheer(t.to); this.feat('amb', (this.feats.amb ?? 0) + 1); }
         if (!t.back) this.count(t, secs);
         const o = this.outcome(t, secs);
         this.report(t, o, secs);
@@ -359,14 +362,15 @@ export class Game {
   // Interest on the loan; below $0 the bank lends LOAN_STEP up to loanCap (never in creative or Challenge)
   private bank(): void {
     if (this.creative || this.challenge) return;
-    const i = this.loan * T.LOAN_RATE / 24;
+    const i = this.loan * this.loanRate / 24;
     this.money -= i;
     this.ledger.today.interest += i;
     if (this.money >= 0 || this.loan >= this.loanCap) return;
     const x = Math.min(T.LOAN_STEP, this.loanCap - this.loan);
     this.loan += x;
     this.money += x;
-    this.say(`Bank loan: +${fmtMoney(x)} at ${T.LOAN_RATE * 100}%/day`);
+    this.feat('loaned', 1);
+    this.say(`Bank loan: +${fmtMoney(x)} at ${this.loanRate * 100}%/day`);
   }
 
   // Pays back LOAN_STEP (or what is left) of the loan; false (with the reason said) when it cannot
@@ -376,6 +380,7 @@ export class Game {
     if (why) { this.say(why); return false; }
     this.loan -= x;
     this.money -= x;
+    if (!this.loan) this.feat('debtfree', 1);
     this.say(this.loan ? `Repaid ${fmtMoney(x)}: ${fmtMoney(this.loan)} left` : 'Loan repaid');
     return true;
   }
@@ -574,7 +579,7 @@ export class Game {
       const d = distToSegment(b, e.a, e.b).d;
       if (d >= T.NOISE_R) continue;
       const density = e.lanes.reduce((n, l) => n + l.cars.length, 0) * (CAR_LEN + GAP) / (e.length * e.lanes.length);
-      p.noise = Math.max(p.noise, TIERS[e.type.tier].noise * (1 - d / T.NOISE_R) * (0.5 + 0.5 * Math.min(1, 3 * density)));
+      p.noise = Math.max(p.noise, TIERS[e.type.tier].noise * (this.has('walls') ? 0.5 : 1) * (1 - d / T.NOISE_R) * (0.5 + 0.5 * Math.min(1, 3 * density)));
     }
     p.noise = Math.min(1, p.noise * b.def.noiseX);
     const q = T.W_JOB * p.job + T.W_SHOP * p.shop + T.W_TRIPS * p.trips - T.W_POLL * p.pollution - T.W_NOISE * p.noise + (b.cheer > this.time ? T.CHEER / 100 : 0);
@@ -707,11 +712,13 @@ export class Game {
     for (const b of new Set([t.from, t.to])) if (b.kind !== 'gate') b.recent.push({ at: this.time, score: SCORE[outcome], shop });
     if (outcome === 'gaveup' || outcome === 'noroute') this.metrics.fail();
     else this.metrics.arrive(seconds / HOUR * 60);
+    this.feats.streak = FAILED.includes(outcome) ? 0 : (this.feats.streak ?? 0) + 1;
+    if (this.stats.arrived === 1) this.fv++;
     const j = t.jam;
     this.reports.push({
       purpose: t.purpose, back: t.back, from: t.from, to: t.to, outcome, seconds, day: this.day, hour: this.hour,
       ratio: t.ideal ? seconds / t.ideal : 1, stretch: t.idealLen ? t.driven / t.idealLen : 1, door: t.departed ? t.departed - t.queued : 0,
-      jam: j && { x: j.x, y: j.y }, jamAt: jamAt(j), jamS: t.jamS,
+      jam: j && { x: j.x, y: j.y }, jamAt: jamAt(j), jamS: t.jamS, stopped: t.stopped,
     });
     if (this.reports.length > 200) this.reports.shift();
   }
@@ -931,7 +938,7 @@ export class Game {
   // share of its length over water / through a mountain. Geometry only, so a split road keeps its total.
   // ponytail: money stays a float (no rounding), so splits and same-day refunds add up exactly; the HUD rounds
   price(a: Vec, b: Vec, f: EdgeFlags): number {
-    const base = dist(a, b) / TILE * laneFactor(f.type) * TIERS[f.type.tier].cost;
+    const base = dist(a, b) / TILE * laneFactor(f.type) * TIERS[f.type.tier].cost * (this.has('crew') ? 0.8 : 1);
     if (f.level > 0) return base * (T.VIADUCT_X + T.VIADUCT_LEVEL_X * f.level);
     if (!f.bridge && !f.tunnel) return base;
     const s = segmentCrosses(this.terrain, a, b);
@@ -1391,7 +1398,7 @@ export class Game {
     const pts = b.outline(), m = 4, mv = this.moving;
     // ponytail: overlap by sampled outline points both ways; fine for near-square footprints, SAT if long thin ones arrive
     const sp = b.special ? SPECIALS[b.special] : null;
-    const reason = (mv ? this.afford(this.moveCost) : sp ? this.specialWhy(b) || this.afford(sp.cost * +!this.creative) : '')
+    const reason = (mv ? this.afford(this.moveCost) : sp ? this.specialWhy(b) || this.afford(this.specialCost(b.special!)) : '')
       || (pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
       : pts.some(q => inWater(this.terrain, q, m) || inMountain(this.terrain, q, m)) ? 'Blocked by water or a mountain'
       : this.graph.edges.some(e => !(mv && e.drive && (e.a === mv.node || e.b === mv.node)) && this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
@@ -1406,8 +1413,14 @@ export class Game {
       : homes ? `Pollutes ${homes} home${homes > 1 ? 's' : ''} nearby`
       : '';
     const label = mv ? `Move here${this.moveCost ? ` · ${fmtMoney(this.moveCost)}` : ''}`
-      : sp ? `${sp.name} · +${this.tripsPerDay(b)} trips/day · ${fmtMoney(this.creative ? 0 : sp.cost)} · upkeep ${fmtMoney(sp.upkeep)}/day` : b.label;
+      : sp ? `${sp.name} · +${this.tripsPerDay(b)} trips/day · ${this.tokens.includes(b.special!) ? 'free' : fmtMoney(this.specialCost(b.special!))} · upkeep ${fmtMoney(sp.upkeep)}/day` : b.label;
     return { b, ok: !reason, reason, warn, road, label };
+  }
+
+  // Build price of special s: nothing in creative or with a milestone token
+  // ponytail: a token-built special still refunds SPECIAL_REFUND when demolished (a small cash-out); flag the building if it matters
+  specialCost(s: Special): number {
+    return this.creative || this.tokens.includes(s) ? 0 : SPECIALS[s].cost;
   }
 
   // How many of special s may stand: plazas 2, a stadium 1, a hospital per HOSPITAL_POP residents (at least 1), a terminal per linked exit
@@ -1458,7 +1471,9 @@ export class Game {
     this.sfx.add('place');
     // a special is paid for, and its card opens
     if (b.special) {
-      this.spend(this.creative ? 0 : SPECIALS[b.special].cost);
+      this.spend(this.specialCost(b.special));
+      const tk = this.tokens.indexOf(b.special);
+      if (tk >= 0 && !this.creative) this.tokens.splice(tk, 1);
       this.setTool('edit');
       this.picked = b;
       this.say(`${b.label} built: ${SPECIALS[b.special].tip}`);
@@ -1785,6 +1800,7 @@ export class Game {
     }
     this.connect();
     this.ichg = null;
+    if (ic.kind === 'clover') this.feat('clover', 1);
     this.say(`${t.label} built`);
     return true;
   }

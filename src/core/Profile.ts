@@ -2,6 +2,8 @@
 // seen, lifetime stats. Bad or missing data gives defaults; every storage access is wrapped; writes are debounced to 1 s.
 // Endless tools are not stored: they follow the stars (toolLevel).
 import { MAPS } from './Campaign.ts';
+import { ISLANDS, PAINTS } from './Achievements.ts';
+import type { Island, Paint } from './Achievements.ts';
 import type { Grade, MapDef } from './Campaign.ts';
 
 export interface Profile {
@@ -10,13 +12,15 @@ export interface Profile {
   best: Record<string, { efficiency: number; smooth: number; spend: number; day: number }>;
   // best Challenge clear day per map, absent = none
   challenge: Record<string, number>;
+  // achievement id -> unlock time (ms); the cosmetics picked (Achievements.owned)
   achievements: Record<string, number>;
+  cosmetics: { paint: Paint; island: Island };
   tips: string[]; tipsOff: boolean;
   // trips arrived and seconds played across runs
   stats: { trips: number; seconds: number };
 }
 const KEY = 'tm_profile';
-export const profile0 = (): Profile => ({ v: 1, stars: {}, best: {}, challenge: {}, achievements: {}, tips: [], tipsOff: false, stats: { trips: 0, seconds: 0 } });
+export const profile0 = (): Profile => ({ v: 1, stars: {}, best: {}, challenge: {}, achievements: {}, cosmetics: { paint: 'classic', island: 'grass' }, tips: [], tipsOff: false, stats: { trips: 0, seconds: 0 } });
 
 const obj = (x: unknown): Record<string, unknown> => x && typeof x === 'object' && !Array.isArray(x) ? x as Record<string, unknown> : {};
 const nums = (x: unknown): Record<string, number> => Object.fromEntries(Object.entries(obj(x)).filter(([, v]) => typeof v === 'number' && isFinite(v))) as Record<string, number>;
@@ -30,6 +34,8 @@ export function parseProfile(s: string | null): Profile {
   p.best = Object.fromEntries(Object.entries(obj(d.best)).map(([k, v]) => [k, { efficiency: 0, smooth: 0, spend: 0, day: 0, ...nums(v) }]));
   p.challenge = nums(d.challenge);
   p.achievements = nums(d.achievements);
+  const c = obj(d.cosmetics);
+  p.cosmetics = { paint: PAINTS.find(x => x === c.paint) ?? 'classic', island: ISLANDS.find(x => x === c.island) ?? 'grass' };
   p.tips = Array.isArray(d.tips) ? d.tips.filter((t): t is string => typeof t === 'string') : [];
   p.tipsOff = d.tipsOff === true;
   p.stats = { ...p.stats, ...nums(st) };
@@ -52,7 +58,7 @@ export function saveProfile(): void {
 }
 
 export const totalStars = (p: Profile): number => MAPS.reduce((n, m) => n + (p.stars[m.id] ?? 0), 0);
-export const mapOpen = (p: Profile, m: MapDef): boolean => totalStars(p) >= m.unlock;
+export const mapOpen = (p: Profile, m: MapDef): boolean => m.bonus ? !!p.achievements[m.bonus] : totalStars(p) >= m.unlock;
 // The tools an Endless run has: those of every map with a star (map 1's at least)
 export const toolLevel = (p: Profile): number => MAPS.reduce((n, m, i) => (p.stars[m.id] ?? 0) > 0 ? i + 1 : n, 1);
 

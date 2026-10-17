@@ -19,7 +19,8 @@ import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 import { commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
-import { CHALLENGE_MONEY, MAPS, cfgFor, grade } from '../src/core/Campaign.ts';
+import { CHALLENGE_MONEY, MAPS, cfgFor, grade, milestonePop, milestonesAt, takeOffer } from '../src/core/Campaign.ts';
+import { checkAch, owned } from '../src/core/Achievements.ts';
 import { mapOpen, parseProfile, profile0, recordGrade, toolLevel, totalStars } from '../src/core/Profile.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
@@ -508,12 +509,37 @@ for (const kind of ['car', 'ambulance'] as const) {
   w.queueTrip(H, O, 'commute');
   for (let t = 0; t < 20 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`levels: commute from a placed home did not arrive (score ${w.score})`);
+  // achievements: the arrival unlocks First Commute (once), nothing else on this town; none in Creative
+  const p = profile0(), got = checkAch(w, p, 1).map(d => d.id);
+  if (got.join() !== 'first' || p.achievements.first !== 1 || checkAch(w, p, 2).length) fail(`achievements: ${got}`);
+  w.feat('paint', 20);
+  if (checkAch(w, p).map(d => d.id).join() !== 'paint') fail('achievements: a 20-lot drag did not give Paint the Town');
+  if (checkAch(new Game({ ...SIM, mode: 'creative' }), profile0()).length) fail('achievements: unlocked in Creative');
+  if (!owned({ ...profile0(), achievements: { halfoff: 1 } }).paints.includes('gold')) fail('achievements: Half Off did not unlock gold paint');
+  // milestones: city levels count without a modal; 500 residents offers Money + Upgrade (rotation), the card passed over comes back first
   const m0 = w.money;
   H.residents = levelPop(2);
   w.update(DT);
+  if (w.cityLevel !== 2 || w.modal || w.money !== m0 || w.tierUnlocked('avenue')) fail(`levels: level ${w.cityLevel}`);
+  w.tutorialActive = false; // the tutorial holds milestones back
+  H.residents = 500;
   w.update(DT);
-  if (w.cityLevel !== 2 || w.pendingLevel !== 2) fail(`levels: level ${w.cityLevel}`);
-  if (w.money !== m0 + w.levelGrant(2) || w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+  const o1 = w.offers?.map(o => o.kind).join();
+  if (w.milestone !== 1 || o1 !== 'money,upgrade' || !w.modal) fail(`milestones: first offers ${o1}`);
+  const cash = (w.offers![0] as { amount: number }).amount;
+  takeOffer(w, 0);
+  if (w.money !== m0 + cash || w.offers || w.spare?.kind !== 'upgrade') fail(`milestones: money card ${w.money - m0}`);
+  H.residents = 1000;
+  w.update(DT);
+  const o2 = w.offers?.map(o => o.kind === 'upgrade' ? o.up : o.kind).join();
+  if (w.milestone !== 2 || o2 !== 'crew,money') fail(`milestones: second offers ${o2}`);
+  const before = w.price({ x: 0, y: 0 }, { x: 100, y: 0 }, { bridge: false, tunnel: false, level: 0, type: street });
+  takeOffer(w, 0);
+  if (Math.abs(w.price({ x: 0, y: 0 }, { x: 100, y: 0 }, { bridge: false, tunnel: false, level: 0, type: street }) - 0.8 * before) > 1e-9) fail('milestones: Road crew did not cut road prices');
+  if (milestonesAt(w, 4000) !== 7 || milestonePop(new Game({ ...SIM, mode: 'creative' }), 1) !== Infinity) fail('milestones: schedule');
+  w.offers = null;
+  H.residents = 100;
+  w.tutorialActive = true;
   w.cfg = { ...w.cfg, unlock: 2 };
   if (!w.tierUnlocked('avenue')) fail('levels: map 2 tools did not unlock the avenue');
 }
@@ -1514,14 +1540,18 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (gl.gameOver !== 'gridlock') fail(`challenge: '${gl.gameOver}' after a day of 41% given up`);
 
   // saves: the run state round-trips; a v1 'career' save without it loads as Endless with every tool
+  v.upgrades = ['crew']; v.tokens = ['plaza']; v.milestone = 2; v.spare = { kind: 'money', amount: 5 }; v.feats = { streak: 7 };
   const json = serialize(v), back = deserialize(json);
+  if (back.upgrades.join() !== 'crew' || back.tokens.join() !== 'plaza' || back.milestone !== 2 || back.spare?.kind !== 'money' || back.feats.streak !== 7) fail('save: milestones and feats do not round-trip');
   if (serialize(back) !== json || back.run.stars !== 3 || back.run.spent !== v.run.spent || back.cfg.map !== p.id) fail('save: the campaign run does not round-trip');
   const d = JSON.parse(json) as { cfg: { mode: string; map?: string }; run?: unknown };
   d.cfg = { ...d.cfg, mode: 'career' };
   delete d.cfg.map;
   delete d.run;
+  delete (d as { ms?: unknown }).ms;
   const old = deserialize(JSON.stringify(d));
   if (old.cfg.mode !== 'endless' || old.goals || old.unlockLevel !== Infinity || old.run.spent !== 0) fail(`save: an old career save loaded as ${old.cfg.mode}`);
+  if (old.milestone !== milestonesAt(old, old.population) || old.offers || old.upgrades.length) fail(`save: an old save's milestones ${old.milestone}`);
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

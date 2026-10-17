@@ -7,7 +7,8 @@ import type { Biome, Difficulty, GameConfig, MapSize, Mode } from '../core/confi
 import { AUTO, SLOTS, peek } from '../core/Save.ts';
 import { MAPS, cfgFor, mapById, objLabel } from '../core/Campaign.ts';
 import type { MapDef } from '../core/Campaign.ts';
-import { mapOpen, profile, toolLevel, totalStars } from '../core/Profile.ts';
+import { mapOpen, profile, saveProfile, toolLevel, totalStars } from '../core/Profile.ts';
+import { ACHIEVEMENTS, ISLANDS, PAINTS, cosmeticName, owned, rewardText } from '../core/Achievements.ts';
 import { CONTROLS } from './HUD.ts';
 import { icon } from './icons.ts';
 import { sound } from './Sound.ts';
@@ -40,6 +41,10 @@ const cfgLine = (c: GameConfig): string => {
 };
 const starRow = (n: number): string => `<span class="mstars" aria-label="${n} of 3 stars">${[1, 2, 3].map(i => `<i class="${i <= n ? 'on' : ''}">★</i>`).join('')}</span>`;
 // Endless needs a star on the first map; on a campaign map it needs a star there
+// A cosmetics picker row: locked options stay visible, disabled
+const cosRow = (k: string, label: string, all: string[], have: string[], cur: string): string => `
+  <div class="field" role="group" aria-label="${label}"><span class="flabel">${label}</span>
+    <div class="opts">${all.map(x => `<button class="opt" data-m="cos" data-v="${k}:${x}" aria-pressed="${cur === x}"${have.includes(x) ? '' : ' disabled title="Unlocked by an achievement"'}>${have.includes(x) ? '' : icon('lock')}${cosmeticName(x)}</button>`).join('')}</div></div>`;
 const endlessOpen = (m: MapDef = MAPS[0]): boolean => (profile().stars[m.id] ?? 0) > 0;
 // 'Day 4 · 1,240 residents', or why the slot cannot load
 function slotLine(key: string): { ok: boolean; text: string; sub: string } {
@@ -128,6 +133,13 @@ export class Menu {
       this.h.newGame(cfgFor(map, m === 'play' ? 'campaign' : 'challenge'));
       this.close(false);
     }
+    else if (m === 'cos' && v) {
+      const [k, x] = v.split(':'), p = profile(), o = owned(p);
+      if (k === 'paint' && o.paints.some(c => c === x)) p.cosmetics.paint = x as typeof p.cosmetics.paint;
+      if (k === 'island' && o.islands.some(c => c === x)) p.cosmetics.island = x as typeof p.cosmetics.island;
+      saveProfile();
+      this.render();
+    }
     else if (m === 'snd' && v) { const [k, x] = v.split(':'); sound.set({ [k]: x === '1' }); this.render(); }
     else if (m === 'continue') { if (this.h.load(AUTO)) this.close(false); else this.render(); }
     else if (m === 'slot' && v) {
@@ -186,7 +198,7 @@ export class Menu {
             ${open ? `<div class="mbtns">${btn('play', 'Play', 'primary', ` data-v="${m.id}"`)}`
               + btn('emap', 'Endless', '', ` data-v="${m.id}"${n ? '' : ' disabled title="Earn a star here first"'}`)
               + btn('challenge', ch ? `Challenge <small>day ${ch}</small>` : 'Challenge', '', ` data-v="${m.id}"${n === 3 ? '' : ' disabled title="Earn ★★★ here first: Hard rules, a deadline, permanent roads"'}`) + '</div>'
-              : `<p class="mlock">${icon('lock')}★ ${m.unlock} to unlock</p>`}
+              : `<p class="mlock">${icon('lock')}${m.bonus ? `Achievement: ${ACHIEVEMENTS.find(a => a.id === m.bonus)?.name}` : `★ ${m.unlock} to unlock`}</p>`}
           </div>`;
         }).join('')}</div>
         <div class="actions">${back}</div>`;
@@ -203,6 +215,14 @@ export class Menu {
         <table class="ptable"><tr><th>Map</th><th>Stars</th><th>Best efficiency</th><th>Challenge</th></tr>
           ${MAPS.map(m => `<tr><th scope="row">${m.name}</th><td>${starRow(p.stars[m.id] ?? 0)}</td><td>${p.best[m.id]?.efficiency.toLocaleString('en-US') ?? '-'}</td><td>${p.challenge[m.id] ? `day ${p.challenge[m.id]}` : '-'}</td></tr>`).join('')}
         </table>
+        <h3>Achievements <small>${ACHIEVEMENTS.filter(a => p.achievements[a.id]).length} of ${ACHIEVEMENTS.length}</small></h3>
+        <div class="achs">${ACHIEVEMENTS.map(a => {
+          const at = p.achievements[a.id];
+          return `<div class="achv${at ? ' got' : ''}" title="${at ? `Unlocked ${new Date(at).toLocaleDateString('en-US')}` : 'Locked'}">${icon(at ? 'trophy' : 'lock')}<b>${a.name}</b><span>${a.text}</span>${a.reward ? `<small>${rewardText(a)}</small>` : ''}</div>`;
+        }).join('')}</div>
+        <h3>Cosmetics</h3>
+        ${cosRow('paint', 'Car paint', PAINTS, owned(p).paints, p.cosmetics.paint)}
+        ${cosRow('island', 'Roundabout island', ISLANDS, owned(p).islands, p.cosmetics.island)}
         <div class="actions">${back}</div>`;
     } else if (v === 'pause') {
       body = `<h2 id="mn-title">Paused</h2>

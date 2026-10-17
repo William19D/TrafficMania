@@ -26,4 +26,5 @@ export const makeTrip = (purpose: Purpose, from: Building, to: Building, back = 
 export interface TripReport {
   purpose: Purpose; back: boolean; from: Building; to: Building; outcome: Outcome; seconds: number; day: number; hour: number;
   ratio: number; stretch: number; door: number; jam: Vec | null; jamAt: Control | 'road'; jamS: number;
+  stopped?: number; // absent in older saves
 }

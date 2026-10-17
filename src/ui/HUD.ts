@@ -4,9 +4,11 @@ import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelPop, leve
 import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
-import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
+import { DIFFICULTY, PURPOSES, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
 import { upgradeBlock } from '../core/Zones.ts';
-import { grade, objLabel, objText, objValue, unlockAt } from '../core/Campaign.ts';
+import { grade, milestonePop, objLabel, objText, objValue, offerText, takeOffer, unlockAt } from '../core/Campaign.ts';
+import { rewardText } from '../core/Achievements.ts';
+import type { AchDef } from '../core/Achievements.ts';
 import type { Purpose, Site, Special, Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
@@ -277,14 +279,13 @@ export class HUD {
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
     clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
-    views?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string;
+    views?: string; tokens?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
   private show = { metrics: false, feed: false };
   private carFor: Car | null = null;
   private feedAt = 0;
-  // Last level the player has seen in the level-up modal, and the speed to resume when it closes
-  private seenLevel: number;
+  // The speed to resume when a modal closes
   private resume: 0 | 1 | 2 | 4 = 1;
   onTutorial: (() => void) | null = null;
   // Game over: play the same map again, or go to the main menu; the menu button (pause menu)
@@ -300,7 +301,6 @@ export class HUD {
 
   // signal: aborted when this game's HUD is replaced, removing its window, document and root listeners
   constructor(private root: HTMLElement, private game: Game, signal?: AbortSignal) {
-    this.seenLevel = game.cityLevel;
     root.innerHTML = `
       <div class="topl">
       <div class="panel res" role="group" aria-label="Resources">
@@ -522,7 +522,8 @@ export class HUD {
     const g = this.game;
     if (g.modal) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else if (g.pendingGrade) this.closeGrade(); else this.closeLevel(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else if (g.pendingGrade) this.closeGrade(); }
+      else if (g.offers && !g.gameOver && !g.pendingGrade && (e.key === '1' || e.key === '2')) this.pick(+e.key - 1);
       return;
     }
     if (e.key === 'Escape' && this.buildOpen) {
@@ -663,11 +664,21 @@ export class HUD {
   }
 
   // ---------- modals ----------
-  // Level-up modal closed: the game runs again at the speed it had
-  private closeLevel(): void {
-    this.seenLevel = this.game.pendingLevel;
-    this.game.pendingLevel = 0;
-    this.game.speed = this.resume || 1;
+  // Milestone card i taken: the game runs again at the speed it had
+  private pick(i: number): void {
+    takeOffer(this.game, i);
+    sound.play('place');
+    if (!this.game.modal) this.game.speed = this.resume || 1;
+  }
+
+  // Achievement unlocked: a gold toast that stays a little longer
+  achieve(d: AchDef): void {
+    const el = document.createElement('div');
+    el.className = 'toast ach';
+    el.innerHTML = `${icon('trophy')}<span class="txt"><b>Achievement: ${esc(d.name)}</b><small>${esc(d.text)}${d.reward ? ` · ${esc(rewardText(d))}` : ''}</small></span>`;
+    this.q('.toasts').appendChild(el);
+    sound.play('level');
+    setTimeout(() => el.remove(), 5000);
   }
 
   // Map complete closed: the map plays on (Endless on it), the grade re-runs every midnight
@@ -732,25 +743,23 @@ export class HUD {
       b.onclick = () => this.closeGrade();
       this.q('[data-action="maps"]').onclick = () => { this.closeGrade(); this.onMaps?.(); };
       b.focus();
-    } else if (g.pendingLevel) {
-      // every level reached since the last modal (several at once merge): unlocks, the batch and the grants
+    } else if (g.offers) {
+      // milestone choice: two cards, pick one (the other comes back next time)
       if (g.speed) this.resume = g.speed;
       g.speed = 0;
-      const lv: number[] = [];
-      for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
-      const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0), won = lv.includes(LEVELS.length);
+      sound.play('level');
+      const goal = g.goals ? ` of ${esc(g.map!.name)}'s goal` : '';
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title">${icon('star')} ${won ? 'City complete!' : `Level ${g.pendingLevel}!`}</h2>
-          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents is another level.` : '. Zone more lots where the demand bars are high: the city grows where traffic flows.'}</p>
-          <div class="lvl-grid">
-            <div><p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
-          </div>
-          <div class="actions"><button class="btn primary" data-action="continue">Continue <kbd>Enter</kbd></button></div>
+          <h2 id="m-title">${icon('star')} Milestone ${g.milestone}: ${Math.round(milestonePop(g, g.milestone)).toLocaleString('en-US')} residents${goal}</h2>
+          <p class="sub">Pick one reward. The other one comes back first at the next milestone.</p>
+          <div class="offers">${g.offers.map((o, i) => {
+            const t = offerText(g, o);
+            return `<button class="offer" data-i="${i}">${icon(o.kind === 'money' ? 'money' : o.kind === 'special' ? 'build' : 'tag', 'big')}<b>${esc(t.title)}</b><span>${esc(t.text)}</span><kbd>${i + 1}</kbd></button>`;
+          }).join('')}</div>
         </div>`;
-      const b = this.q<HTMLButtonElement>('[data-action="continue"]');
-      b.onclick = () => this.closeLevel();
-      b.focus();
+      for (const el of Array.from(modal.querySelectorAll<HTMLButtonElement>('.offer'))) el.onclick = () => this.pick(+el.dataset.i!);
+      modal.querySelector<HTMLButtonElement>('.offer')?.focus();
     } else {
       modal.innerHTML = '';
     }
@@ -1033,7 +1042,7 @@ export class HUD {
     // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business and trade income
     // (yesterday's, or today's so far on the first day) - the network's upkeep; grants are one-off
     const money = Math.round(g.money);
-    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay - g.loan * T.LOAN_RATE);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay - g.loan * g.loanRate);
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -1051,7 +1060,7 @@ export class HUD {
         + (g.linkedExits().length ? '.' : ': none is linked yet, build a road to one at the map edge.')
         + ` Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
         + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
-        + (g.creative ? '' : ` Below $0 the bank lends ${fmtMoney(T.LOAN_STEP)} at a time, up to ${fmtMoney(g.loanCap)}, at ${T.LOAN_RATE * 100}% a day.`);
+        + (g.creative ? '' : ` Below $0 the bank lends ${fmtMoney(T.LOAN_STEP)} at a time, up to ${fmtMoney(g.loanCap)}, at ${g.loanRate * 100}% a day.`);
       if (prev !== undefined && Number.isFinite(d) && d !== 0) {
         (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${fmtMoney(d)}` : `−${fmtMoney(-d)}`;
         flash(c, d > 0 ? 'gain' : 'spend', ['gain', 'spend']);
@@ -1080,21 +1089,31 @@ export class HUD {
 
     // Population toward the next milestone (a map's population objective), and the city level; a level-up re-locks / unlocks the dock
     const goal = g.goals ? g.map!.objectives.find(o => o.kind === 'pop')?.target : undefined;
-    const pop = Math.round(g.population), next = goal ?? levelPop(g.cityLevel + 1), prev = goal ? 0 : levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
+    // Endless: the next milestone choice (Creative: the next city level)
+    const ms = !goal && !g.creative, nx = ms ? milestonePop(g, g.milestone + 1) : levelPop(g.cityLevel + 1);
+    const pop = Math.round(g.population), next = goal ?? nx, prev = goal ? 0 : ms ? (g.milestone ? milestonePop(g, g.milestone) : 0) : levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}|${g.milestone}`;
     if (pk !== L.pop) {
       countTo(this.q('.pv'), L.popN, pop, n => n.toLocaleString('en-US'));
       L.pop = pk;
       L.popN = pop;
       this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
       this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
-      this.q('.people').dataset.tip = `Population ${pop}. ${goal ? `The map's goal: ${next}` : `Level ${g.cityLevel + 1} at ${next}`} residents. Happy homes fill up; unhappy ones empty out.`;
+      this.q('.people').dataset.tip = `Population ${pop}. ${goal ? `The map's goal: ${next} residents (milestone rewards at 25%, 50% and 75%).` : ms ? `Next milestone reward at ${next} residents.` : `Level ${g.cityLevel + 1} at ${next} residents.`} Happy homes fill up; unhappy ones empty out.`;
+    }
+    // a milestone's free special shows on its Build menu card
+    if (g.tokens.join() !== L.tokens) {
+      L.tokens = g.tokens.join();
+      this.root.querySelectorAll<HTMLButtonElement>('[data-special]').forEach(b => {
+        const s = b.dataset.special as Special;
+        b.querySelector('small')!.textContent = g.tokens.includes(s) ? 'Free' : fmtMoney(SPECIALS[s].cost);
+      });
     }
     if (g.cityLevel !== L.city) {
       const up = L.city !== undefined;
       L.city = g.cityLevel;
       this.q('.lvn').textContent = String(g.cityLevel);
       this.q('.lvl').hidden = g.goals;
-      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : `: level ${g.cityLevel + 1} at ${levelPop(g.cityLevel + 1).toLocaleString('en-US')} residents pays a grant`}.`;
+      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : `: level ${g.cityLevel + 1} at ${levelPop(g.cityLevel + 1).toLocaleString('en-US')} residents`}.`;
       for (const b of this.toolBtns) {
         const f = TOOL_LOCK[b.dataset.tool as Tool], lock = f ? g.lockOf(f) : '';
         b.setAttribute('aria-disabled', String(!!lock));
@@ -1137,7 +1156,7 @@ export class HUD {
       const c = this.q('.loan');
       c.hidden = !g.loan;
       this.q('.ln').textContent = `Loan ${fmtMoney(g.loan)}`;
-      c.dataset.tip = `Bank loan: ${fmtMoney(g.loan)} at ${T.LOAN_RATE * 100}% a day (${fmtMoney(g.loan * T.LOAN_RATE)}/day). Click to repay ${fmtMoney(Math.min(T.LOAN_STEP, g.loan))}.`
+      c.dataset.tip = `Bank loan: ${fmtMoney(g.loan)} at ${g.loanRate * 100}% a day (${fmtMoney(g.loan * g.loanRate)}/day). Click to repay ${fmtMoney(Math.min(T.LOAN_STEP, g.loan))}.`
         + (g.frozen ? ' At the limit and still in debt: the city is frozen.' : '');
     }
 
@@ -1271,7 +1290,7 @@ export class HUD {
 
     this.updateObjectives();
 
-    const mk = `${g.gameOver}|${g.pendingLevel}|${!!g.pendingGrade}`;
+    const mk = `${g.gameOver}|${!!g.pendingGrade}|${g.offers ? g.milestone : 0}`;
     if (mk !== L.modal) {
       L.modal = mk;
       this.renderModal();

@@ -92,7 +92,7 @@ export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   emergency: { label: 'Emergency', color: '#E5484D' },
 };
 
-// City levels (endless milestones): population to reach each one; a level-up pays a grant. Past the last level every ENDLESS_POP more
+// City levels (Endless, counted only: milestone choices are the reward, Campaign.ts): population to reach each one. Past the last level every ENDLESS_POP more
 // residents is one more level. Unlocks come from the campaign maps (UNLOCKS[f].level, TIERS[t].level: the map number).
 export const LEVELS: { pop: number }[] = [0, 220, 400, 580, 800, 1000, 1250, 1500, 1800, 2100].map(pop => ({ pop }));
 export const ENDLESS_POP = 300;
@@ -138,7 +138,6 @@ export const TUNING = {
   // $ per resident per day x (0.5 + 0.5 x happiness), paid hourly; business $ per arrival at a workplace, shop (half with no stock) or of goods
   TAX_RES: 5, TAX_COMMUTE: 2, TAX_SHOP: 4, TAX_FREIGHT: 25,
   FAIL_DAYS: 2, FAIL_FROM_DAY: 4, // career: happiness under DIFFICULTY.failHappy at FAIL_DAYS midnights in a row, from day FAIL_FROM_DAY
-  LEVEL_GRANT: 2000,         // $ x level x taxMult on each level-up
   PLACED_OCC: 0.4,           // a home that grows on a lot (or is placed) moves in 40% full
   MOVE_COST: 300,            // $ to move a legacy building (career)
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge

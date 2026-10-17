@@ -12,8 +12,8 @@ import { RoadGraph } from '../network/RoadGraph.ts';
 import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
-import { run0 } from './Campaign.ts';
-import type { RunState } from './Campaign.ts';
+import { milestonesAt, run0 } from './Campaign.ts';
+import type { Offer, RunState, Upgrade } from './Campaign.ts';
 
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
@@ -30,6 +30,8 @@ export interface SaveData {
   cityLevel: number; tray?: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
   lots?: { x: number; y: number; angle: number; w: number; zone: Zone; b: Ref }[]; loan?: number; spawnAcc?: Record<Zone, number>;
   run?: RunState; // absent before the campaign
+  // absent before milestone choices and achievements (milestones then count as reached at the saved population)
+  ms?: { n: number; offers: Offer[] | null; spare: Offer | null; upgrades: Upgrade[]; tokens: Special[] }; feats?: Record<string, number>;
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
@@ -56,6 +58,7 @@ export function serialize(g: Game): string {
     v: 1, cfg: g.cfg, time: g.time, lastHour: g.lastHour, assignAt: g.assignAt, money: g.money, score: g.score, upkeepDay: g.upkeepDay,
     cityLevel: g.cityLevel, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
     stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc, run: g.run,
+    ms: { n: g.milestone, offers: g.offers, spare: g.spare, upgrades: g.upgrades, tokens: g.tokens }, feats: g.feats,
     lots: g.lots.map(l => ({ x: l.x, y: l.y, angle: l.angle, w: l.w, zone: l.zone, b: l.building ? bi.get(l.building)! : -1 })),
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
@@ -122,6 +125,9 @@ export function deserialize(json: string): Game {
   Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, roadType });
   g.loan = d.loan ?? 0;
   g.run = { ...run0(), ...d.run };
+  if (d.ms) Object.assign(g, { milestone: d.ms.n, offers: d.ms.offers, spare: d.ms.spare, upgrades: d.ms.upgrades, tokens: d.ms.tokens });
+  else g.milestone = milestonesAt(g, g.population);
+  g.feats = { ...d.feats, ...(d.loan && !d.feats ? { loaned: 1 } : {}) };
   if (d.spawnAcc) g.spawnAcc = d.spawnAcc;
   if (!d.lots) adoptLots(g);
   g.demand = demandOf(g);

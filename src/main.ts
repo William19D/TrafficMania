@@ -12,6 +12,7 @@ import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
 import type { GameConfig, Mode } from './core/config.ts';
 import { MAPS, cfgFor, mapById } from './core/Campaign.ts';
 import { profile, recordGrade, saveProfile, toolLevel } from './core/Profile.ts';
+import { checkAch } from './core/Achievements.ts';
 
 // URL params (?seed=&biome=&difficulty=&size=&mode=, or ?map=<id>&mode=) start that game at once, skipping the menu (dev and tests)
 const q = new URLSearchParams(location.search);
@@ -35,7 +36,7 @@ const renderer = new CanvasRenderer(canvas);
 const tutorialDone = (): boolean => { try { return localStorage.getItem('tm_tutorial_done') === '1'; } catch { return false; /* storage blocked: show it */ } };
 
 // One game at a time: a start aborts the old HUD's and input's listeners and builds them again on the new game
-let game: Game, hud: HUD, tutorial: Tutorial, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0, arrived = 0;
+let game: Game, hud: HUD, tutorial: Tutorial, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0, arrived = 0, achKey = '';
 // the profile's lifetime trips grow by what this game arrived since the last count (each midnight and on quitting)
 const tally = (): void => { profile().stats.trips += game.stats.arrived - arrived; arrived = game.stats.arrived; saveProfile(); };
 const autosave = (): void => { tally(); if (!game.gameOver) store(AUTO, game); };
@@ -92,6 +93,14 @@ new GameLoop(
       acc -= step;
     }
     if (game.day !== day) { day = game.day; autosave(); }
+    // achievements: on the hour and on each counted event (fv)
+    const k = `${game.lastHour}|${game.fv}`;
+    if (k !== achKey) {
+      achKey = k;
+      const got = checkAch(game, profile());
+      for (const a of got) hud.achieve(a);
+      if (got.length) saveProfile();
+    }
     if (game.running && !menu.open) profile().stats.seconds += dt;
   },
   () => {

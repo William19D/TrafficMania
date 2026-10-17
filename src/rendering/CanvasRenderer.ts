@@ -1,3 +1,4 @@
+import { profile } from '../core/Profile.ts';
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
@@ -63,7 +64,7 @@ export class CanvasRenderer {
   private land = BIOMES.temperate.land;
   private treeCol = BIOMES.temperate.tree;
   // Cached static ground roads (asphalt, kerbs, verges, markings, islands, stop lines) over a world rect at s px per world px
-  private roads: { key: number; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
+  private roads: { key: number; isl: string; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
   // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
   private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
   // Cached ground of the current map at s px per world px; building sprites' scale
@@ -532,9 +533,9 @@ export class CanvasRenderer {
     const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 60, vw = innerWidth / z, vh = innerHeight / z;
     const x0 = Math.max(-P, this.cam.x - vw / 2), y0 = Math.max(-P, this.cam.y - vh / 2);
     const x1 = Math.min(WORLD.w + P, this.cam.x + vw / 2), y1 = Math.min(WORLD.h + P, this.cam.y + vh / 2);
-    const key = netKey(game.graph.edges, game.graph.nodes);
+    const key = netKey(game.graph.edges, game.graph.nodes), isl = profile().cosmetics.island;
     let r = this.roads;
-    if (!r || r.key !== key || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
+    if (!r || r.key !== key || r.isl !== isl || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
       // ponytail: no margin past ~20M px (a 4K screen close up), so a pan there redraws every frame; tile the layer if it shows
       const m = (x1 - x0) * (y1 - y0) * 2.25 * s * s > 2e7 ? 0 : 0.25;
       const x = Math.max(-P, x0 - vw * m), y = Math.max(-P, y0 - vh * m);
@@ -547,7 +548,7 @@ export class CanvasRenderer {
       this.ctx.setTransform(s, 0, 0, s, -x * s, -y * s);
       this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0, game.graph.rings);
       this.ctx = main;
-      r = this.roads = { key, t: game.terrain, s, x, y, w, h, c };
+      r = this.roads = { key, isl, t: game.terrain, s, x, y, w, h, c };
     }
     this.ctx.drawImage(r.c, r.x, r.y, r.c.width / r.s, r.c.height / r.s);
   }
@@ -1178,22 +1179,16 @@ export class CanvasRenderer {
     }
   }
 
-  // Roundabout centre: a cobbled truck apron, a kerb, a planted island with a flower bed, shrubs round it and a tree in the middle
+  // Roundabout centre: a cobbled truck apron, a kerb, a planted island with shrubs round it and, by the profile's decor (Achievements.ts),
+  // a tree on grass, a flower bed, a fountain or a statue in the middle
   private island(ring: Ring): void {
-    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r - RING_W / 2, g = shade(this.land, -0.12);
+    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r - RING_W / 2, g = shade(this.land, -0.12), decor = profile().cosmetics.island;
     this.circle(n.x, n.y, R, '#D9D3C5');
     ctx.setLineDash([1.2, 1.2]);
     this.ring(n.x, n.y, R - 1.3, '#C4BDAD', 1.4);
     ctx.setLineDash([]);
     this.circle(n.x, n.y, R - 2.6, GRANITE);
     this.circle(n.x, n.y, R - 3.4, g);
-    this.circle(n.x, n.y, R * 0.5, '#B89A74');
-    this.circle(n.x, n.y, R * 0.5 - 0.8, '#A6875F');
-    const k = Math.floor(R * 0.9);
-    for (let i = 0; i < k; i++) {
-      const a = (i / k) * Math.PI * 2, f = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2'][i % 4];
-      this.circle(n.x + Math.cos(a) * R * 0.34, n.y + Math.sin(a) * R * 0.34, 0.8, f);
-    }
     const m = Math.max(4, Math.floor(R / 2.6));
     for (let i = 0; i < m; i++) {
       const a = (i / m) * Math.PI * 2 + 0.3, p = { x: n.x + Math.cos(a) * R * 0.74, y: n.y + Math.sin(a) * R * 0.74 };
@@ -1201,6 +1196,35 @@ export class CanvasRenderer {
       tree(ctx, p, 1.6 + (i % 3) * 0.25, i % 4 === 3 ? 'blossom' : 'round', this.treeCol, (i % 3 - 1) * 0.06, a);
     }
     const r = Math.min(5.5, R * 0.3);
+    if (decor === 'fountain') {
+      this.circle(n.x, n.y, R * 0.5, '#CFC8B8');
+      this.circle(n.x, n.y, R * 0.5 - 1.2, '#5FA8D6');
+      this.ring(n.x, n.y, R * 0.3, '#9FD3F0', 0.8);
+      this.circle(n.x, n.y, r * 0.5, '#CFC8B8');
+      this.circle(n.x, n.y, r * 0.25, '#E8F6FF');
+      return;
+    }
+    if (decor === 'statue') {
+      this.circle(n.x, n.y, R * 0.42, '#C9C2B2');
+      ctx.fillStyle = '#A9A293';
+      ctx.fillRect(n.x - r * 0.6, n.y - r * 0.6, r * 1.2, r * 1.2);
+      this.circle(n.x + 0.8, n.y + 1.2, r * 0.45, 'rgba(30,40,40,.25)');
+      this.circle(n.x, n.y, r * 0.45, '#5E8C7E');
+      this.circle(n.x - r * 0.12, n.y - r * 0.12, r * 0.2, '#7FB0A0');
+      return;
+    }
+    if (decor === 'grass') {
+      this.circle(n.x + 1.6, n.y + 2.3, r + 0.4, 'rgba(30,50,30,.18)');
+      tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
+      return;
+    }
+    this.circle(n.x, n.y, R * 0.5, '#B89A74');
+    this.circle(n.x, n.y, R * 0.5 - 0.8, '#A6875F');
+    const k = Math.floor(R * 0.9);
+    for (let i = 0; i < k; i++) {
+      const a = (i / k) * Math.PI * 2, f = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2'][i % 4];
+      this.circle(n.x + Math.cos(a) * R * 0.34, n.y + Math.sin(a) * R * 0.34, 0.8, f);
+    }
     this.circle(n.x + 1.6, n.y + 2.3, r + 0.4, 'rgba(30,50,30,.18)');
     tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
   }

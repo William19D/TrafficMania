@@ -174,14 +174,14 @@ export function planZone(g: Game, from: Vec, to: Vec, zone: Zone | null, oneSide
   const covered = (c: Lot): Lot[] => g.lots.filter(l => overlap(lotRect(c), lotRect(l)));
   if (!zone || start?.zone === zone) {
     plan.erase = [...new Set(cand.flatMap(covered))].filter(l => !zone || l.zone === zone);
-    plan.cost = -plan.erase.reduce((n, l) => n + (l.building || g.creative ? 0 : T.ZONE_COST[l.zone]), 0);
+    plan.cost = -plan.erase.reduce((n, l) => n + (l.building || g.creative || g.has('zoning') ? 0 : T.ZONE_COST[l.zone]), 0);
   } else {
     for (const c of cand) {
       const on = covered(c);
       if (on.some(l => l.zone !== zone)) plan.rezone.push(...on.filter(l => l.zone !== zone && !plan.rezone.includes(l)));
       else if (!on.length && free(g, c, plan.add)) plan.add.push(c);
     }
-    plan.cost = g.creative ? 0 : (plan.add.length + plan.rezone.length) * T.ZONE_COST[zone];
+    plan.cost = g.creative || g.has('zoning') ? 0 : (plan.add.length + plan.rezone.length) * T.ZONE_COST[zone];
   }
   const doomed = [...plan.rezone, ...plan.erase].filter(l => l.building);
   plan.demolish = doomed.length;
@@ -205,6 +205,7 @@ export function commitZone(g: Game, plan: ZonePlan): boolean {
   const gone = new Set(plan.erase);
   g.lots = [...g.lots.filter(l => !gone.has(l)), ...plan.add];
   g.spend(plan.cost, false);
+  if (plan.add.length > (g.feats.paint ?? 0)) g.feat('paint', plan.add.length);
   return true;
 }
 
@@ -429,7 +430,7 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
   const town = g.buildings.filter(b => b.kind !== 'gate'), cx = town.reduce((n, b) => n + b.x, 0) / (town.length || 1), cy = town.reduce((n, b) => n + b.y, 0) / (town.length || 1);
   let grew = false;
   for (const z of ZONE_LIST) {
-    g.spawnAcc[z] += Math.max(0, g.demand[z]) * T.SPAWN_RATE * DIFFICULTY[g.cfg.difficulty].growth;
+    g.spawnAcc[z] += Math.max(0, g.demand[z]) * T.SPAWN_RATE * DIFFICULTY[g.cfg.difficulty].growth * (g.has('zoning') ? 1.25 : 1);
     while (g.spawnAcc[z] >= 1) {
       let best: Lot | null = null, ba: number = T.SPAWN_A, bd = Infinity;
       for (const l of g.lots) {

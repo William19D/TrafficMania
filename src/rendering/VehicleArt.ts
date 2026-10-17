@@ -1,6 +1,8 @@
 import type { Kind } from '../entities/Car.ts';
 import { KINDS } from '../entities/Car.ts';
 import { shade } from './BuildingArt.ts';
+import { profile } from '../core/Profile.ts';
+import { PAINTS } from '../core/Achievements.ts';
 
 // Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, paint and pixel scale; the renderer
 // draws one rotated drawImage per vehicle plus the live lights (brake, indicators, purpose dot) on top.
@@ -12,6 +14,13 @@ type Palette = [string, number][];
 export const CAR_PAINT: Palette = [
   ['#F1F1EC', 20], ['#24272C', 16], ['#B8BDC3', 14], ['#6C737B', 12], ['#C6352B', 9], ['#2E6BB3', 8], ['#1E3454', 6],
   ['#3D7A4D', 4], ['#CDBA95', 4], ['#6B4A35', 3], ['#E07A28', 2], ['#F2C12E', 2],
+];
+// Car paint sets the profile unlocks (Achievements.ts); Classic is CAR_PAINT
+const SETS: Palette[] = [CAR_PAINT,
+  [['#F4C7D3', 1], ['#BFE3D6', 1], ['#C9D7F2', 1], ['#F8E3A8', 1], ['#D9C8F0', 1], ['#F6F2EA', 1]],
+  [['#E9DCB4', 2], ['#C4503A', 2], ['#2F6F6A', 2], ['#E2A43A', 1], ['#5B7FA6', 1], ['#7E4A36', 1]],
+  [['#FF3EA5', 1], ['#22E4D8', 1], ['#B4F53A', 1], ['#FFE13B', 1], ['#8E5CFF', 1], ['#FF8A1F', 1]],
+  [['#D4A93C', 6], ['#E8C766', 3], ['#F1F1EC', 1], ['#24272C', 1]],
 ];
 export const TRUCK_LIVERY: Palette = [
   ['#F4F4F0', 30], ['#C93A30', 14], ['#2F64A8', 14], ['#8A9097', 12], ['#3A8650', 10], ['#E58A2A', 10], ['#EDC339', 6],
@@ -59,7 +68,8 @@ export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
 
 // paint: the car's roll in [0, 1), set at spawn
 export function vehicle(kind: Kind, paint: number, s: number): HTMLCanvasElement {
-  const p = kind === 'truck' ? TRUCK_LIVERY : CAR_PAINT, i = pick(p, paint), key = (KI[kind] * 16 + i) * 16 + Math.log2(s);
+  const set = kind === 'truck' ? 0 : Math.max(0, PAINTS.indexOf(profile().cosmetics.paint)), p = kind === 'truck' ? TRUCK_LIVERY : SETS[set]!;
+  const i = pick(p, paint), key = ((set * 4 + KI[kind]) * 16 + i) * 16 + Math.log2(s);
   let c = sprites.get(key);
   if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => draw(x, kind, p[i]![0], h, w)));
   return c;
