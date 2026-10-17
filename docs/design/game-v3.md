@@ -158,6 +158,20 @@ A = 0.6 x trips + 0.25 x (1 − heat) + 0.15 x reach
 - **Frozen:** at the cap with `money < 0`, new buildings and upgrades stop and zone painting is refused (`The bank froze the city: earn money to grow again`). It lifts when money ≥ 0.
 - **Challenge only:** no loans, and the old rules apply: bankruptcy after `debtDays` midnights in debt, and city happiness under `failHappy` (see section 5).
 
+### G1 as built (where it differs from the above)
+Code: `src/core/Zones.ts` (lots, brush, demand, access, growth, abandon), `Game.bank()` / `repay()`, numbers in `TUNING` and `TIER_DEFS`.
+- **Lot front edge** sits `DRIVE_GAP` (12 px) past the road's edge, not 2 px: the driveway length every building already uses.
+- **Legacy** is `Building.tier = 0`, not `lots = []`. Every legacy building (an old save's, the starter town's) gets one lot of its zone under it, as wide as the building (`w = max(LOT_W, w + 4)`). It keeps its old footprint and capacity until it is cleared, then the lot grows a tier-1 building. `Lot` stores its geometry (front middle, angle, width), not an edge: the frontage road is looked up (`frontage()`), so splits and bends need no bookkeeping. Empty lots whose road went, or that a new road runs over, are dropped on the next spend.
+- **Erase** starts only from a press on a lot of the held zone (a press on the road paints). Re-zoning or unzoning built lots needs no second click: the preview turns red and says `demolishes N buildings`, and Esc cancels.
+- **Brush** cuts lots along the whole network path from the press to the cursor, centred on it (`cut()`), not per edge from the middle.
+- **Demolish** of a building is free and its lot stays zoned. Move only works for buildings without lots (none in normal play); the place tool stays for G2's specials.
+- **Upgrade** timers come with the tiers in G2. G1 only has tier 1.
+- **Unconnected buildings** keep no countdown (their people move out by the happiness rule, as before). Homes move in faster with better access: the fill rate is `x (0.5 + A)`.
+- **Causes:** `Drivers give up on the way`, `Trips take Nx longer than on empty roads`, `Jam on its street` (no street names yet), `No job within reach`, `No shop within reach`, `Not enough workers`, `Noise from a busy road`, `Pollution from factories nearby`. The pin's hover draws a dashed line to the longest stop of its recent trips, or to its street.
+- **Bank:** no money panel exists yet, so a `Loan $N` chip in region A repays `LOAN_STEP` on click. `Frozen` uses the danger chip.
+- **Levels** stay for unlocks and grants until G3 replaces them. Batches and the tray are gone. Saves no longer write `tray`.
+- Not done: the Grid tool's `Zone blocks` toggle.
+
 ---
 
 ## 3. Building tiers and specials (G2)
