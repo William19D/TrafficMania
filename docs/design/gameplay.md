@@ -8,6 +8,8 @@ Kept as-is: the pen-tool road placement (auto tangents, bend by drag), elevation
 
 Removed (Mini Motorways): coloured cities that spawn cars to cities of the same colour, the asphalt/bridge/tunnel/light/roundabout inventory, weekly reward cards, the overcrowding ring and its game over, random city spawning, week dots.
 
+**game-v3:** [`game-v3.md`](game-v3.md) replaces the tray, level batches, career fail conditions and the tutorial described here (zones and demand, ring roundabouts, campaign maps and modes, soft failure).
+
 ---
 
 ## 1. Core loop, modes, fail conditions, progression
