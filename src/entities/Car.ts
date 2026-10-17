@@ -155,7 +155,9 @@ export class Car {
     const keep = (n: Node, d: number, via: Edge | null): boolean => !!via && !via.drive && graph.drivewayJunction(n) && graph.held(n, via)
       && d - stopDist(n) >= this.speed * this.speed / (2 * BRAKE);
     if (needs && this.granted !== node) {
-      if (remaining < 70 && !this.queued) { node.queue.push(this); this.queued = true; }
+      // farther out (RoadGraph.queueAt) only in lane order: never ahead of the car in front
+      const at = remaining < 70 || (remaining < 120 && (!ahead || ahead.queued) && remaining < graph.queueAt(node, lane.edge, this));
+      if (at && !this.queued) { node.queue.push(this); this.queued = true; }
       gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);

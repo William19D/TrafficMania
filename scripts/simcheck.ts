@@ -3,7 +3,7 @@
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
-import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
+import { LEFT, PRIORITY, RIGHT, STOP, STRAIGHT, YIELD, applyPreset, approachOf, clonePlan, cycleSign, links, moveOf, planOf, setLink, setSeconds, signOf } from '../src/network/Junction.ts';
 import { stepDone, tutorialSteps } from '../src/ui/Tutorial.ts';
 import { dueTip } from '../src/ui/Tips.ts';
 import type { Edge, Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
@@ -145,7 +145,7 @@ const overlaps = (w: Game, what: string, drawn = true): void => {
   }
 };
 const DT = 1 / 60, STEPS = 300 * 60, T_UP = TUNING.UPGRADE_H;
-let maxCars = 0, lo = Infinity, hi = 0;
+let maxCars = 0, lo = Infinity, hi = 0, rushSmooth = 0;
 const kinds = new Set<string>();
 // Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
 const exits = new Map<Car, [Lane, Lane | null]>();
@@ -874,6 +874,68 @@ for (const kind of ['yield', 'stop'] as const) {
   if (kind === 'yield' && first !== main) fail('yield: the side road went before the main road');
   if (w.score !== 2) fail(`${kind}: ${w.score} of 2 cars arrived`);
 }
+// Priority signs (TM:PE style): at an avenue / street T with auto signs (the avenue has priority, the street yields), an avenue car at
+// speed keeps it through while a street car turning into its lane waits for it; a street car turning right with only far-lane traffic
+// coming, or left with none, keeps its speed (it came in at 40 px/s); a stop sign halts it at the line first
+{
+  const tee = (stop: boolean) => {
+    const w = blank(), wg = w.graph, ave: RoadType = { tier: 'avenue', lanes: 1, oneWay: false }, street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+    const X = town(w, 100, 500), Y = town(w, 900, 500, 'shop', true), Z = town(w, 500, 940), J = wg.addNode(500, 500);
+    w.commitPath(w.planPath([X, J], 0, ave));
+    w.commitPath(w.planPath([J, Y], 0, ave));
+    w.commitPath(w.planPath([Z, J], 0, street));
+    w.demandOff = true;
+    w.placeControl(J, 'yield');
+    const zj = wg.edgeBetween(Z, J)!, xj = wg.edgeBetween(X, J)!, yj = wg.edgeBetween(Y, J)!;
+    if (signOf(J, xj) !== PRIORITY || signOf(J, yj) !== PRIORITY || signOf(J, zj) !== YIELD) fail('signs: auto signs are not avenue priority, street yield');
+    if (stop) { J.plan = clonePlan(planOf(J)); cycleSign(J.plan, J, approachOf(J.plan, J, zj)); }
+    if (stop && signOf(J, zj) !== STOP) fail('signs: cycling yield does not give stop');
+    // a car on edge e from node a, s px short of J, at speed v
+    const car = (e: Edge, a: Node, to: Node, s: number, v: number): Car => {
+      const c = new Car(wg.lanesFrom(e, a)[0]!, trip(a, to));
+      c.s = e.length - s;
+      c.speed = v < 0 ? c.top(e, wg) : v;
+      c.lane.cars.push(c);
+      w.cars.push(c);
+      return c;
+    };
+    // runs until every car arrived: per car its lowest speed on its way in to J, and the time it was granted J
+    const run = (cs: Car[], what: string): { lo: number[]; at: number[] } => {
+      const lo = cs.map(() => Infinity), at = cs.map(() => -1), into = cs.map(c => c.lane);
+      for (let t = 0; t < 30 * 60 && w.score < cs.length; t++) {
+        w.update(DT);
+        invariants(w);
+        cs.forEach((c, i) => { if (c.lane === into[i]) lo[i] = Math.min(lo[i], c.speed); if (at[i] < 0 && c.granted === J) at[i] = t; });
+      }
+      if (w.score !== cs.length) fail(`signs: ${what}: ${w.score} of ${cs.length} cars arrived`);
+      return { lo, at };
+    };
+    return { w, J, X, Y, Z, zj, xj, yj, car, run };
+  };
+  {
+    const { X, Y, Z, zj, xj, car, run } = tee(false);
+    const m = car(xj, X, Y, 260, -1), v0 = m.speed, side = car(zj, Z, Y, 50, 30);
+    const { lo, at } = run([m, side], 'merge');
+    if (lo[0] < 0.97 * v0) fail(`signs: the priority car braked to ${lo[0].toFixed(0)} of ${v0.toFixed(0)} px/s for a yielding car`);
+    if (at[1] < at[0] || lo[1] > 1) fail(`signs: the yielding car did not wait for the priority car into its lane (granted ${at[1]} vs ${at[0]}, lowest ${lo[1].toFixed(0)} px/s)`);
+  }
+  {
+    const { Y, X, Z, zj, yj, car, run } = tee(false);
+    const m = car(yj, Y, X, 120, -1), side = car(zj, Z, Y, 140, 40);
+    const { lo } = run([m, side], 'free right');
+    if (lo[1] < 34) fail(`signs: a right turn slowed to ${lo[1].toFixed(0)} px/s for far-lane traffic it never meets`);
+  }
+  {
+    const { X, Z, zj, car, run } = tee(false);
+    const { lo } = run([car(zj, Z, X, 140, 40)], 'free left');
+    if (lo[0] < 34) fail(`signs: a yield with no traffic slowed a car to ${lo[0].toFixed(0)} px/s`);
+  }
+  {
+    const { X, Z, zj, car, run } = tee(true);
+    const { lo } = run([car(zj, Z, X, 140, 40)], 'stop');
+    if (lo[0] >= 1) fail(`signs: a stop sign let a car through at ${lo[0].toFixed(0)} px/s`);
+  }
+}
 // Ramps: a road at L2 from a ground road's dead end climbs a level per segment (L0, L1, then L2); a 2-tile one is too steep; a viaduct
 // ending at a door comes down to the ground first (doors take ground roads only); a commute over it arrives
 {
@@ -1093,7 +1155,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     overlaps(w, 'rush hour', false);
     for (const c of w.cars) maxWait = Math.max(maxWait, c.wait);
   }
-  const smooth = w.stats.smooth / w.stats.arrived;
+  const smooth = rushSmooth = w.stats.smooth / w.stats.arrived;
   if (maxWait > GIVE_UP_S - 2 || w.stats.failed || smooth < 0.75) fail(`rush hour: longest stop ${maxWait.toFixed(1)}s, ${w.stats.failed} failed, ${(smooth * 100).toFixed(0)}% smooth of ${w.stats.arrived}`);
 }
 // Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
@@ -1721,5 +1783,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
-  + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)}`);
+  + `pending=${game.buildings.reduce((n, b) => n + b.pending.length, 0)} commutes=${commutes.length} outcomes=${JSON.stringify(out)} `
+  + `smooth=${(100 * (out.smooth ?? 0) / game.reports.length).toFixed(1)}% rushSmooth=${(100 * rushSmooth).toFixed(1)}%`);
 process.exit(0);

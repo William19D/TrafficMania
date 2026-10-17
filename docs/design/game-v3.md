@@ -674,3 +674,24 @@ Rejected:
 - **G5:** caps hold over 10 simulated days; roadworks closes and reopens the edge with no car lost.
 - **G6:** the tutorial steps' `done` predicates are pure reads.
 - **G7:** undo after build, then redo, leaves graph and money identical.
+- **T1:** at an avenue / street T with auto signs, an avenue car at speed keeps at least 97% of it while a street car turning into its lane waits for it; a street right turn with only far-lane traffic, and a left with none, keep their speed; a stop sign brings the car to a standstill first. The final line prints the main city's and the rush hour's smooth-trip share.
+
+---
+
+## 14. Priority signs and right of way (T1)
+
+TM:PE-style signs on the sign control (`yield`; the picker says **Signs**). Each approach carries one sign, stored in the junction plan as `signs[approach]` (`0` priority road, `1` yield, `2` stop; `null` or missing = auto). Auto: the main road (`mainEdges`, the highest tier, more lanes break ties, the straightest pair) has priority and the side roads yield. Old saves have no `signs`, so they load as auto. A plan reset (its roads changed) drops them with the rest. All-way stop stays its own control.
+
+- **Editing:** the junction panel draws the arms with a sign beside each incoming lane; a click cycles priority road, yield, stop. **Auto signs** clears them. On the map (Edit tool, junction open) a click on a sign post does the same. Signs come with the control, so the junction editor's level lock (phases, lane connections) does not hold them.
+- **Icons:** a yellow diamond (priority road), a red-rimmed give-way triangle, a red octagon, on posts past the kerb. They are drawn larger on top of the lane editor while the junction is open.
+- **Rank:** lower goes first. Priority straight or right is 0, priority left (and U-turn) is 1, yield and stop are 2. An ambulance (or its lane) ranks as priority.
+- **Grant rule (`RoadGraph.update`, sign junction):** a car is held only by a real conflict, never by a sign alone. It waits for:
+  - a car in the box whose path crosses or merges with its own;
+  - a better-ranked car crossing it that is queued at the junction, or that would reach the box before it could stop plus `CLEAR_S` (1.2 s) of travel. The gap is `CLEAR_M` (1.6) times that when merging into the same road out, since the merging car still has to get up to speed. This is `giveWay`, which looks back up to 300 px over plain bends;
+  - an earlier same-ranked car that crosses it (first come, first served).
+
+  A stop sign first needs a standstill at the line. A right turn into the near lane, parallel flows, and a merge with no traffic coming keep their speed. Priority traffic never brakes for a yielding car that is merely waiting.
+- **Courtesy:** a worse-ranked car that has been at the front of its lane for `STARVE_S` (4 s) with room to go holds the crossing traffic that has not been granted yet, so a side road never waits until it gives up. While starving, it ignores priority cars that can still stop.
+- **Early grant:** a car with right of way (a plain junction, or a priority approach) joins the queue where it can still stop (`RoadGraph.queueAt`: at least 70 px, up to its braking plus reaction distance). It does so only behind a car that is already queued. A clear junction then grants it before it has to slow down. Lights, stop signs, ring entries and driveways keep 70 px.
+- Lights, all-way stops, roundabouts and driveway merges are unchanged.
+- **Measured** (simcheck, seed `simcheck`): main city smooth trips 97.5% before and 97.5% after. Its junctions are a light, a ring and a plain T, so nothing there changed. Rush-hour town (one sign T) went from 83.4% to 83.7%.

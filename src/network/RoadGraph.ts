@@ -6,7 +6,7 @@ import type { Car } from '../entities/Car.ts';
 import { TIERS, TUNING } from '../core/config.ts';
 import type { Tier } from '../core/config.ts';
 import type { JunctionPlan, Move } from './Junction.ts';
-import { ANY, LEFT, approachOf, edgeAngle, laneMasks, mainEdges, moveOf, oppositeOf, planOf, turnAt } from './Junction.ts';
+import { ANY, LEFT, PRIORITY, STOP, approachOf, edgeAngle, laneMasks, moveOf, oppositeOf, planOf, signOf, turnAt } from './Junction.ts';
 export { LIGHT_PERIOD, lightGroup } from './Junction.ts';
 
 export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5;
@@ -18,6 +18,10 @@ export const LC_S = 0.6, LC_M = 110;
 // Max braking px/s/s. Merge: a driveway car takes a gap of MERGE_GAP s before road traffic reaches the junction; a car at the front
 // of its lane for MERGE_S (a driveway, a yield side road, a permissive left) makes the traffic it gives way to let it in
 export const BRAKE = 180, MERGE_GAP = 1, MERGE_S = 1;
+// Sign junction: the gap (s) a yielding car needs before crossing traffic with priority reaches the box (CLEAR_M x that merging into its
+// road out: it still has to get up to speed), and the wait at the front of its lane after which the crossing traffic lets it in
+// (courtesy, so a side road never waits until it gives up)
+export const CLEAR_S = 1.2, CLEAR_M = 1.6, STARVE_S = 4;
 // px out from a light at which an ambulance turns it green
 export const AMB_R = 60;
 
@@ -54,7 +58,7 @@ export const ringOut = (s: RingSize): number => RINGS[s].r + RING_W / 2;
 export const clearR = (s: RingSize): number => ringOut(s) + 2 * NODE_R;
 export const onRing = (n: Node): boolean => n.edges.some(e => !!e.ring);
 
-// none: one car at a time in arrival order; yield: the main road (mainEdges) goes, side roads give way; stop: all-way stop
+// none: non-crossing cars together in arrival order; yield: priority signs per approach (Junction.signOf); stop: all-way stop
 export type Control = 'none' | 'yield' | 'stop' | 'light' | 'roundabout';
 
 export interface Node {
@@ -469,7 +473,10 @@ export class RoadGraph {
   // The paths of two cars across plain junction n cross, or end on one road. Each arm takes cars in just right of its centre line and
   // out just left of it, so two paths cross when their ends interleave around the node; a U-turn sweeps the whole box.
   private crosses(n: Node, a: Car, b: Car): boolean {
-    const ma = this.moveAt(n, a), mb = this.moveAt(n, b);
+    return this.crossing(n, this.moveAt(n, a), this.moveAt(n, b));
+  }
+  // Two movements (in, out edge) across n cross; an unknown one counts as yes
+  private crossing(n: Node, ma: [Edge, Edge] | null, mb: [Edge, Edge] | null): boolean {
     if (!ma || !mb || ma[0] === ma[1] || mb[0] === mb[1] || ma[1] === mb[1]) return true;
     if (ma[0] === mb[0]) return false;
     const T = 2 * Math.PI, at = (e: Edge, d: number) => edgeAngle(n, e) + d, p = at(ma[0], -0.01), span = (at(ma[1], 0.01) - p + 2 * T) % T;
@@ -481,6 +488,39 @@ export class RoadGraph {
   private moveAt(n: Node, c: Car): [Edge, Edge] | null {
     if (c.clearing === n) { const e = c.prev && this.edgeBetween(c.prev, n); return e ? [e, c.lane.edge] : null; }
     return c.exit ? [c.lane.edge, c.exit.edge] : null;
+  }
+  // ... or of a car still a link or more out, by its route
+  private moveVia(n: Node, c: Car): [Edge, Edge] | null {
+    if (c.lane.to === n || c.clearing === n) return this.moveAt(n, c);
+    const p = c.path, i = p ? p.indexOf(n) : -1, a = i > 0 ? this.edgeBetween(p![i - 1], n) : null, b = i >= 0 && p![i + 1] ? this.edgeBetween(n, p![i + 1]) : null;
+    return a && b ? [a, b] : null;
+  }
+
+  // Sign junction n: a car coming in on another arm that car c gives way to (better: its rank goes first) and whose path crosses c's,
+  // queued at n or reaching the box before it could stop plus margin px (none once c starves: then only cars that can't stop count).
+  // A car that has no room to go anyway doesn't count. Looks back over bends up to 300px.
+  // ponytail: stops at driveway junctions on the way; a priority car behind one is only seen once it is past it
+  private giveWay(n: Node, c: Car, better: (o: Car, m: [Edge, Edge] | null) => boolean, margin: (o: Car, m: [Edge, Edge] | null) => number): boolean {
+    const mc = this.moveAt(n, c);
+    const scan = (l: Lane, d: number): boolean => {
+      for (let i = l.cars.length - 1; i >= 0; i--) {
+        const o = l.cars[i], od = d + l.edge.length - o.s;
+        if (od > 300) return false;
+        const m = this.moveVia(n, o), k = margin(o, m);
+        if ((od < stopDist(n) + o.speed * o.speed / (2 * BRAKE) + k || (k > 0 && o.queued && o.lane.to === n)) && better(o, m) && this.crossing(n, mc, m) && (o.lane.to !== n || this.fits(n, o))) return true;
+      }
+      const p = l.from, back = p.edges.filter(x => !x.drive && x !== l.edge);
+      d += l.edge.length;
+      return d < 300 && !p.building && p.control === 'none' && back.length === 1 && back[0].lanes.some(x => x.to === p && scan(x, d));
+    };
+    return n.edges.some(e => e !== c.lane.edge && e.lanes.some(l => l.to === n && scan(l, 0)));
+  }
+
+  // How far out from n a car on 'via' queues for its turn: 70px, or where it still could stop when it has right of way (a plain
+  // junction, a priority road at a sign junction), so a clear junction grants it at speed
+  queueAt(n: Node, via: Edge, c: Car): number {
+    const free = n.control === 'yield' ? signOf(n, via) === PRIORITY : n.control === 'none' && !this.drivewayJunction(n) && !onRing(n);
+    return free ? Math.max(70, stopDist(n) + GAP + 10 + c.speed * (c.react + c.speed / (2 * BRAKE))) : 70;
   }
 
   private grant(n: Node, c: Car): void {
@@ -592,11 +632,12 @@ export class RoadGraph {
         const o = oppositeOf(plan!, a);
         return o >= 0 && (busy(n.queue, o, m => m !== LEFT) || busy(n.occupants, o, m => m !== LEFT));
       };
-      // Starved: at the front of its lane for MERGE_S with room to go. A starved side road (yield) or permissive left (yield's main road,
-      // or a light showing it yield) stops the traffic it gives way to, so it never waits until it gives up.
-      const main = n.control === 'yield' ? mainEdges(n) : [];
-      const starving = (c: Car): boolean => c.wait > MERGE_S && c.lane.cars[c.lane.cars.length - 1] === c && this.fits(n, c);
-      const side = n.queue.some(c => !main.includes(c.lane.edge) && !ambL.has(c.lane) && starving(c));
+      // Starved: at the front of its lane for s (MERGE_S) with room to go. A starved permissive left (a light showing it yield) stops the
+      // oncoming traffic, so it never waits until it gives up.
+      const starving = (c: Car, s = MERGE_S): boolean => c.wait > s && c.lane.cars[c.lane.cars.length - 1] === c && this.fits(n, c);
+      // Sign junction rank, lower goes first: a priority road (or an ambulance) straight or right 0, its lefts 1, yield and stop 2
+      const signs = n.control === 'yield' ? new Map(n.edges.map(e => [e, signOf(n, e)])) : null;
+      const rank = (c: Car, m: [Edge, Edge] | null): number => !m ? 2 : signs!.get(m[0]) !== PRIORITY && c.kind !== 'ambulance' && !ambL.has(c.lane) ? 2 : moveOf(n, m[0], m[1]) === LEFT ? 1 : 0;
       const lefty = (a: number): boolean => a >= 0 && n.queue.some(c => {
         const y = mv.get(c);
         return !!y && y[0] === a && y[1] === LEFT && (n.control !== 'light' || plan!.phases[n.phase].sig[a][LEFT] === 1) && starving(c);
@@ -610,9 +651,14 @@ export class RoadGraph {
           return x![1] === LEFT ? s === 2 || (s === 1 && left(c, x![0])) : s > 0 && !lefty(oppositeOf(plan!, x![0]));
         }
         if (n.control === 'yield') {
-          // a side road goes into an empty box with no main-road car waiting
-          if (main.includes(c.lane.edge) || ambL.has(c.lane)) return !side && (x![1] === LEFT ? left(c, x![0]) : !lefty(oppositeOf(plan!, x![0])));
-          return !n.occupants.size && (starving(c) || !n.queue.some(o => o !== c && main.includes(o.lane.edge)));
+          // Only an actual conflict holds a car: a crossing or merging car in the box, a better-ranked one coming that would reach the box
+          // before it clears, an earlier same-ranked one waiting, or a starved worse-ranked one (courtesy). A stop sign first halts at the line.
+          const mc = this.moveAt(n, c), r = rank(c, mc);
+          if (signs!.get(c.lane.edge) === STOP && !ambL.has(c.lane) && !(c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3)) return false;
+          for (const o of n.occupants) if (this.crosses(n, c, o)) return false;
+          if (r && this.giveWay(n, c, (o, m) => rank(o, m) < r, (o, m) => starving(c, STARVE_S) ? 0 : o.speed * CLEAR_S * (m?.[1] === mc?.[1] ? CLEAR_M : 1) + CAR_LEN)) return false;
+          return !ready.some(o => rank(o, this.moveAt(n, o)) === r && this.crosses(n, c, o))
+            && !n.queue.some(o => o !== c && rank(o, this.moveAt(n, o)) > r && starving(o, STARVE_S) && this.crosses(n, c, o));
         }
         if (rv) return !this.ringNear(n, c) && this.exitRoom(n, c);
         // stop: only from a standstill at the line

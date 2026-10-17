@@ -12,7 +12,12 @@ export type Signal = 0 | 1 | 2; // red, go but yield (a permissive left gives wa
 export interface Phase { seconds: number; sig: Signal[][] }
 // lanes[approach]: lane connections, a move bitmask (1 << Move) per incoming lane, left to right (0: the lane connects nowhere);
 // null / missing = auto (the default lane choice). A move no lane connects is banned.
-export interface JunctionPlan { approaches: number[]; phases: Phase[]; ban: boolean[][]; lanes?: (number[] | null)[] }
+// signs[approach]: a sign junction's (control 'yield') sign; null / missing = auto (the main road has priority, side roads yield)
+export interface JunctionPlan { approaches: number[]; phases: Phase[]; ban: boolean[][]; lanes?: (number[] | null)[]; signs?: (Sign | null)[] }
+// Priority signs (TM:PE style): a priority road never stops for the others; yield gives way to crossing traffic with priority; stop
+// also halts at the line first
+export const PRIORITY = 0, YIELD = 1, STOP = 2;
+export type Sign = 0 | 1 | 2;
 export type Preset = 'two' | 'lefts' | 'each';
 const MATCH = Math.PI / 12; // 15 degrees
 
@@ -105,7 +110,12 @@ export function mainEdges(n: Node): Edge[] {
   return pair;
 }
 
+// Sign of approach i, and of road e into n
+export const signAt = (p: JunctionPlan, n: Node, i: number): Sign => p.signs?.[i] ?? (mainEdges(n).some(e => approachOf(p, n, e) === i) ? PRIORITY : YIELD);
+export const signOf = (n: Node, e: Edge): Sign => { const p = planOf(n); return signAt(p, n, approachOf(p, n, e)); };
+
 // Plan edits (Game.editPlan applies them to a copy)
+export const cycleSign = (p: JunctionPlan, n: Node, i: number): void => { (p.signs ??= p.approaches.map(() => null))[i] = ((signAt(p, n, i) + 1) % 3) as Sign; };
 export const cycleSig = (p: JunctionPlan, ph: number, a: number, m: Move): void => { p.phases[ph].sig[a][m] = ((p.phases[ph].sig[a][m] + 1) % 3) as Signal; };
 export const setSeconds = (p: JunctionPlan, ph: number, s: number): void => { p.phases[ph].seconds = Math.max(PHASE_MIN, Math.min(PHASE_MAX, s)); };
 export const addPhase = (p: JunctionPlan): void => {
