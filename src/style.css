@@ -523,6 +523,23 @@ kbd {
 .tutorial .actions { display: flex; justify-content: space-between; gap: .5em; margin-top: 1em; }
 .tutorial .next .ico { width: 1.1em; height: 1.1em; }
 .tutorial .next .ico.ok { background: var(--success); color: #fff; border-radius: 50%; padding: 2px; }
+#hud .tutorial .next.done { background: var(--success); border-color: var(--success); color: #fff; }
+/* tips share the tutorial card's spot (never both at once) */
+.tipcard .tut-head { gap: .375em; color: var(--accent); }
+.tipcard .tut-head .ico { width: 1.1em; height: 1.1em; }
+.tipcard p { margin-top: .5em; color: var(--ink); }
+.tipcard .actions { align-items: center; }
+.tipcard .actions .btn { white-space: nowrap; }
+/* region O during the tutorial: its steps as a checklist */
+.orow.todo { color: var(--muted); }
+.orow.cur > span { font-weight: 700; color: var(--accent); }
+.orow.cur.ok > span { color: var(--success); }
+/* notifications: the bell's unread badge, the feed's rows */
+.bell { position: relative; }
+#hud .bell .badge { position: absolute; top: 1px; right: 1px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--danger); color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
+#hud .nrow { display: flex; align-items: baseline; gap: .5em; width: 100%; padding: .3em .375em; text-align: left; font-size: var(--label); font-weight: 500; line-height: 1.35; }
+.nrow small { flex: none; color: var(--muted); }
+button.nrow:hover { background: var(--soft); }
 /* medium widths: keep toasts clear of the tutorial card */
 @media (max-width: 1400px) {
   #hud:has(.tutorial:not([hidden])) .toasts { left: var(--edge-l); transform: none; }

@@ -4,7 +4,8 @@
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
 import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
-import { tutorialSteps } from '../src/ui/Tutorial.ts';
+import { stepDone, tutorialSteps } from '../src/ui/Tutorial.ts';
+import { dueTip } from '../src/ui/Tips.ts';
 import type { Edge, Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
@@ -18,7 +19,7 @@ import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
-import { commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
+import { ZONE_LIST, commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
 import { CHALLENGE_MONEY, MAPS, cfgFor, grade, milestonePop, milestonesAt, takeOffer } from '../src/core/Campaign.ts';
 import { checkAch, owned } from '../src/core/Achievements.ts';
 import { RAIN_V, WRECK_V, eventsOn, startEvent } from '../src/core/Events.ts';
@@ -887,47 +888,62 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   w.select(w.graph.carPos(c));
   if (w.follow !== c || w.selected) fail('follow: an Edit click on a car did not follow it');
 }
-// Tutorial: every step's done is a pure read (the save JSON is the same after checking them all), and a scripted level-1 town
-// passes the tasks in order: homes to the office, a commute, a placed home, the shop on a junction, a light, a longer phase
-// (the tutorial lifts the level-4 lock), the heat map
+// Tutorial (G6): on the real Meadowbrook a scripted newcomer plays the eight steps in order (each progress a pure read: the save JSON is the
+// same after checking them all), with growth x4, no events and no milestones while it runs; then plays on to the map's 300 residents and
+// its first star. Tips: dueTip is pure, follows the game and skips the seen ones. The feed: note() keeps the last 40 with their spot.
 {
-  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
-  w.cfg = { ...w.cfg, unlock: 1 };
-  w.demandOff = true;
-  const H = town(w, 300, 460).building!, O = town(w, 900, 380, 'office', true).building!, S = town(w, 600, 700, 'shop').building!;
+  const w = new Game(cfgFor(MAPS[0], 'campaign')), st: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.tutorialActive = true;
+  w.money = Math.max(w.money, 20000);
   const steps = tutorialSteps(w);
-  const done = (): boolean[] => {
-    const json = serialize(w), d = steps.map(s => !!s.done?.(w));
-    if (serialize(w) !== json) fail('tutorial: a done check changed the game');
+  let at = 0;
+  const prog = (): [number, number][] => {
+    const json = serialize(w), d = steps.map(s => s.progress?.(w) ?? [1, 1] as [number, number]);
+    if (serialize(w) !== json) fail('tutorial: a progress check changed the game');
     return d;
   };
-  const expect = (n: number, what: string): void => { if (!done()[n]) fail(`tutorial: step ${n + 1} not done after ${what}`); };
-  if (done().slice(1, -1).some(x => x)) fail(`tutorial: steps done before anything was built: ${done()}`);
-  w.commitPath(w.planPath([{ x: 100, y: 420 }, { x: 1000, y: 420 }], 0, street));
-  expect(1, 'the road to the office');
-  w.queueTrip(H, O, 'commute');
-  for (let t = 0; t < 20 * 60 && !done()[2]; t++) w.update(DT);
-  expect(2, 'a commute');
-  steps[3].enter!(w);
-  w.setZone('home');
-  if (done()[3] || !commitZone(w, planZone(w, { x: 500, y: 420 }, { x: 800, y: 420 }, 'home')!)) fail(`tutorial: zoning homes (${w.message})`);
-  expect(3, 'zoning homes');
-  if (done()[4]) fail('tutorial: the shop counted before its road');
-  w.commitPath(w.planPath([S.node, { x: 600, y: 420 }], 0, street));
-  expect(4, 'the shop road');
-  const j = w.graph.nodes.find(n => !n.building && n.edges.length >= 3)!;
-  w.placeControl(j, 'light');
-  expect(5, 'the light');
-  w.editPlan(j, p => setSeconds(p, 0, LIGHT_PERIOD + 2));
-  expect(6, 'a longer phase');
-  w.overlay = 'heat';
-  expect(7, 'the heat map');
-  // a replay on a city in progress (tutorialActive off) tops nothing up
+  // step i is entered (as the card does) and must not be done yet; then act() until it is, within days of game time
+  const step = (i: number, act: () => void, days = 1): void => {
+    steps[i].enter?.(w);
+    if (stepDone(steps[i], w)) fail(`tutorial: step ${i + 1} done on entry ${JSON.stringify(prog()[i])}`);
+    act();
+    for (const end = w.time + days * TUNING.DAY_SECONDS; !stepDone(steps[i], w) && w.time < end;) for (let k = 0; k < 60; k++) w.update(DT);
+    if (!stepDone(steps[i], w)) fail(`tutorial: step ${i + 1} (${steps[i].goal}) stuck at ${JSON.stringify(prog()[i])} on day ${w.day} (lots ${JSON.stringify(ZONE_LIST.map(z => w.lots.filter(l => l.zone === z).length))}, pop ${Math.round(w.population)}, demand ${JSON.stringify(w.demand)})`);
+    at = i;
+  };
+  const kind = (k: Zone) => w.buildings.find(b => b.kind === k)!;
+  const road = (pts: Vec[]): void => { const pl = w.planPath(pts, 0, st); if (!pl.ok) fail(`tutorial: road refused (${pl.reason})`); w.commitPath(pl); };
+  const zone = (a: Vec, b: Vec, z: Zone): void => { const pl = planZone(w, a, b, z); if (!pl || !commitZone(w, pl)) fail(`tutorial: ${z} zoning refused (${w.message})`); };
+  if (prog().slice(1, 3).some(([n, of]) => n >= of)) fail(`tutorial: steps done before anything was built: ${JSON.stringify(prog())}`);
+  if (dueTip(w, [])?.id !== 'noroad' || !dueTip(w, [])?.at || dueTip(w, ['noroad'])?.id === 'noroad') fail(`tutorial: tips ${JSON.stringify(dueTip(w, []))}`);
+  w.speed = 0;
+  step(1, () => {
+    road([{ x: 450, y: 435 }, { x: 1000, y: 435 }]);
+    road([kind('office').node, { x: 450, y: 652 }, { x: 450, y: 435 }]);
+    road([kind('shop').node, { x: 450, y: 691 }]);
+    road([kind('industry').node, { x: 450, y: 1000 }, { x: 450, y: 691 }]);
+  });
+  step(2, () => {});
+  step(3, () => { zone({ x: 460, y: 435 }, { x: 640, y: 435 }, 'home'); zone({ x: 850, y: 435 }, { x: 990, y: 435 }, 'home'); });
+  step(4, () => {}, 0.5);
+  step(5, () => { zone({ x: 450, y: 700 }, { x: 450, y: 840 }, 'shop'); zone({ x: 450, y: 850 }, { x: 450, y: 990 }, 'office'); });
+  step(6, () => { w.overlay = 'heat'; });
+  if (at !== 6 || w.events.length || w.offers || w.milestone || w.pendingGrade || w.money < 0) fail(`tutorial: during the script events ${w.events.length}, milestone ${w.milestone}, money ${w.money}`);
+  // Finish: the map plays on; a newcomer keeps zoning homes along a new road and reaches the goal
   w.tutorialActive = false;
-  w.money = 5;
-  steps[1].enter!(w);
-  steps[3].enter!(w);
-  if (w.money !== 5) fail(`tutorial: a replay gave $${w.money - 5}`);
+  road([{ x: 1000, y: 435 }, { x: 1000, y: 800 }, { x: 450, y: 800 }]);
+  zone({ x: 460, y: 800 }, { x: 990, y: 800 }, 'home');
+  let star = 0;
+  for (let d = 0; d < 8 && !star; d++) for (let k = 0; k < TUNING.DAY_SECONDS * 60 && !star; k++) {
+    w.update(DT);
+    if (w.offers) takeOffer(w, 0);
+    if (w.pendingGrade) { star = w.pendingGrade.stars; w.pendingGrade = null; }
+  }
+  if (!star || w.population < 300) fail(`tutorial: map 1 not finished after the script (pop ${Math.round(w.population)}, day ${w.day}, demand ${JSON.stringify(w.demand)})`);
+  if (!w.news.some(n => n.text.startsWith('Milestone'))) fail('tutorial: milestones missing from the feed');
+  const n = w.newsN;
+  for (let i = 0; i < 45; i++) w.note(`n${i}`, { x: i, y: 0 }, true);
+  if (w.news.length !== 40 || w.newsN !== n + 45 || w.news[39].text !== 'n44' || w.news[39].at?.x !== 44) fail('tutorial: the feed does not keep the last 40');
 }
 // Short link: plain junctions J1 and J2 only 32px apart (shorter than a car needs to clear J1 before J2's line) with traffic both
 // ways and from both side roads: a car waiting at the next line lets go of the box behind it, so no gridlock and every trip arrives
@@ -1436,9 +1452,9 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     if (c.money !== m.money || Math.abs(h.money - m.money * CHALLENGE_MONEY) > 1e-6 || c.unlockLevel !== i + 1 || h.cfg.difficulty !== 'hard') fail(`campaign: ${m.name} money ${c.money} tools ${c.unlockLevel}`);
   }
   const c1 = new Game(cfgFor(MAPS[0], 'campaign'));
-  if (!c1.lockOf('roundabout') || c1.tierUnlocked('avenue') || c1.unlocked(TIER_DEFS.office[0].level)) fail('campaign: map 1 has map 3 tools');
-  c1.setZone('office');
-  if (c1.zone === 'office') fail('campaign: map 1 zoned offices');
+  if (!c1.lockOf('roundabout') || c1.tierUnlocked('avenue') || c1.unlocked(TIER_DEFS.industry[0].level)) fail('campaign: map 1 has map 3 tools');
+  c1.setZone('industry');
+  if (c1.zone === 'industry') fail('campaign: map 1 zoned workshops');
   if (new Game(cfgFor(MAPS[2], 'campaign')).lockOf('roundabout')) fail('campaign: map 3 has no roundabouts');
 
   const hour = (g: Game): void => { g.time = (Math.floor(g.clock) + 1 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };

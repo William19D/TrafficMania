@@ -14,6 +14,8 @@ import { unlockAt } from './Campaign.ts';
 import { WORLD, inMountain, inWater } from '../world/MapGenerator.ts';
 
 export const ZONE_LIST: Zone[] = ['home', 'shop', 'office', 'industry'];
+// Growth x this while the map 1 script runs, so its watch-it-grow steps take minutes, not days
+export const TUT_GROWTH = 4;
 // A lot: (x, y) the middle of its front edge (where the door goes), angle toward the road (as a building's), w px of frontage, LOT_D deep
 export interface Lot { x: number; y: number; angle: number; w: number; zone: Zone; building: Building | null }
 // Brush preview: lots to add, to re-zone (their buildings demolished) and to erase; cost < 0 is a refund
@@ -373,7 +375,7 @@ function downgrade(g: Game, b: Building): void {
   b.residents = Math.min(b.residents, b.cap);
   let slots = Math.floor(b.jobs / T.PEOPLE_PER_CAR);
   for (const c of g.commuters) if (c.work === b && --slots < 0) c.work = null;
-  g.say(`${from} shrank to ${b.label}: ${b.cause?.text ?? 'bad traffic'}`);
+  g.note(`${from} shrank to ${b.label}: ${b.cause?.text ?? 'bad traffic'}`, b.cause?.at ?? b);
 }
 
 // On the hour: each building's access, its abandon / clear / recover countdowns; then each zone's demand spawns buildings on the empty lots
@@ -411,7 +413,7 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
       downgrade(g, b);
       b.downH = b.upH = 0;
     } else if (b.downH >= T.DOWN_H) {
-      g.say(`${b.label} abandoned: ${b.cause!.text}`);
+      g.note(`${b.label} abandoned: ${b.cause!.text}`, b.cause!.at ?? b);
       b.abandoned = true;
       b.residents = b.staffed = b.downH = 0;
       for (const c of g.commuters) if (c.work === b) c.work = null;
@@ -430,7 +432,7 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
   const town = g.buildings.filter(b => b.kind !== 'gate'), cx = town.reduce((n, b) => n + b.x, 0) / (town.length || 1), cy = town.reduce((n, b) => n + b.y, 0) / (town.length || 1);
   let grew = false;
   for (const z of ZONE_LIST) {
-    g.spawnAcc[z] += Math.max(0, g.demand[z]) * T.SPAWN_RATE * DIFFICULTY[g.cfg.difficulty].growth * (g.has('zoning') ? 1.25 : 1);
+    g.spawnAcc[z] += Math.max(0, g.demand[z]) * T.SPAWN_RATE * DIFFICULTY[g.cfg.difficulty].growth * (g.has('zoning') ? 1.25 : 1) * (g.tutorialActive ? TUT_GROWTH : 1);
     while (g.spawnAcc[z] >= 1) {
       let best: Lot | null = null, ba: number = T.SPAWN_A, bd = Infinity;
       for (const l of g.lots) {

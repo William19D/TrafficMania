@@ -192,5 +192,5 @@ export function takeOffer(g: Game, i: number): void {
     g.money += o.amount - debt;
     g.ledger.today.grants += o.amount - debt;
   }
-  g.say(`${offerText(g, o).title}: yours`);
+  g.note(`Milestone ${g.milestone}: ${offerText(g, o).title}`);
 }

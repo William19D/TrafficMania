@@ -5,6 +5,7 @@ import { HOUR, fmtMoney } from './Game.ts';
 import { DIFFICULTY } from './config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Edge } from '../network/RoadGraph.ts';
+import type { Vec } from '../util/geom.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { random } from '../util/rng.ts';
 
@@ -29,6 +30,8 @@ const stopped = (e: Edge): number => e.lanes.reduce((n, l) => n + l.cars.reduce(
 const detour = (g: Game, e: Edge): boolean =>
   [[e.a, e.b], [e.b, e.a]].every(([p, q]) => !g.graph.lanesFrom(e, p).length || !!findPath(g.graph, p, q, e, true));
 
+// Where an event happens (its road's middle, its target), null for rain
+export const where = (ev: ActiveEvent): Vec | null => ev.edge ? { x: (ev.edge.a.x + ev.edge.b.x) / 2, y: (ev.edge.a.y + ev.edge.b.y) / 2 } : ev.to;
 export const eventsOn = (g: Game): boolean => !g.tutorialActive && !g.demandOff && (!g.creative || g.cfg.events === 'on');
 
 export function startEvent(g: Game, kind: EventKind, edge: Edge | null = null, to: Building | null = null, from: Building | null = null): ActiveEvent {
@@ -36,7 +39,7 @@ export function startEvent(g: Game, kind: EventKind, edge: Edge | null = null, t
   const ev: ActiveEvent = { kind, at, end: at + d.dur * HOUR, edge, to, from, base: null, n: 0, ok: 0 };
   g.events.push(ev);
   g.eventLast[kind] = g.time;
-  g.say(d.warn ? `${d.name} in 1 hour: ${d.quest.split('. ')[0].toLowerCase()}` : `${d.name}! ${d.quest.split('. ')[0]}`);
+  g.note(d.warn ? `${d.name} in 1 hour: ${d.quest.split('. ')[0].toLowerCase()}` : `${d.name}! ${d.quest.split('. ')[0]}`, where(ev));
   return ev;
 }
 
@@ -72,7 +75,7 @@ const pay = (g: Game, x: number, why: string): void => {
   const m = x * DIFFICULTY[g.cfg.difficulty].tax;
   g.money += m;
   g.ledger.today.grants += m;
-  g.say(`${why}: +${fmtMoney(m)}`);
+  g.note(`${why}: +${fmtMoney(m)}`);
 };
 const smooth = (g: Game, ev: ActiveEvent): number => {
   const a = g.stats.arrived - ev.base![1];
@@ -86,7 +89,7 @@ export function eventsTick(g: Game): void {
   const edges = g.events.some(onRoad) ? new Set(g.graph.edges) : null;
   g.events = g.events.filter(ev => {
     const d = EVENTS[ev.kind];
-    if (onRoad(ev) && !edges!.has(ev.edge!) || ev.kind === 'vip' && !(ev.to && g.buildings.includes(ev.to))) { g.say(`${d.name} called off`); return false; }
+    if (onRoad(ev) && !edges!.has(ev.edge!) || ev.kind === 'vip' && !(ev.to && g.buildings.includes(ev.to))) { g.note(`${d.name} called off`); return false; }
     if (!ev.base && t >= ev.at) {
       ev.base = [g.stats.smooth, g.stats.arrived];
       if (ev.kind === 'vip') for (let i = 0; i < 3; i++) if (ev.from) g.queueTrip(ev.from, ev.to!, 'visit').vip = true;
@@ -96,10 +99,10 @@ export function eventsTick(g: Game): void {
     if (ev.kind === 'accident' && !ev.ok && t > ev.at + HOUR / 4 && stopped(ev.edge!) < 3) { ev.ok = 1; pay(g, d.reward, 'Accident queue cleared'); }
     if (ev.kind === 'vip' && ev.n >= 3) ev.end = t;
     if (t < ev.end) return true;
-    if (ev.kind === 'vip') ev.ok >= 3 ? pay(g, d.reward, 'VIP convoy on time') : g.say(`VIP convoy: ${ev.ok} of 3 on time, no reward`);
+    if (ev.kind === 'vip') ev.ok >= 3 ? pay(g, d.reward, 'VIP convoy on time') : g.note(`VIP convoy: ${ev.ok} of 3 on time, no reward`);
     else if (ev.kind !== 'accident') {
       const s = smooth(g, ev);
-      s >= SMOOTH_Q ? pay(g, d.reward, `${d.name} over, ${Math.round(s * 100)}% smooth`) : g.say(`${d.name} over: ${Math.round(s * 100)}% smooth, no reward`);
+      s >= SMOOTH_Q ? pay(g, d.reward, `${d.name} over, ${Math.round(s * 100)}% smooth`) : g.note(`${d.name} over: ${Math.round(s * 100)}% smooth, no reward`);
     } else if (!ev.ok) g.say('Accident cleared');
     return false;
   });

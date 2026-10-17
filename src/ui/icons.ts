@@ -36,6 +36,7 @@ const P: Record<string, string> = {
   mute: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/>',
   chart: '<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>',
   tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
+  bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   list: '<path d="M9 6h12M9 12h12M9 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
   build: '<path d="M10 3h4l5 16H5z"/><path d="M8.5 9h7M7 14h10M3 21h18"/>',
   chev: '<path d="M6 15l6-6 6 6"/>',

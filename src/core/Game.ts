@@ -46,6 +46,8 @@ const outcomes0 = (): Record<Outcome, number> => Object.fromEntries(OUTCOMES.map
 // $ per day by category; build is the net spent on construction (refunds count negative)
 // trade: exports, imports and visitors through the highway exits
 // interest: on the bank loan
+// A notification feed item: its text, where a click jumps (null: nowhere) and when it came
+export interface News { text: string; at: Vec | null; day: number; hour: number }
 export interface Ledger { taxes: number; business: number; trade: number; upkeep: number; build: number; grants: number; interest: number }
 export const ledger0 = (): Ledger => ({ taxes: 0, business: 0, trade: 0, upkeep: 0, build: 0, grants: 0, interest: 0 });
 // $24,310 · $1.2M · −$1,200 · ∞
@@ -202,6 +204,9 @@ export class Game {
   demandOff = false;
   // World points the renderer highlights while the tutorial runs
   tutorialTargets: Vec[] = [];
+  // Notification feed (newest last, the last 40) and how many were ever added (the HUD's unread badge); not saved
+  news: News[] = [];
+  newsN = 0;
   lastHour: number = T.START_HOUR;
   // Game time of the next commuter assignment (an hour after a building or road change, and daily at 03:00)
   assignAt = 0;
@@ -381,7 +386,7 @@ export class Game {
     this.loan += x;
     this.money += x;
     this.feat('loaned', 1);
-    this.say(`Bank loan: +${fmtMoney(x)} at ${this.loanRate * 100}%/day`);
+    this.note(`Bank loan: +${fmtMoney(x)} at ${this.loanRate * 100}%/day`);
   }
 
   // Pays back LOAN_STEP (or what is left) of the loan; false (with the reason said) when it cannot
@@ -392,7 +397,7 @@ export class Game {
     this.loan -= x;
     this.money -= x;
     if (!this.loan) this.feat('debtfree', 1);
-    this.say(this.loan ? `Repaid ${fmtMoney(x)}: ${fmtMoney(this.loan)} left` : 'Loan repaid');
+    this.note(this.loan ? `Repaid ${fmtMoney(x)}: ${fmtMoney(this.loan)} left` : 'Loan repaid');
     return true;
   }
 
@@ -433,7 +438,7 @@ export class Game {
     closeHour(r, (h + 23) % 24);
     if (h === T.MATCH_END && r.fans[0]) {
       const share = r.fans[1] / r.fans[0], x = MATCH_BONUS * DIFFICULTY[this.cfg.difficulty].tax;
-      if (share >= MATCH_Q) { this.money += x; this.ledger.today.grants += x; this.say(`Match day: ${Math.round(share * 100)}% of fans on time, +${fmtMoney(x)}`); }
+      if (share >= MATCH_Q) { this.money += x; this.ledger.today.grants += x; this.note(`Match day: ${Math.round(share * 100)}% of fans on time, +${fmtMoney(x)}`); }
       r.match = Math.max(r.match, share);
       r.fans = [0, 0];
     }
@@ -441,7 +446,7 @@ export class Game {
     const m = this.map!, g = grade(this, m);
     if (r.done ? !h && g.stars > r.stars : g.stars > 0) {
       if (!r.done) this.pendingGrade = g;
-      else this.say(`New best on ${m.name}: ${'★'.repeat(g.stars)}`);
+      else this.note(`New best on ${m.name}: ${'★'.repeat(g.stars)}`);
       r.done = true;
       r.stars = Math.max(r.stars, g.stars);
       r.efficiency = Math.max(r.efficiency, g.efficiency);
@@ -539,7 +544,7 @@ export class Game {
     const st = this.buildings.find(b => b.special === 'stadium' && b.connected);
     if (!st || this.day % T.MATCH_DAYS) return;
     const fans = Math.round(Math.min(T.FANS_MAX, T.FANS + this.population / T.FANS_POP));
-    if (h === 12) this.say(`Match day: ${fans} fans head to the Stadium from ${T.KICKOFF - 2}:00, kickoff ${T.KICKOFF}:00`);
+    if (h === 12) this.note(`Match day: ${fans} fans head to the Stadium from ${T.KICKOFF - 2}:00, kickoff ${T.KICKOFF}:00`);
     if (h !== T.KICKOFF - 2 && h !== T.KICKOFF - 1) return;
     for (let i = 0; i < fans / 2; i++) {
       const from = (i % 5 < 5 * T.FANS_OUT ? exit(st) : null) ?? this.pick(st, comp, x => x.kind === 'home' ? x.residents : 0);
@@ -938,8 +943,8 @@ export class Game {
     this.syncPlans();
     pruneLots(this);
     this.version++;
-    const n = this.linkedExits().length;
-    if (n > this.exitsLinked) this.say('Highway exit linked: exports, imports and visitors can come and go');
+    const x = this.linkedExits(), n = x.length;
+    if (n > this.exitsLinked) this.note('Highway exit linked: exports, imports and visitors can come and go', x[n - 1]);
     this.exitsLinked = n;
   }
 
@@ -1905,6 +1910,13 @@ export class Game {
     n.plan = p;
     if (n.phase >= p.phases.length) { n.phase = 0; n.phaseTimer = 0; }
     if (JSON.stringify([p.ban, p.lanes]) !== JSON.stringify([old.ban, old.lanes])) for (const c of this.cars) if (c.granted !== n) c.path = null;
+  }
+
+  // A message worth keeping: said (unless quiet) and added to the notification feed (at: where a click jumps the camera)
+  note(text: string, at: Vec | null = null, quiet = false): void {
+    if (!quiet) this.say(text);
+    this.news = [...this.news, { text, at: at && { x: at.x, y: at.y }, day: this.day, hour: Math.floor(this.hour) }].slice(-40);
+    this.newsN++;
   }
 
   say(text: string): void {

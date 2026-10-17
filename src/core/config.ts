@@ -190,7 +190,7 @@ export const TIER_DEFS: Record<Zone, TierDef[]> = {
     tier('Corner shop', 1, 28, 28, 0, 10, 1, { visits: 2 }), tier('Store', 2, 60, 32, 0, 25, 3, { visits: 4 }),
     tier('Mall', 4, 124, 44, 0, 80, 6, { draw: 1.5, visits: 12 }),
   ],
-  office: [tier('Office', 1, 28, 36, 0, 30, 2, { visits: 2 }), tier('Office tower', 2, 60, 42, 0, 120, 5, { visits: 6 })],
+  office: [tier('Office', 1, 28, 36, 0, 30, 1, { visits: 2 }), tier('Office tower', 2, 60, 42, 0, 120, 5, { visits: 6 })],
   industry: [
     tier('Workshop', 1, 28, 36, 0, 12, 4, { trucks: 4, pollution: 160 }), tier('Factory', 2, 60, 40, 0, 30, 4, { trucks: 8, pollution: 260 }),
     tier('Logistics park', 4, 124, 44, 0, 60, 5, { trucks: 20, pollution: 200, export: 0.7, noise: 0.5 }),

@@ -91,6 +91,7 @@ export class CanvasRenderer {
   reset(): void {
     this.cam = { x: WORLD.w / 2, y: WORLD.h / 2, zoom: Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * 0.95 };
     this.route = { car: null, nodes: [] };
+    this.glide = null;
     this.clamp();
   }
 
@@ -121,9 +122,10 @@ export class CanvasRenderer {
     this.cam.y = axis(this.cam.y, WORLD.h, hh);
   }
 
+  // Eases the camera there (render moves it a share of the way each frame); a pan or zoom takes over
+  private glide: Vec | null = null;
   centerOn(p: Vec): void {
-    this.cam.x = p.x;
-    this.cam.y = p.y;
+    this.glide = { x: p.x, y: p.y };
     this.cam.zoom = Math.max(this.cam.zoom, 1);
     this.clamp();
   }
@@ -139,6 +141,7 @@ export class CanvasRenderer {
   }
 
   pan(dxScreen: number, dyScreen: number): void {
+    this.glide = null;
     this.cam.x -= dxScreen / this.cam.zoom;
     this.cam.y -= dyScreen / this.cam.zoom;
     this.clamp();
@@ -146,6 +149,7 @@ export class CanvasRenderer {
 
   zoomAt(sx: number, sy: number, factor: number): void {
     // Keeps the world point under the cursor fixed
+    this.glide = null;
     const before = this.screenToWorld(sx, sy);
     this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom * factor));
     const after = this.screenToWorld(sx, sy);
@@ -162,7 +166,15 @@ export class CanvasRenderer {
     // still 0x0: nothing to draw, and a 0 zoom would make a 0px ground canvas whose drawImage throws and stops the game loop
     if (!innerWidth || !innerHeight) return;
     // Follow camera: centred on the car, zoomed in to at least 1.2 when the follow starts
-    const fc = game.follow;
+    const fc = game.follow, gl = this.glide;
+    if (gl && !fc) {
+      const x = this.cam.x, y = this.cam.y;
+      this.cam.x += (gl.x - x) * 0.15;
+      this.cam.y += (gl.y - y) * 0.15;
+      this.clamp();
+      // arrived, or held at the map's edge
+      if (Math.hypot(gl.x - this.cam.x, gl.y - this.cam.y) < 1 || Math.hypot(x - this.cam.x, y - this.cam.y) < 0.05) this.glide = null;
+    }
     if (fc) {
       const p = game.graph.carPos(fc);
       if (this.route.car !== fc) { this.route = { car: fc, nodes: [] }; this.cam.zoom = Math.max(this.cam.zoom, 1.2); }
@@ -597,16 +609,33 @@ export class CanvasRenderer {
       ctx.strokeStyle = z.out;
       ctx.lineWidth = 1.5;
       ctx.stroke();
-      ctx.rotate(Math.atan2(s.y - y, s.x - x));
-      ctx.beginPath();
-      ctx.moveTo(R + 10, 0);
-      ctx.lineTo(R + 3, -5);
-      ctx.lineTo(R + 3, 5);
-      ctx.closePath();
-      ctx.fillStyle = RED;
-      ctx.fill();
+      this.edgeArrow(Math.atan2(s.y - y, s.x - x), R, RED);
       ctx.restore();
     }
+    // the tutorial's targets: an accent disc with an arrow toward each one off screen
+    for (const t of game.tutorialTargets) {
+      const s = this.worldToScreen(t);
+      if (s.x > X && s.x < innerWidth - X && s.y > T && s.y < innerHeight - B) continue;
+      const x = Math.max(X + R, Math.min(innerWidth - X - R, s.x)), y = Math.max(T + R, Math.min(innerHeight - B - R, s.y));
+      ctx.save();
+      ctx.translate(x, y);
+      this.circle(0, 0, R + 1, ACCENT);
+      this.circle(0, 0, 4, '#FFFFFF');
+      this.edgeArrow(Math.atan2(s.y - y, s.x - x), R, ACCENT);
+      ctx.restore();
+    }
+  }
+
+  private edgeArrow(a: number, r: number, color: string): void {
+    const ctx = this.ctx;
+    ctx.rotate(a);
+    ctx.beginPath();
+    ctx.moveTo(r + 10, 0);
+    ctx.lineTo(r + 3, -5);
+    ctx.lineTo(r + 3, 5);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
   }
 
   // The static ground roads, cached over the view and a quarter view of margin at a half-power-of-2 zoom bucket: redrawn when the

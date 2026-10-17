@@ -140,6 +140,13 @@ export class Menu {
       saveProfile();
       this.render();
     }
+    else if (m === 'tips' && v) {
+      const p = profile();
+      if (v === 'reset') p.tips = p.tips.filter(t => t === 'tutorial');
+      else p.tipsOff = v === 'off';
+      saveProfile();
+      this.render();
+    }
     else if (m === 'snd' && v) { const [k, x] = v.split(':'); sound.set({ [k]: x === '1' }); this.render(); }
     else if (m === 'continue') { if (this.h.load(AUTO)) this.close(false); else this.render(); }
     else if (m === 'slot' && v) {
@@ -223,6 +230,10 @@ export class Menu {
         <h3>Cosmetics</h3>
         ${cosRow('paint', 'Car paint', PAINTS, owned(p).paints, p.cosmetics.paint)}
         ${cosRow('island', 'Roundabout island', ISLANDS, owned(p).islands, p.cosmetics.island)}
+        <h3>Tips</h3>
+        <div class="field" role="group" aria-label="Tips"><span class="flabel">Tips the first time something happens</span>
+          <div class="opts">${(['on', 'off'] as const).map(x => `<button class="opt" data-m="tips" data-v="${x}" aria-pressed="${p.tipsOff === (x === 'off')}">${x === 'on' ? 'On' : 'Off'}</button>`).join('')}
+          ${btn('tips', 'Show seen tips again', 'ghost', ' data-v="reset"')}</div></div>
         <div class="actions">${back}</div>`;
     } else if (v === 'pause') {
       body = `<h2 id="mn-title">Paused</h2>

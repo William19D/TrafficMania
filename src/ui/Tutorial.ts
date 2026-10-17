@@ -1,103 +1,96 @@
+// Map 1's scripted tutorial (docs/design/game-v3.md 6): eight steps, each a goal with progress (region O lists them, the card in region F
+// explains the current one), rings and off-screen arrows on its targets, auto-advance when done. Runs on a fresh Meadowbrook only.
 import type { Game } from '../core/Game.ts';
 import type { Vec } from '../util/geom.ts';
 import { DEFAULT_TYPE } from '../network/RoadGraph.ts';
-import { LIGHT_PERIOD } from '../network/Junction.ts';
-import { TUNING as T } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import type { Building } from '../entities/Building.ts';
 import { FAILED } from '../entities/Trip.ts';
+import { objLabel } from '../core/Campaign.ts';
+import type { Zone } from '../core/config.ts';
+import { profile, saveProfile } from '../core/Profile.ts';
 import { icon } from './icons.ts';
 
-// The tutorial must never strand the player without money for its own tasks; a replay on a city in progress gives nothing
-const topUp = (g: Game, money = 20000): void => { if (g.tutorialActive) g.money = Math.max(money, g.money); };
+// The script must never strand the player without money for its own tasks
+const topUp = (g: Game): void => { if (g.tutorialActive) g.money = Math.max(20000, g.money); };
 
 export interface Step {
-  title: string;
-  task: string;
-  text?: string;
-  // a pure read of the game (simcheck checks it changes nothing)
-  done?: (g: Game) => boolean;
+  goal: string; // the checklist line and the card's title
+  text: string;
+  // [done, of]: a pure read (simcheck checks it changes nothing); none = press Next
+  progress?: (g: Game) => [number, number];
   enter?: (g: Game) => void;
   targets?: (g: Game) => Vec[];
   hint?: string; // CSS selector of the HUD controls to pulse
 }
+export const stepDone = (s: Step, g: Game): boolean => { const p = s.progress?.(g); return !p || p[0] >= p[1]; };
 
-const at = (p: Vec): Vec => ({ x: p.x, y: p.y });
-// Middle of the longest road (not a driveway), where a new road makes a clear junction
-const mid = (g: Game): Vec[] => {
-  const e = g.graph.edges.filter(x => !x.drive).sort((a, b) => b.length - a.length)[0];
-  return e ? [{ x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }] : [];
-};
-// Junctions of real roads (driveways make T-junctions of their own)
-const junctions = (g: Game) => g.graph.nodes.filter(n => !n.building && n.edges.filter(e => !e.drive).length >= 3);
-const lights = (g: Game) => g.graph.nodes.filter(n => n.control === 'light');
-const homeLots = (g: Game) => g.lots.filter(l => l.zone === 'home').length;
-const reaches = (g: Game, from: Building[], to?: Building): boolean => !!to && from.some(h => !!findPath(g.graph, h.node, to.node));
+const mid = (e: { a: Vec; b: Vec }): Vec => ({ x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 });
+// Middle of the longest road (not a driveway): where lots fit
+const longest = (g: Game): Vec[] => { const e = g.graph.edges.filter(x => !x.drive && !x.exit).sort((a, b) => b.length - a.length)[0]; return e ? [mid(e)] : []; };
+const roads = (g: Game) => g.graph.edges.filter(e => !e.drive && !e.exit);
+export const worstHeat = (g: Game): number => roads(g).reduce((m, e) => Math.max(m, e.heat), 0);
+const lotsOf = (g: Game, z: Zone): number => g.lots.filter(l => l.zone === z).length;
+const grown = (g: Game, ...z: Zone[]): number => g.buildings.filter(b => b.lots.length && z.includes(b.kind as Zone)).length;
+const reaches = (g: Game, h: Building, to?: Building): boolean => !!to && !!findPath(g.graph, h.node, to.node);
+const min = Math.min;
 
-// Built per start(): targets come from the live town (any zone the map could not place falls back to the first building)
+// Built per start(): targets and baselines come from the live town
 export function tutorialSteps(g: Game): Step[] {
   const homes = g.buildings.filter(b => b.kind === 'home');
-  const office = g.buildings.find(b => b.kind === 'office') ?? g.buildings[0];
-  const shop = g.buildings.find(b => b.kind === 'shop') ?? g.buildings[0];
-  const door = (b?: Building): Vec[] => b ? [at(b.node)] : [];
-  let zoned = homeLots(g); // Residential lots when the zoning step starts
+  const office = g.buildings.find(b => b.kind === 'office');
   const centre = homes.length ? [{ x: homes.reduce((n, b) => n + b.node.x, 0) / homes.length, y: homes.reduce((n, b) => n + b.node.y, 0) / homes.length }] : [];
+  const goal = g.map?.objectives[0];
+  let homeLots = 0, houses = 0, shops = 0, offices = 0, jobs = 0;
   return [
     {
-      title: 'Welcome to TrafficMania', task: 'Press Next to start.',
-      text: 'Homes (white) send commuters to offices (purple), shops (blue) and factories (ochre), and shoppers to the shops. Factories with workers send trucks of goods. You build the roads and fix the jams; taxes pay for it. Time is paused while you read and build.',
+      goal: `Welcome to ${g.map?.name ?? 'your town'}`,
+      text: 'People here need to get to work. You build the roads. Homes (white) send commuters to the office (purple) and shoppers to the shop (blue); the town grows where traffic flows. Time is paused while you read.',
+      targets: () => centre,
     },
     {
-      title: 'Connect the homes', task: 'Draw a road past the homes, then on to the office door.',
-      text: 'Click = start point, click again = end point; hold the end point and drag to bend. A building next to a road gets a free driveway. The label shows the price. Esc cancels.',
-      enter: g => { g.setTool('road'); topUp(g); }, targets: () => [...centre, ...door(office)],
-      done: g => homes.length ? reaches(g, homes, office) : g.graph.edges.length >= 1,
+      goal: 'Connect the homes to the office',
+      text: 'Road tool (1): click a start point, click again for the end; hold the end and drag to bend. A road past a door gets a free driveway. The label shows the price, Esc cancels.',
+      enter: g => { g.setTool('road'); topUp(g); }, targets: () => [...centre, ...(office ? [office.node] : [])],
+      progress: g => [homes.filter(h => reaches(g, h, office)).length, homes.length],
       hint: '.buildbtn, [data-tool="road"]',
     },
     {
-      title: 'Watch the commute', task: 'Wait for the first commuter to reach work.',
-      text: `Commuters leave home between 6:00 and 10:00 and drive back after a ${T.WORK_HOURS}-hour shift. P marks each car with its trip purpose. Press 4x to speed up.`,
-      // the clock starts again here (start() paused it), so the morning rush is still ahead
+      goal: 'Watch the first commutes (try 4x)',
+      text: 'Commuters leave home between 6:00 and 10:00 and drive back after work. The fast-forward buttons at the top speed time up.',
       enter: g => { if (!g.speed) g.speed = 1; },
-      done: g => g.reports.some(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)),
+      progress: g => [min(3, g.reports.filter(r => r.purpose === 'commute' && !FAILED.includes(r.outcome)).length), 3],
       hint: '[data-speed="4"]',
     },
     {
-      title: 'Zone new homes', task: 'Press Z (or Build, then Residential) and drag along a road to paint lots.',
-      text: 'The city grows by itself where you zone: homes, shops, offices and workshops appear on empty lots while their demand bar (top left) is up and traffic flows. A drag zones both sides of the road (Shift: one side); start a drag on a lot of the same zone to erase. Keep homes away from factories and busy roads.',
-      enter: g => { zoned = homeLots(g); topUp(g); }, targets: g => mid(g),
-      done: g => homeLots(g) > zoned, hint: '.buildbtn, .bmenu [data-zone="home"], .tray',
+      goal: 'Paint 8 Residential lots along a road',
+      text: 'The town grows where you zone. With the brush (Z, or Build then Residential) drag along a road: lots appear on both sides (Shift: one side). A drag that starts on a lot of the same zone erases.',
+      enter: g => { homeLots = lotsOf(g, 'home'); houses = grown(g, 'home'); g.setZone('home'); topUp(g); }, targets: longest,
+      progress: g => [min(8, lotsOf(g, 'home') - homeLots), 8], hint: '.buildbtn, .bmenu [data-zone="home"]',
     },
     {
-      title: 'Open the shop', task: 'Build a road from the shop door to the middle of one of your roads.',
-      text: 'Shoppers drive out from mid-morning to the evening. Press T for the trip reports: each resident says how the trip went (smooth, a long wait, a detour). Click a line to look.',
-      enter: g => { g.setTool('road'); topUp(g); },
-      targets: g => [...door(shop), ...mid(g)],
-      done: g => reaches(g, homes, shop), hint: '[data-view="feed"]',
+      goal: 'Watch the houses grow',
+      text: 'A house grows on an empty lot while the R bar (top left) is up: people move in when there are jobs and shops they can reach. Growth runs 4x faster during the tutorial.',
+      progress: g => [min(3, grown(g, 'home') - houses), 3], hint: '.res .dm[data-z="home"]',
     },
     {
-      title: 'Add a traffic light', task: 'Press 3 (Light), then click an intersection.',
-      text: 'Three or more roads meeting make an intersection; if you have none, draw a road into the middle of one. Without a control cars take turns one at a time.',
-      enter: g => topUp(g),
-      targets: g => junctions(g).length ? junctions(g).map(at) : mid(g),
-      done: g => lights(g).length > 0, hint: '.buildbtn, [data-tool="light"]',
+      goal: 'Paint 2 Commercial and 2 Office lots',
+      text: 'New residents need jobs and shops. Paint Commercial (blue) and Office (purple) lots along a road; one grows when its C or O bar is up.',
+      enter: g => { shops = lotsOf(g, 'shop'); offices = lotsOf(g, 'office'); jobs = grown(g, 'shop', 'office'); g.setZone('shop'); topUp(g); },
+      targets: longest,
+      progress: g => [min(2, lotsOf(g, 'shop') - shops) + min(2, lotsOf(g, 'office') - offices) + min(1, grown(g, 'shop', 'office') - jobs), 5],
+      hint: '.bmenu [data-zone="shop"], .bmenu [data-zone="office"], .res .dm[data-z="shop"], .res .dm[data-z="office"]',
     },
     {
-      title: 'Time the light', task: 'Press 6 (Edit), click the light, then press + on a phase.',
-      text: 'The junction panel sets the control (yield, stop, light or roundabout), the light phases and protected lefts. On the map, drag from a lane to a road to connect it, click a line to remove it: a turn no lane connects is banned. Give the busier road the longer green. In the campaign the phase editor comes with map 5, Harbor Isles.',
-      targets: g => lights(g).map(at),
-      // a replay on a map before map 5 cannot edit phases yet: nothing to do here
-      done: g => !!g.lockOf('junction') || lights(g).some(n => !!n.plan?.phases.some(p => p.seconds > LIGHT_PERIOD)), hint: '[data-tool="edit"]',
+      goal: 'Check the traffic',
+      text: 'Press C (or the flame button) for the heat map: green roads flow, red ones are jammed. If one turns orange or red, give its traffic another way round, or more lanes.',
+      targets: g => { const e = roads(g).sort((a, b) => b.heat - a.heat)[0]; return e && e.heat >= 0.4 ? [mid(e)] : []; },
+      progress: g => [+(g.overlay === 'heat') + +(worstHeat(g) < 0.4), 2], hint: '[data-view="heat"]',
     },
     {
-      title: 'Find the jams', task: 'Press C (or the flame button) for the heat map.',
-      text: 'Green roads flow, red ones are jammed, and discs show cars waiting at junctions. Fix the red: more lanes, a faster tier, a better light plan, a roundabout or an overpass. M opens the charts of the whole run.',
-      done: g => g.overlay === 'heat', hint: '[data-view="heat"]',
-    },
-    {
-      title: 'Money and growth', task: 'Press Finish and keep the traffic flowing!',
-      text: 'The money chip shows your balance and the net per day: taxes from residents (more when they are happy) and business income, minus road upkeep. Demolish refunds a road built today in full, an older one by half. The people chip shows the next level: it unlocks road tiers and tools. Buildings stuck in bad traffic get a pin with a countdown and are abandoned when it runs out; below $0 the bank lends you money.',
-      hint: '.chip.money, .chip.people',
+      goal: goal ? objLabel(goal) : 'Grow the town',
+      text: 'That is the map\'s goal (top left), with ★★ for smooth trips and ★★★ for a small budget. Keep zoning homes, shops and offices where the bars are up, and keep traffic flowing. Tips show up here when something new happens; the bell lists what happened.',
+      hint: '.res .obj',
     },
   ];
 }
@@ -105,13 +98,14 @@ export function tutorialSteps(g: Game): Step[] {
 export class Tutorial {
   private card: HTMLElement;
   private next: HTMLButtonElement;
-  private task: HTMLElement;
-  private steps: Step[] = [];
-  private index = 0;
+  steps: Step[] = [];
+  index = 0;
   private shown = false;
   private lastLabel = '';
+  private advanceAt = 0;
 
-  constructor(private root: HTMLElement, private game: Game) {
+  // jump: eases the camera to a point
+  constructor(private root: HTMLElement, private game: Game, private jump: (p: Vec) => void = () => {}) {
     this.card = document.createElement('div');
     this.card.className = 'panel tutorial';
     this.card.hidden = true;
@@ -121,14 +115,12 @@ export class Tutorial {
     this.card.innerHTML = `
       <div class="tut-head"><span class="step num"></span><span class="bar"><i></i></span></div>
       <h3></h3>
-      <div class="task" aria-live="polite"></div>
       <p></p>
       <div class="actions">
-        <button class="btn ghost skip">Skip</button>
+        <button class="btn ghost skip">Skip tutorial</button>
         <button class="btn primary next"></button>
       </div>`;
     root.appendChild(this.card);
-    this.task = this.card.querySelector('.task') as HTMLElement;
     this.next = this.card.querySelector('.next') as HTMLButtonElement;
     this.next.onclick = () => (this.index === this.steps.length - 1 ? this.finish() : this.show(this.index + 1));
     (this.card.querySelector('.skip') as HTMLButtonElement).onclick = () => this.finish();
@@ -140,48 +132,46 @@ export class Tutorial {
 
   get active(): boolean { return this.shown; }
 
+  // A fresh map 1: top-ups, growth x4, no events, milestones or grading until it ends; paused until the commute step
   start(): void {
-    this.steps = tutorialSteps(this.game);
-    this.shown = true;
-    // the tutorial's own game (a fresh one, or creative): top-ups, no fail checks, the junction editor unlocked. A replay on a city
-    // in progress is only the cards, so it cannot buy money, homes or time.
     const g = this.game;
-    g.tutorialActive = g.creative || (g.day === 1 && !g.ledger.today.build);
-    // paused until the 'Watch the commute' step, so the first morning is not over before the first road
-    this.game.speed = 0;
-    this.game.setRoadType(DEFAULT_TYPE); // the tutorial's own tasks assume a default two-way street
+    this.steps = tutorialSteps(g);
+    this.shown = true;
+    g.tutorialActive = true;
+    g.speed = 0;
+    g.setRoadType(DEFAULT_TYPE);
     this.card.hidden = false;
     this.show(0);
   }
 
   update(): void {
     if (!this.shown) return;
-    const s = this.steps[this.index];
-    const ready = !s.done || s.done(this.game);
+    const s = this.steps[this.index], p = s.progress?.(this.game), done = stepDone(s, this.game);
     const last = this.index === this.steps.length - 1;
-    const label = !ready ? 'wait' : last ? 'Finish' : 'Next';
+    // a step with a goal moves on by itself a moment after it is met
+    if (p && done && !this.advanceAt) this.advanceAt = performance.now() + 1200;
+    if (p && !done) this.advanceAt = 0;
+    if (this.advanceAt && performance.now() >= this.advanceAt) { this.show(this.index + 1); return; }
+    const label = !p ? (last ? 'Finish' : 'Next') : done ? 'Done!' : `${p[0]} / ${p[1]}`;
     if (label === this.lastLabel) return;
     this.lastLabel = label;
-    this.next.disabled = !ready;
-    this.next.textContent = ready ? label : 'Do it to continue';
-    const done = !!s.done && ready;
-    this.task.classList.toggle('done', done);
-    this.task.innerHTML = (done ? icon('check') : '') + `<span>${esc(s.task)}</span>`;
+    this.next.disabled = !!p;
+    this.next.classList.toggle('done', !!p && done);
+    this.next.innerHTML = (p && done ? icon('check', 'ok') : '') + label;
   }
 
   private show(i: number): void {
     this.index = i;
     this.lastLabel = '';
-    const s = this.steps[i];
-    const n = this.steps.length;
-    (this.card.querySelector('.step') as HTMLElement).textContent = `${i + 1} / ${n}`;
-    (this.card.querySelector('.bar i') as HTMLElement).style.width = `${((i + 1) / n) * 100}%`;
-    (this.card.querySelector('h3') as HTMLElement).textContent = s.title;
-    const p = this.card.querySelector('p') as HTMLElement;
-    p.textContent = s.text ?? '';
-    p.hidden = !s.text;
+    this.advanceAt = 0;
+    const s = this.steps[i], n = this.steps.length;
+    (this.card.querySelector('.step') as HTMLElement).textContent = `Step ${i + 1} of ${n}`;
+    (this.card.querySelector('.bar i') as HTMLElement).style.width = `${(i / (n - 1)) * 100}%`;
+    (this.card.querySelector('h3') as HTMLElement).textContent = s.goal;
+    (this.card.querySelector('p') as HTMLElement).textContent = s.text;
     s.enter?.(this.game);
-    this.game.tutorialTargets = s.targets?.(this.game) ?? [];
+    const t = this.game.tutorialTargets = s.targets?.(this.game) ?? [];
+    if (i === 0 && t[0]) this.jump(t[0]);
     this.clearHints();
     if (s.hint) this.root.querySelectorAll(s.hint).forEach(b => b.classList.add('hint'));
     this.update();
@@ -191,16 +181,15 @@ export class Tutorial {
     this.root.querySelectorAll('.hint').forEach(b => b.classList.remove('hint'));
   }
 
+  // Skip or Finish: the map plays on with its objectives; the script counts as seen
   private finish(): void {
-    // start() paused the clock; a skip before the commute step would leave it paused
     if (!this.game.speed) this.game.speed = 1;
     this.shown = false;
     this.game.tutorialActive = false;
     this.game.tutorialTargets = [];
     this.card.hidden = true;
     this.clearHints();
-    try { localStorage.setItem('tm_tutorial_done', '1'); } catch { /* storage blocked: tutorial will show again next load */ }
+    const p = profile();
+    if (!p.tips.includes('tutorial')) { p.tips.push('tutorial'); saveProfile(); }
   }
 }
-
-const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);

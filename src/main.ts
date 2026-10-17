@@ -3,6 +3,7 @@ import { Game } from './core/Game.ts';
 import { CanvasRenderer } from './rendering/CanvasRenderer.ts';
 import { HUD } from './ui/HUD.ts';
 import { Tutorial } from './ui/Tutorial.ts';
+import { Tips } from './ui/Tips.ts';
 import { Menu } from './ui/Menu.ts';
 import { attachInput } from './ui/Input.ts';
 import { sound } from './ui/Sound.ts';
@@ -10,6 +11,7 @@ import { GameLoop } from './core/GameLoop.ts';
 import { AUTO, load, store } from './core/Save.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from './core/config.ts';
 import type { GameConfig, Mode } from './core/config.ts';
+import type { Vec } from './util/geom.ts';
 import { MAPS, cfgFor, mapById } from './core/Campaign.ts';
 import { profile, recordGrade, saveProfile, toolLevel } from './core/Profile.ts';
 import { checkAch } from './core/Achievements.ts';
@@ -33,18 +35,19 @@ const urlCfg: GameConfig | null = urlMap ? cfgFor(urlMap, pick('mode', MODES, 'c
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const hudRoot = document.getElementById('hud') as HTMLElement;
 const renderer = new CanvasRenderer(canvas);
-const tutorialDone = (): boolean => { try { return localStorage.getItem('tm_tutorial_done') === '1'; } catch { return false; /* storage blocked: show it */ } };
+// the script is seen once per profile (an old tm_tutorial_done counts); it runs on a fresh Campaign map 1 only
+const tutorialDone = (): boolean => { try { return profile().tips.includes('tutorial') || localStorage.getItem('tm_tutorial_done') === '1'; } catch { return false; /* storage blocked: show it */ } };
+const tourFor = (cfg: GameConfig): boolean => !tutorialDone() && cfg.mode === 'campaign' && cfg.map === MAPS[0].id;
 
 // One game at a time: a start aborts the old HUD's and input's listeners and builds them again on the new game
-let game: Game, hud: HUD, tutorial: Tutorial, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0, arrived = 0, achKey = '';
+let game: Game, hud: HUD, tutorial: Tutorial, tips: Tips, input: ReturnType<typeof attachInput>, ctl = new AbortController(), day = 0, arrived = 0, achKey = '';
 // the profile's lifetime trips grow by what this game arrived since the last count (each midnight and on quitting)
 const tally = (): void => { profile().stats.trips += game.stats.arrived - arrived; arrived = game.stats.arrived; saveProfile(); };
 const autosave = (): void => { tally(); if (!game.gameOver) store(AUTO, game); };
 
 const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
   game: () => game,
-  // the tour runs on the first campaign map until it has been seen once
-  newGame: cfg => start(new Game(cfg), !tutorialDone() && cfg.mode === 'campaign' && cfg.map === MAPS[0].id),
+  newGame: cfg => start(new Game(cfg), tourFor(cfg)),
   load: key => { const g = load(key); if (g) start(g); return !!g; },
   save: key => store(key, game),
   quit: autosave,
@@ -63,20 +66,28 @@ function start(g: Game, tour = false): void {
   if (m) g.onGrade = r => { recordGrade(profile(), m, r, g.challenge); saveProfile(); };
   if (g.cfg.mode === 'endless' && g.cfg.unlock !== undefined) g.cfg = { ...g.cfg, unlock: Math.max(g.cfg.unlock, toolLevel(profile())) };
   hud = new HUD(hudRoot, g, ctl.signal);
-  tutorial = new Tutorial(hudRoot, g);
-  hud.onTutorial = () => tutorial.start();
-  hud.onJump = p => renderer.centerOn(p);
+  const jump = (p: Vec): void => renderer.centerOn(p);
+  tutorial = new Tutorial(hudRoot, g, jump);
+  tips = new Tips(hudRoot, g, jump);
+  hud.tut = tutorial;
+  // the help panel's tutorial: a new game on map 1 (the city in progress is autosaved first)
+  hud.onTutorial = () => {
+    if (g.day > 1 && !confirm(`Start the tutorial on a new ${MAPS[0].name}? Your city is autosaved first.`)) return;
+    autosave();
+    start(new Game(cfgFor(MAPS[0], 'campaign')), true);
+  };
+  hud.onJump = jump;
   hud.onRestart = () => start(new Game(g.cfg));
   hud.onMenu = () => menu.show('main');
   hud.onMaps = () => { autosave(); menu.show('campaign'); };
   hud.onPause = () => menu.show('pause');
   input = attachInput(canvas, g, renderer, ctl.signal);
   renderer.reset();
-  Object.assign(window, { game, tutorial, renderer, hud, sound }); // debugging from the console
+  Object.assign(window, { game, tutorial, tips, renderer, hud, sound }); // debugging from the console
   if (tour) tutorial.start();
 }
 
-if (urlCfg) start(new Game(urlCfg), !tutorialDone());
+if (urlCfg) start(new Game(urlCfg), tourFor(urlCfg));
 else {
   // the menu opens over the last autosave, or over a fresh default map
   start(load(AUTO) ?? new Game(DEFAULT_CONFIG));
@@ -107,6 +118,7 @@ new GameLoop(
     renderer.render(game, input.preview, input.anchor, input.handle, input.hover);
     hud.update();
     tutorial.update();
+    if (!menu.open) tips.update();
     sound.update(game, renderer, menu.open || game.speed === 0 || game.modal);
   },
 ).start();

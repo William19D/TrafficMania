@@ -22,6 +22,8 @@ import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cy
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
 import { sound } from './Sound.ts';
+import { stepDone } from './Tutorial.ts';
+import type { Tutorial } from './Tutorial.ts';
 
 // Dock tools; the number keys follow the dock order (Input's KEY_TOOLS)
 const TOOLS: Record<Tool, { label: string; tip: string }> = {
@@ -142,7 +144,7 @@ export const CONTROLS: [string, string][] = [
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
   ['Demolish a building', `${kbd('demolish')}, click it (its lot stays zoned)`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
-  ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
+  ['Metrics / trip reports / notifications', '<kbd>M</kbd> / <kbd>T</kbd> / <kbd>N</kbd>'],
   ['Trip purpose dots on vehicles', '<kbd>P</kbd>'],
   ['Mute / unmute sound', '<kbd>Shift</kbd> + <kbd>M</kbd>; volumes in the menu (<kbd>Esc</kbd>), Sound'],
   ['Pause / resume', '<kbd>Space</kbd>'],
@@ -280,10 +282,14 @@ export class HUD {
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
     clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; event?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
-    views?: string; tokens?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string;
+    views?: string; tokens?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string; news?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
-  private show = { metrics: false, feed: false };
+  private show = { metrics: false, feed: false, news: false };
+  // notifications seen (Game.newsN when the panel was last open)
+  private seen = 0;
+  // Map 1's script: region O lists its steps while it runs
+  tut: Tutorial | null = null;
   private carFor: Car | null = null;
   private feedAt = 0;
   // The speed to resume when a modal closes
@@ -336,13 +342,14 @@ export class HUD {
       <div class="panel pop" hidden role="dialog" aria-label="Controls">
         <div class="pop-head"><h2>Controls</h2><button class="iconbtn" data-action="close-help" aria-label="Close [Esc]">${icon('close')}</button></div>
         <table>${CONTROLS.map(([a, b]) => `<tr><th scope="row">${a}</th><td>${b}</td></tr>`).join('')}</table>
-        <button class="btn" data-action="tutorial">Replay tutorial</button>
+        <button class="btn" data-action="tutorial">Play the tutorial on Meadowbrook</button>
       </div>
       <div class="panel views" role="group" aria-label="Analysis">
         <button class="iconbtn" data-view="heat" aria-pressed="false" aria-label="Traffic heat map" data-tip="Traffic heat map: green roads flow, red ones are jammed; discs show cars waiting at junctions" data-key="C">${icon('heat')}</button>
         <button class="iconbtn" data-view="noise" aria-pressed="false" aria-label="Noise and pollution" data-tip="Noise and pollution: loud roads and factory smog, with each home's happiness" data-key="C">${icon('noise')}</button>
         <button class="iconbtn" data-view="purpose" aria-pressed="false" aria-label="Trip purpose" data-tip="Trip purpose: a coloured dot on every vehicle's roof (commute, shopping, freight, visitors)" data-key="P">${icon('tag')}</button>
         <button class="iconbtn" data-view="feed" aria-pressed="false" aria-label="Trip reports" data-tip="Trip reports: what residents say about their trips. Click one to look" data-key="T">${icon('list')}</button>
+        <button class="iconbtn bell" data-view="news" aria-pressed="false" aria-label="Notifications" data-tip="Notifications: what happened in the city. Click one to look" data-key="N">${icon('bell')}<b class="badge num" hidden></b></button>
         <button class="iconbtn" data-view="metrics" aria-pressed="false" aria-label="Metrics" data-tip="Metrics: waiting cars, trip times, throughput, money, population and happiness over the run" data-key="M">${icon('chart')}</button>
         <button class="iconbtn snd" data-view="sound" data-key="Shift+M"></button>
         <button class="iconbtn" data-view="menu" aria-label="Menu" data-tip="Menu: save, load, quit" data-key="Esc">${icon('menu')}</button>
@@ -367,6 +374,10 @@ export class HUD {
         <div class="panel pop fpanel" hidden role="dialog" aria-label="Trip reports">
           <div class="pop-head"><h2>Trip reports</h2><button class="iconbtn" data-v="feed" aria-label="Close [T]">${icon('close')}</button></div>
           <div class="jbody fbody"></div>
+        </div>
+        <div class="panel pop npanel" hidden role="dialog" aria-label="Notifications">
+          <div class="pop-head"><h2>Notifications</h2><button class="iconbtn" data-v="news" aria-label="Close [N]">${icon('close')}</button></div>
+          <div class="jbody nbody"></div>
         </div>
         <div class="panel pop mpanel" hidden role="dialog" aria-label="Metrics">
           <div class="pop-head"><h2>Metrics</h2><button class="iconbtn" data-v="metrics" aria-label="Close [M]">${icon('close')}</button></div>
@@ -467,7 +478,7 @@ export class HUD {
     this.q('.views').onclick = e => {
       const v = (e.target as Element).closest<HTMLElement>('[data-view]')?.dataset.view;
       if (v === 'heat' || v === 'noise') game.overlay = game.overlay === v ? 'none' : v;
-      else if (v === 'metrics' || v === 'feed') this.show[v] = !this.show[v];
+      else if (v === 'metrics' || v === 'feed' || v === 'news') this.show[v] = !this.show[v];
       else if (v === 'purpose') game.purposeDots = !game.purposeDots;
       else if (v === 'menu') this.onPause?.();
       else if (v === 'sound') this.toggleSound();
@@ -479,7 +490,7 @@ export class HUD {
       const bb = t.closest<HTMLElement>('[data-b]')?.dataset.b, pb = game.picked;
       if (pb && bb === 'move') game.startMove(pb);
       else if (pb && bb === 'demolish') game.tryDemolish(pb);
-      else if (v === 'metrics' || v === 'feed') this.show[v] = false;
+      else if (v === 'metrics' || v === 'feed' || v === 'news') this.show[v] = false;
       if (j) {
         const [x, y] = j.split(',').map(Number);
         game.follow = null;
@@ -546,6 +557,8 @@ export class HUD {
       this.show.metrics = !this.show.metrics;
     } else if (e.key === 't' || e.key === 'T') {
       this.show.feed = !this.show.feed;
+    } else if (e.key === 'n' || e.key === 'N') {
+      this.show.news = !this.show.news;
     } else if (e.key === 'p' || e.key === 'P') {
       g.purposeDots = !g.purposeDots;
     }
@@ -680,6 +693,7 @@ export class HUD {
     el.innerHTML = `${icon('trophy')}<span class="txt"><b>Achievement: ${esc(d.name)}</b><small>${esc(d.text)}${d.reward ? ` · ${esc(rewardText(d))}` : ''}</small></span>`;
     this.q('.toasts').appendChild(el);
     sound.play('level');
+    this.game.note(`Achievement: ${d.name}`, null, true);
     setTimeout(() => el.remove(), 5000);
   }
 
@@ -933,7 +947,7 @@ export class HUD {
 
   // ---------- analysis panels ----------
   private updateViews(): void {
-    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${g.purposeDots}|${this.show.metrics}|${this.show.feed}|${m}`;
+    const g = this.game, m = sound.mix.muted, key = `${g.overlay}|${g.purposeDots}|${this.show.metrics}|${this.show.feed}|${this.show.news}|${m}`;
     if (key === this.last.views) return;
     this.last.views = key;
     // the speaker shows the sound's state (the menu's Sound page can change it too)
@@ -947,7 +961,8 @@ export class HUD {
     this.q('.legend').innerHTML = g.overlay === 'none' && dots ? DOTS : LEGEND[g.overlay] + (dots ? DOTS : '');
     this.q('.mpanel').hidden = !this.show.metrics;
     this.q('.fpanel').hidden = !this.show.feed;
-    this.last.metrics = this.last.feed = undefined;
+    this.q('.npanel').hidden = !this.show.news;
+    this.last.metrics = this.last.feed = this.last.news = undefined;
   }
 
   // Followed car: trip, from -> to, time so far against the free-flow time, speed, stops
@@ -1021,6 +1036,24 @@ export class HUD {
       <p class="jnote">Today: <b class="o-smooth">${td.smooth} smooth</b> · <b class="o-wait">${td.wait} long waits</b> · <b class="o-detour">${td.detour} detours</b>`
       + ` · <b class="o-gaveup">${td.gaveup} gave up</b> · <b class="o-noroute">${td.noroute} no road</b></p>`
       + (g.reports.length ? `<div class="flist">${g.reports.slice(-30).reverse().map(tripBtn).join('')}</div>` : '<p class="jnote">No trips yet: they show up here as cars arrive.</p>');
+  }
+
+  // Notifications: newest first, a click jumps to its spot; the bell's badge counts those added since the panel was last open
+  private updateNews(): void {
+    const g = this.game;
+    if (this.show.news) this.seen = g.newsN;
+    const unread = g.newsN - this.seen, key = `${g.newsN}|${unread}|${this.show.news}`;
+    if (key === this.last.news) return;
+    this.last.news = key;
+    const b = this.q('.bell .badge');
+    b.hidden = !unread;
+    b.textContent = unread > 9 ? '9+' : String(unread);
+    if (!this.show.news) return;
+    this.q('.nbody').innerHTML = g.news.length ? `<div class="flist">${g.news.slice().reverse().map(n => {
+      const when = `<small class="num">D${n.day} ${pad(n.hour)}:00</small>`;
+      return n.at ? `<button class="nrow" data-jump="${Math.round(n.at.x)},${Math.round(n.at.y)}" data-tip="Click to look">${when}<span>${esc(n.text)}</span></button>`
+        : `<div class="nrow">${when}<span>${esc(n.text)}</span></div>`;
+    }).join('')}</div>` : '<p class="jnote">Nothing yet: events, loans, milestones, achievements and buildings in trouble show up here.</p>';
   }
 
   // Metrics: one sparkline per series over the whole run, redrawn once per sample
@@ -1195,6 +1228,7 @@ export class HUD {
     this.updateCar();
     this.updateBuilding();
     this.updateFeed();
+    this.updateNews();
     this.updateMetrics();
     const gk = `${g.tool}|${g.gridSize}|${g.roadCurve}|${g.ringSize}`;
     if (gk !== L.gsz) {
@@ -1314,9 +1348,23 @@ export class HUD {
 
   // Region O: the map's objectives with bars, the ★★ flow and ★★★ spend bars, what the map brings, a Challenge's deadline
   private updateObjectives(): void {
-    const g = this.game, box = this.q('.obj');
+    const g = this.game, box = this.q('.obj'), tut = this.tut?.active ? this.tut : null;
     box.hidden = !g.goals;
     if (!g.goals) return;
+    // the tutorial: its steps as a checklist, the current one with its progress
+    if (tut) {
+      const rows = tut.steps.map((s, i) => {
+        const p = i === tut.index ? s.progress?.(g) : undefined, ok = i < tut.index || (i === tut.index && stepDone(s, g) && !!p);
+        return `<div class="orow${ok ? ' ok' : ''}${i === tut.index ? ' cur' : i > tut.index ? ' todo' : ''}"><span>${ok ? icon('check') : '<i class="odot"></i>'}${esc(s.goal)}</span>`
+          + `<b class="num">${p ? `${p[0]} / ${p[1]}` : ''}</b>${p ? `<i style="--f:${Math.min(1, p[0] / p[1])}"></i>` : ''}</div>`;
+      }).join(''), key = `tut|${rows}`;
+      if (key === this.last.obj) return;
+      this.last.obj = key;
+      this.q('.oname').textContent = 'Tutorial';
+      this.q('.ostars').innerHTML = '';
+      this.q('.obody').innerHTML = rows;
+      return;
+    }
     const m = g.map!, r = grade(g, m), best = Math.max(g.run.stars, r.stars);
     const bar = (ok: boolean, label: string, val: string, f: number) =>
       `<div class="orow${ok ? ' ok' : ''}"><span>${ok ? icon('check') : '<i class="odot"></i>'}${esc(label)}</span><b class="num">${val}</b><i style="--f:${Math.max(0, Math.min(1, f))}"></i></div>`;
