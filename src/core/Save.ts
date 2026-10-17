@@ -8,7 +8,8 @@ import type { Metrics } from './Metrics.ts';
 import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
 import type { Trip, TripReport } from '../entities/Trip.ts';
-import { RoadGraph } from '../network/RoadGraph.ts';
+import { RoadGraph, clearR } from '../network/RoadGraph.ts';
+import { dist } from '../util/geom.ts';
 import type { Control, RingSize, RoadType, Spoke } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
@@ -119,14 +120,18 @@ export function deserialize(json: string): Game {
     return r;
   });
   for (const e of d.edges) graph.addEdge(N[e.a], N[e.b], { ...e, ring: e.ring === undefined ? null : R[e.ring] }, e.day).heat = e.heat;
-  // an older save's roundabout is one node: rebuilt as a ring of its size, a smaller one where an arm is too short, else a plain junction
+  const E = graph.edges.slice();
+  // an older save's roundabout is one node: rebuilt as setControl would, the largest ring from its size down that fits (else a plain
+  // junction), the driveways joining inside its clear radius laid again outside it
+  let relay = false;
   for (const n of graph.nodes.filter(x => x.control === 'roundabout')) {
     n.control = 'none';
     n.plan = null;
-    for (let s = n.ring; s >= 0 && !graph.buildRing(n, s as RingSize, n.controlDay); s--);
+    for (const e of graph.edges.filter(e => e.drive && [e.a, e.b].some(v => !v.building && dist(v, n) < clearR(n.ring)))) { graph.removeEdge(e); relay = true; }
+    for (let s = n.ring; s >= 0 && (g.ringRoom(n, s as RingSize) || !graph.buildRing(n, s as RingSize, n.controlDay)); s--);
   }
+  if (relay) g.connect();
   if (d.ev) {
-    const E = graph.edges.slice(0, d.edges.length);
     Object.assign(g, { nextEventAt: d.ev.next, eventLast: d.ev.last });
     g.events = d.ev.list.map(e => ({ ...e, edge: E[e.edge] ?? null, to: B[e.to] ?? null, from: B[e.from] ?? null }));
   } else g.nextEventAt = d.time + 4 * HOUR;

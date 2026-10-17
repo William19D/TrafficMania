@@ -53,7 +53,7 @@ A roundabout is no longer a node with a fake ring. Placing one removes the junct
 - Rings win at medium, balanced flows. Lights win on big unbalanced crossings and in tight grids where a ring doesn't fit. Map 7 is built around that (section 4).
 - ponytail: single-lane rings. Add 2-lane rings (inner lane for far exits) only if Large rings with 3-lane arms still jam in playtest.
 
-**Migration:** on load, every node with `control: 'roundabout'` (old saves) is rebuilt as a ring of its saved `ring` size, a smaller one where an arm is too short for it, else a plain junction. Its lane connections are dropped: a ring arm has one move. Saves keep `v: 1` and gain `rings` and `edges[].ring` (indexes).
+**Migration:** on load, every node with `control: 'roundabout'` (old saves) is rebuilt as `setControl` would: driveways joining inside the clear radius are taken up, the largest size from its saved `ring` down that `ringRoom` accepts is built (else a plain junction), and `connect()` lays the driveways again outside it. Its lane connections are dropped: a ring arm has one move. Saves keep `v: 1` and gain `rings` (with `spokes?`, one per ring node, null between arms) and `edges[].ring` (indexes).
 
 **Building and joining:**
 - Driveways joining inside the new ring's clear radius are laid again outside it (`connect` slides a join along the road out of every clear radius).

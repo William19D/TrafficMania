@@ -1248,13 +1248,19 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const d = dist(at(S!, W!), at(Nn!, E!));
   if (d < 8) fail(`opposite lefts: drawn ${d.toFixed(1)}px apart at the node`);
 }
-// Old saves: a roundabout was one node with a size; it loads as a ring of that size, a smaller one where an arm is too short for it,
+// Old saves: a roundabout was one node with a size; it loads as a ring of that size, a smaller one where it does not fit (ringRoom),
 // with its arms joined and no 'roundabout' node left
 {
   const w = blank(), wg = w.graph, J = wg.addNode(800, 800), K = wg.addNode(300, 300);
   const H = [[800, 500], [1100, 800], [800, 1100], [500, 800]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
   for (const h of H) w.commitPath(w.planPath([h, J], 0, DEFAULT_TYPE));
-  for (const [x, y] of [[330, 300], [300, 100], [100, 300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+  for (const [x, y] of [[358, 300], [300, 100], [100, 300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+  // old connect() could join a driveway to the roundabout node itself
+  w.startPlacing('home');
+  w.placeBuilding({ x: 860, y: 760 });
+  const door = w.buildings[w.buildings.length - 1]!.node!;
+  for (const e of wg.edges.filter(e => e.drive && (e.a === door || e.b === door))) wg.removeEdge(e);
+  wg.addEdge(door, J, { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE, drive: true });
   const d = JSON.parse(serialize(w)) as { nodes: { control: string; ring: number }[]; edges: { ring?: number }[]; rings?: unknown };
   delete d.rings;
   for (const e of d.edges) delete e.ring;
@@ -1265,6 +1271,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (sizes.join() !== '0,1' || v.graph.nodes.some(n => n.control === 'roundabout') || homes.some(a => homes.some(b => a !== b && !findPath(v.graph, a, b, null, true))))
     fail(`old save: roundabouts loaded as rings of sizes ${sizes}`);
   for (let t = 0; t < 10 * 60; t++) { v.update(DT); invariants(v); }
+  if (v.graph.rings.some(r => r.nodes.some(n => v.graph.drivewayJunction(n))) || v.buildings.some(b => !b.connected)) fail('old save: a driveway joins a migrated ring');
 }
 // Zones: a street painted both ways pays ZONE_COST a lot; at Residential demand (a fresh town: R >= 0.5) homes grow on the lots of the
 // street the town reaches, none on an unconnected street (no access); with a job shortage (R <= 0) none grow; erasing empty lots
