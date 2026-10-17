@@ -18,7 +18,7 @@ import type { Vec } from '../util/geom.ts';
 import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
 import { RINGS } from '../network/RoadGraph.ts';
 import type { LinkPreset, Move, Preset } from '../network/Junction.ts';
-import { MAX_PHASES, PHASE_MAX, PHASE_MIN, addPhase, applyPreset, approachOf, cycleSig, linkPreset, links, mainEdges, planOf, removePhase, setSeconds } from '../network/Junction.ts';
+import { MAX_PHASES, PHASE_MAX, PHASE_MIN, PRIORITY, addPhase, applyPreset, approachOf, cycleSig, cycleSign, linkPreset, links, planOf, removePhase, setSeconds, signAt } from '../network/Junction.ts';
 import { icon } from './icons.ts';
 import { KEY_TOOLS } from './Input.ts';
 import { sound } from './Sound.ts';
@@ -160,12 +160,16 @@ const ROAD_TIP = 'Road elevation: Ground or viaduct L1-L10';
 const CONTROL_KEYS = Object.keys(CONTROL_LABEL) as Control[];
 const CONTROL_TIP: Record<Control, string> = {
   none: 'No control: one car at a time, first come first served',
-  yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
+  yield: 'Priority signs: the main road (highest tier) has priority, side roads yield; click a sign to change it',
   stop: 'All-way stop: every car stops at the line, then one at a time',
   light: 'Traffic light: phases you can edit, protected lefts',
   roundabout: 'Roundabout: cars merge into gaps in the ring traffic, no stopping when it is clear',
 };
 const MOVES = ['Left', 'Straight', 'Right'];
+const SIGNS = ['Priority road', 'Yield', 'Stop'];
+// diamond, give-way triangle, octagon
+const SIGN_PTS = ['0,-7 7,0 0,7 -7,0', '-6.5,-4.4 6.5,-4.4 0,6.8',
+  Array.from({ length: 8 }, (_, i) => `${(6 * Math.cos((i + 0.5) * Math.PI / 4)).toFixed(2)},${(6 * Math.sin((i + 0.5) * Math.PI / 4)).toFixed(2)}`).join(' ')];
 const PRESETS: [Preset, string, string][] = [
   ['two', '2 phases', 'One phase per axis, lefts give way to oncoming traffic'],
   ['lefts', 'Protected lefts', '4 phases: per axis a protected-left phase, then straight and right'],
@@ -194,7 +198,7 @@ const tripName = (t: Leg): string => {
   return out ? 'Export' : inn && t.purpose === 'freight' ? 'Import' : inn && t.purpose === 'commute' ? 'Commute from outside' : NAME[t.purpose];
 };
 const JAM_AT: Record<Control | 'road', string> = {
-  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
+  light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a priority sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
 const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike', ambulance: 'Ambulance' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
@@ -840,6 +844,8 @@ export class HUD {
     else if (k === 'del') g.editPlan(n, p => removePhase(p, i));
     else if (k === 'pre') g.editPlan(n, p => applyPreset(p, a as Preset));
     else if (k === 'lp') g.editPlan(n, p => linkPreset(p, n, a as LinkPreset));
+    else if (k === 'sg') g.editPlan(n, p => cycleSign(p, n, i), true);
+    else if (k === 'sga') g.editPlan(n, p => { delete p.signs; }, true);
   }
 
   private updateJunction(): void {
@@ -853,7 +859,7 @@ export class HUD {
     const p = planOf(n), light = n.control === 'light', lock = g.lockOf('junction');
     this.jPhase = Math.min(this.jPhase, p.phases.length - 1);
     const ring = n.control === 'roundabout', ph = p.phases[this.jPhase];
-    const main = n.control === 'yield' ? mainEdges(n).map(e => approachOf(p, n, e)) : [];
+    const signs = n.control === 'yield', main = signs ? p.approaches.map((_, i) => i).filter(i => signAt(p, n, i) === PRIORITY) : [];
     const price = (k: Control) => {
       const d = Math.round(g.controlPrice(k) - g.controlRefund(n));
       return d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free';
@@ -878,6 +884,13 @@ export class HUD {
     });
     // all arms first, then the turn buttons on top
     const svg = arms.map(x => x[0]).join('') + arms.map(x => x[1]).join('');
+    // Sign junction diagram: per arm its sign beside the incoming lane, a click cycles it
+    const signSvg = !signs ? '' : arms.map(x => x[0]).join('') + p.approaches.map((a, i) => {
+      const s = signAt(p, n, i), ux = Math.cos(a), uy = Math.sin(a), x = ux * 34 + uy * 14, y = uy * 34 - ux * 14, e = n.edges.find(o => approachOf(p, n, o) === i);
+      if (!e || e.drive || (e.type.oneWay && e.a === n)) return '';
+      return `<g data-j="sg:${i}" class="sg${s}" role="button" tabindex="0" aria-label="${SIGNS[s]} on the ${compass(a)} arm" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">`
+        + `<polygon points="${SIGN_PTS[s]}"/></g>`;
+    }).join('');
     const note = lock ? `${lock}.` : ring ? '' : 'Drag from a lane to a road to connect it. Click a line to remove it.';
     const set = !!p.lanes?.some(Boolean) || p.ban.some(x => x.some(Boolean));
     const lanes = ring || lock ? '' : `<div class="jpre">${LINK_PRESETS.map(([k, l, t]) => `<button class="btn" data-j="lp:${k}" data-tip="${t}"${k === 'auto' && !set ? ' disabled' : ''}>${l}</button>`).join('')}</div>`;
@@ -900,7 +913,9 @@ export class HUD {
         const t = `${ringTip(r, false)}${r === n.ring ? '' : room ? ` · ${room}` : ` · ${d > 0 ? `costs ${fmtMoney(d)}` : d < 0 ? `refunds ${fmtMoney(-d)}` : 'free'}`}`;
         return `<button class="lane wide" data-j="ring:${r}" aria-pressed="${r === n.ring}" aria-disabled="${!!room}" data-tip="${t}"><small>${x.label}</small></button>`;
       }).join('')}</div>` : ''}
-      ${n.control === 'yield' ? `<p class="jnote">The thick arms are the main road: it has right of way, side roads give way.</p>` : ''}
+      ${signs ? `<p class="jnote">Click a sign to cycle priority road, yield, stop. Priority traffic never stops for the others; yield and stop give way only to traffic they cross.</p>
+      <svg class="jsvg" viewBox="-54 -54 108 108" role="group" aria-label="Priority signs at this junction">${signSvg}<circle class="hub" r="6"/></svg>
+      ${p.signs ? `<div class="jpre"><button class="btn" data-j="sga" data-tip="Back to auto: the highest-tier road has priority, side roads yield">Auto signs</button></div>` : ''}` : ''}
       ${note ? `<p class="jnote">${esc(note)}</p>` : ''}
       ${lanes}
       ${light ? `${lock ? '' : `<p class="jnote">Phase ${this.jPhase + 1}: click a turn to cycle red, yield (gives way to oncoming traffic), green.</p>`}

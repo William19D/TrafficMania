@@ -1,5 +1,5 @@
 // Lane connection editor on the map (Edit tool, a junction open in the panel): a handle at each incoming lane's stop line, a target
-// zone on each road out, and a curve from a lane to each road its connections lead onto. Shared by Input (hit tests) and the renderer.
+// zone on each road out, a curve from a lane to each road its connections lead onto, and the priority sign posts. Shared by Input (hit tests) and the renderer.
 import type { Node, Edge } from '../network/RoadGraph.ts';
 import { NODE_R } from '../network/RoadGraph.ts';
 import type { Move } from '../network/Junction.ts';
@@ -60,6 +60,17 @@ const near = <T extends Vec>(xs: T[], w: Vec, r: number): T | null => {
   return best;
 };
 export const handleAt = (n: Node, w: Vec, r: number): Handle | null => near(handles(n), w, r);
+
+// A post beside arm e d px out of n, on the kerb right of its incoming lanes (pushed past the kerb of the widest road crossing it):
+// a light, or a priority sign (signPost) that a click cycles
+export function armSpot(n: Node, e: Edge, d: number): Vec {
+  const off = e.width / 2 + 3, [ux, uy] = unit(n, e);
+  d += Math.max(0, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 4 - NODE_R - 6));
+  return { x: n.x + ux * d + uy * off, y: n.y + uy * d - ux * off };
+}
+export const signPost = (n: Node, e: Edge): Vec => armSpot(n, e, NODE_R + 6);
+// The road whose sign post is under w at sign junction n (6px at most: the lane handles sit close by)
+export const signHit = (n: Node, w: Vec, r: number): Edge | null => n.control !== 'yield' ? null : near(roads(n).filter(e => !(e.type.oneWay && e.a === n)).map(e => ({ e, ...signPost(n, e) })), w, Math.min(r, 6))?.e ?? null;
 // A road out for a drag from h: the nearest zone (not h's own road) within a generous radius
 export const targetAt = (n: Node, w: Vec, r: number, h: Handle): Target | null => near(targets(n).filter(t => t.o !== h.e), w, Math.max(NODE_R, r * 2.2));
 export function linkAt(n: Node, w: Vec, r: number): Link | null {

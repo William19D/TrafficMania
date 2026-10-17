@@ -5,10 +5,10 @@ import type { Building } from '../entities/Building.ts';
 import type { CanvasRenderer } from '../rendering/CanvasRenderer.ts';
 import type { Vec } from '../util/geom.ts';
 import { dist, snapAngle } from '../util/geom.ts';
-import { moveOf, setLink } from '../network/Junction.ts';
+import { approachOf, cycleSign, moveOf, setLink } from '../network/Junction.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
 import { commitZone, planZone } from '../core/Zones.ts';
-import { editable, handleAt, linkAt, linkUI, targetAt } from './LaneLinks.ts';
+import { editable, handleAt, linkAt, linkUI, signHit, targetAt } from './LaneLinks.ts';
 
 // Number keys follow the dock left to right; Z toggles the zone brush, Tab steps through its zones (Unzone last)
 export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
@@ -94,7 +94,10 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       }
     } else if (game.tool === 'edit') {
       press = { x: e.clientX, y: e.clientY };
-      const n = game.inspect, r = hitR(e), h = editable(n) ? handleAt(n, w, r) : null, l = !h && editable(n) ? linkAt(n, w, r) : null;
+      const n = game.inspect, r = hitR(e), sg = editable(n) ? signHit(n, w, r) : null;
+      // a priority sign post: click cycles priority road, yield, stop
+      if (sg) { press = null; game.editPlan(n!, p => cycleSign(p, n!, approachOf(p, n!, sg)), true); return; }
+      const h = editable(n) ? handleAt(n, w, r) : null, l = !h && editable(n) ? linkAt(n, w, r) : null;
       if (h || l) { linkUI.drag = { h: h ?? l!.h, was: l, x: w.x, y: w.y, t: null, moved: false }; return; }
       grab = game.carAt(w) || game.junctionAt(w) ? null : game.buildingUnder(w);
       run = grab ? null : game.runAt(w);
@@ -124,7 +127,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       d.t = d.moved ? targetAt(n, w, hitR(e), d.h) : null;
       return;
     }
-    if (game.tool === 'edit' && editable(n) && !press) { const r = hitR(e), h = handleAt(n, w, r); linkUI.hover = h?.key ?? linkAt(n, w, r)?.key ?? ''; }
+    if (game.tool === 'edit' && editable(n) && !press) { const r = hitR(e), h = handleAt(n, w, r), sg = signHit(n, w, r); linkUI.hover = sg ? `sign:${sg.id}` : h?.key ?? linkAt(n, w, r)?.key ?? ''; }
     if (game.tool === 'edit' && grab && press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) { game.startMove(grab); return; }
     if (game.tool === 'edit' && run && press && !blocked()) {
       if (mode === 'idle' && dist(press, { x: e.clientX, y: e.clientY }) > CLICK_PX) mode = 'bending';

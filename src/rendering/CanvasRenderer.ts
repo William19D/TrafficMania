@@ -3,8 +3,8 @@ import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
 import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, onRing, ringOut, roadWidth } from '../network/RoadGraph.ts';
-import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
-import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
+import { PRIORITY, STOP, YIELD, approachOf, autoMasks, inLanes, laneMasks, links, moveOf, planOf, signOf } from '../network/Junction.ts';
+import { armSpot, curve, editable, linkUI, linksOf, handles, signPost, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Lot } from '../core/Zones.ts';
@@ -1708,10 +1708,8 @@ export class CanvasRenderer {
 
   // Spot d px out along e from n, right of the lane coming in (traffic flows toward the node, -u; its right is (uy, -ux))
   private spot(n: Node, e: Edge, d: number): [number, number] {
-    // pushed out past the kerb of the widest road crossing the arm
-    const off = e.width / 2 + 3, [ux, uy] = this.dir(n, e);
-    d += Math.max(0, ...n.edges.map(o => o === e || o.drive ? 0 : o.width / 2 + 4 - NODE_R - 6));
-    return [n.x + ux * d + uy * off, n.y + uy * d - ux * off];
+    const p = armSpot(n, e, d);
+    return [p.x, p.y];
   }
 
   // One traffic light per approach: green while any of its movements may go, amber in the last second before all turn red
@@ -1751,32 +1749,37 @@ export class CanvasRenderer {
     }
   }
 
-  // Yield: a give-way triangle on every side-road approach; stop: a red octagon on every approach
-  private drawSigns(n: Node): void {
-    const ctx = this.ctx, main = n.control === 'yield' ? mainEdges(n) : [];
+  // Sign junction: per approach its sign (Junction.signOf), a yellow priority-road diamond, a give-way triangle or a stop octagon; all-way
+  // stop: an octagon on every approach. k scales them up (the junction open in the editor), hot: the road whose post is hovered
+  private drawSigns(n: Node, k = 1, hot: Edge | null = null): void {
+    const ctx = this.ctx;
     for (const e of n.edges) {
-      if (main.includes(e)) continue;
-      const [px, py] = this.spot(n, e, NODE_R + 6);
+      if (e.drive || (e.type.oneWay && e.a === n)) continue;
+      const s = n.control === 'stop' ? STOP : signOf(n, e), p = signPost(n, e), r = 4.2 * k;
       const shape = (x: number, y: number): void => {
         ctx.beginPath();
-        if (n.control === 'stop') for (let i = 0; i < 8; i++) ctx.lineTo(x + 3.6 * Math.cos((i + 0.5) * Math.PI / 4), y + 3.6 * Math.sin((i + 0.5) * Math.PI / 4));
-        else { ctx.moveTo(x - 3.8, y - 2.6); ctx.lineTo(x + 3.8, y - 2.6); ctx.lineTo(x, y + 3.8); }
+        if (s === STOP) for (let i = 0; i < 8; i++) ctx.lineTo(x + r * Math.cos((i + 0.5) * Math.PI / 4), y + r * Math.sin((i + 0.5) * Math.PI / 4));
+        else if (s === PRIORITY) { ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); }
+        else { ctx.moveTo(x - r, y - r * 0.68); ctx.lineTo(x + r, y - r * 0.68); ctx.lineTo(x, y + r); }
         ctx.closePath();
       };
+      if (e === hot) this.circle(p.x, p.y, r + 3, 'rgba(255,255,255,.9)');
       // its post's shadow and its own, cast down-right
-      this.seg({ x: px, y: py }, { x: px + 2.2, y: py + 3.3 }, 'rgba(0,0,0,.18)', 0.9);
-      shape(px + 2.2, py + 3.3);
+      this.seg(p, { x: p.x + 2.2 * k, y: p.y + 3.3 * k }, 'rgba(0,0,0,.18)', 0.9 * k);
+      shape(p.x + 2.2 * k, p.y + 3.3 * k);
       ctx.fillStyle = 'rgba(0,0,0,.16)';
       ctx.fill();
-      shape(px, py);
-      ctx.fillStyle = n.control === 'stop' ? RED : '#FFFFFF';
+      shape(p.x, p.y);
+      ctx.fillStyle = s === STOP ? RED : s === PRIORITY ? '#F2C230' : '#FFFFFF';
       ctx.fill();
-      ctx.strokeStyle = n.control === 'stop' ? '#FFFFFF' : RED;
-      ctx.lineWidth = n.control === 'stop' ? 0.8 : 1.3;
+      ctx.strokeStyle = s === YIELD ? RED : '#FFFFFF';
+      ctx.lineWidth = (s === YIELD ? 1.4 : 1) * k;
+      ctx.lineJoin = 'round';
       ctx.stroke();
+      if (s === PRIORITY) { ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 0.5 * k; shape(p.x, p.y); ctx.stroke(); }
+      ctx.lineJoin = 'miter';
     }
   }
-
   // Arrows of e's lanes into n: its plan's lane connections (less legacy bans), else auto ones where two lanes or more come in
   // (roundabouts: set ones only)
   private arrowsOf(n: Node, e: Edge): number[] | null {
@@ -1848,6 +1851,8 @@ export class CanvasRenderer {
       ctx.lineWidth = lw * 0.9;
       ctx.stroke();
     }
+    // the priority signs on top, bigger: a click on one cycles it (Input)
+    if (n.control === 'yield') this.drawSigns(n, 1.3, n.edges.find(e => linkUI.hover === `sign:${e.id}`) ?? null);
   }
 }
 

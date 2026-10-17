@@ -102,7 +102,7 @@ interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; e
 interface Arm { edges: Edge[]; nodes: Node[]; at: Vec }
 // A template laid on a junction: local (u, v) -> world, the arms to cut, the rebuilt crossing road's type and the ramps' type
 interface IchgFrame { map: (p: Vec) => Vec; cuts: Arm[]; deck: RoadType; ramp: RoadType }
-export const CONTROL_LABEL: Record<Control, string> = { none: 'None', yield: 'Yield', stop: 'Stop', light: 'Light', roundabout: 'Roundabout' };
+export const CONTROL_LABEL: Record<Control, string> = { none: 'None', yield: 'Signs', stop: 'Stop', light: 'Light', roundabout: 'Roundabout' };
 const CONTROL_COST: Record<Control, number> = { none: 0, yield: T.SIGN_COST, stop: T.SIGN_COST, light: T.LIGHT_COST, roundabout: T.ROUNDABOUT_COST };
 const CONTROL_UPKEEP: Record<Control, number> = { none: 0, yield: T.SIGN_UPKEEP, stop: T.SIGN_UPKEEP, light: T.LIGHT_UPKEEP, roundabout: T.ROUNDABOUT_UPKEEP };
 const MAX_LEVEL = 10;
@@ -2010,9 +2010,9 @@ export class Game {
   }
 
   // Edits a copy of the junction's plan (phases, protected lefts, lane connections); free. A connection change reroutes every car not already
-  // granted through the junction.
-  editPlan(n: Node, edit: (p: JunctionPlan) => void): void {
-    const locked = this.lockOf('junction');
+  // granted through the junction. Priority signs (signs) come with the sign control, so the junction editor's lock doesn't hold them.
+  editPlan(n: Node, edit: (p: JunctionPlan) => void, signs = false): void {
+    const locked = !signs && this.lockOf('junction');
     if (locked) { this.say(locked); return; }
     const old = planOf(n), p = clonePlan(old);
     edit(p);
