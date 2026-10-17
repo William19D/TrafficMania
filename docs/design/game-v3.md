@@ -303,6 +303,33 @@ Grading:
   - trucks x2
 - `GameConfig.mode` becomes `'campaign' | 'endless' | 'creative' | 'challenge' | 'daily'`, and `GameConfig` adds `map?: string`. An old `'career'` save loads as `'endless'` (section 10).
 
+### G3 as built (where it differs from sections 4, 5 and 10)
+Code: `src/core/Campaign.ts` (`MAPS`, `cfgFor`, objectives, `grade`, run counters), `src/core/Profile.ts`, `Game.run` / `runHour` / `count` /
+`permanent`, the map select, Endless/Creative setup and profile page in `Menu.ts`, region O and the Map complete modal in `HUD.ts`.
+- **Unlocks keep their `level` fields**, now read as the map number (`Game.unlockLevel`: the map's number in Campaign and Challenge,
+  `cfg.unlock` in Endless, everything in Creative and in an Endless run without `cfg.unlock`, such as an old career save).
+  Remapped: grid 2, roundabout and one-way 3, viaducts and tunnels 4, junction editor 5 (lane connections, phases and protected lefts
+  stay one feature), boulevard 5. Office zone = Office tier level 2, Industrial zone = Workshop level 4 (the brush refuses a locked zone).
+  `LEVELS` stays as Endless milestones (grants only); campaign maps have no level-ups.
+- **Endless tools are not stored:** `toolLevel(profile)` = the highest map with a star. `GameConfig.unlock` carries it, and starting an
+  Endless game raises it to the profile's current value.
+- **Bridges and the heat map are not locked** on map 1 (not done; bridges are already x4).
+- **Maps:** seed = map id; `terrain` fixes the river, mountain, lake and exit counts so the Challenge (Hard) map is the same. No
+  hand-placed layout (map 2's river is wherever its seed puts it). Bonus maps B1/B2 and Daily: not done.
+- **Counters:** rolling 24 h by hour of day (`run.h`, `run.cur`): finished trips and smooth ones (flow), arrivals (trips/h, trips at an
+  hour), exports (freight reaching an exit), visitors (a visit from an exit). Match share is kept at `MATCH_END` (fans sent vs on time);
+  ambulances are the last 10 outbound legs. Objectives are checked on the hour, not every frame.
+- **Network spend** = every `spend()` except zoning, net of refunds (`run.spent`).
+- **Through traffic** (map 6): `visit` trips between linked exits, `through / 24` an hour; exit-to-exit trips pay nothing.
+- **Challenge:** permanent = demolishing a road or removing a control from an earlier day, or retyping a run to a cheaper type, is
+  refused. Bends and specials are not covered. Gridlock needs at least 20 finished trips that day.
+- **Profile:** `{ v, stars, best, challenge, achievements, tips, tipsOff, stats: { trips, seconds } }`. Daily, cosmetics, progress and
+  roadsPx wait for G4. Trips are tallied at each autosave; seconds count while the game runs with the menu closed.
+- **Tour:** runs only on Campaign map 1, until it has been seen once.
+- **Region O** is a row inside the resources panel (it follows its wrap at every width), foldable. It shows the map's goals, the
+  ★★/★★★ bars, `New here:` (the map's unlocks), and the Challenge deadline.
+- **Save:** `run?` (defaults to `run0()`); `cfg.mode: 'career'` loads as `'endless'`; slot lines drop `Lv`.
+
 ---
 
 ## 6. Onboarding (G6)
