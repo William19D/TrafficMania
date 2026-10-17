@@ -27,11 +27,11 @@ const map = (id: string, name: string, blurb: string, biome: Biome, size: MapSiz
   ({ id, name, blurb, biome, size, seed: id, terrain, money, objectives, flow, budget, unlock, mods });
 const pop = (target: number): Objective => ({ kind: 'pop', target });
 export const MAPS: MapDef[] = [
-  map('meadowbrook', 'Meadowbrook', 'A quiet valley with one gentle river. Dirt roads and streets only.', 'temperate', 'small',
+  map('meadowbrook', 'Meadowbrook', 'A quiet valley with one gentle river. Dirt roads and streets only.', 'forest', 'small',
     { rivers: [1, 1], mountains: [0, 0], lakes: [0, 1], exits: [0, 0] }, 20000, [pop(300)], 0.8, 9000, 0),
   map('two-bridges', 'Two Bridges', 'A wide river splits the town: every crossing is a bridge.', 'temperate', 'small',
     { rivers: [1, 1], mountains: [0, 1], exits: [1, 1] }, 30000, [pop(600), { kind: 'tripsHour', target: 25 }], 0.75, 20000, 1),
-  map('cedar-crossing', 'Cedar Crossing', 'Rush hour: everyone leaves for work between 7 and 9.', 'temperate', 'medium',
+  map('cedar-crossing', 'Cedar Crossing', 'Rush hour: everyone leaves for work between 7 and 9.', 'forest', 'medium',
     { rivers: [0, 0], mountains: [0, 1], exits: [2, 2] }, 40000, [pop(900), { kind: 'tripsAt', target: 55, at: 8 }], 0.8, 30000, 3, { commuteSd: 0.4 }),
   map('pine-pass', 'Pine Pass', 'Mountains everywhere and few flat lots. The highway waits beyond the pass.', 'alpine', 'medium',
     { rivers: [0, 1], mountains: [6, 7], exits: [1, 1] }, 60000, [pop(1000), { kind: 'exports', target: 20 }], 0.7, 55000, 5),
@@ -40,7 +40,7 @@ export const MAPS: MapDef[] = [
   map('sunvale-corridor', 'Sunvale Corridor', 'Three times the visitors, and through traffic from exit to exit.', 'desert', 'large',
     { rivers: [0, 0], mountains: [2, 3], exits: [2, 2] }, 90000,
     [pop(1500), { kind: 'visitors', target: 150 }, { kind: 'special', target: 1, special: 'plaza' }], 0.75, 90000, 9, { visitX: 3, through: 100 }),
-  map('stadium-heights', 'Stadium Heights', 'Match days flood the hills with fans.', 'temperate', 'medium',
+  map('stadium-heights', 'Stadium Heights', 'Match days flood the hills with fans.', 'forest', 'medium',
     { rivers: [0, 1], mountains: [2, 3], exits: [2, 2] }, 80000, [pop(1800), { kind: 'match', target: 0.85 }], 0.75, 70000, 12),
   map('riverside-metro', 'Riverside Metro', 'Two rivers, mountains and three exits: all of it at scale.', 'temperate', 'large',
     { rivers: [2, 2], mountains: [3, 4], exits: [3, 3] }, 120000, [pop(3000), { kind: 'ambulance', target: 0.9 }], 0.75, 140000, 15),

@@ -256,13 +256,13 @@ Grading:
 
 | # | Map | Biome, size, seed idea | Constraint | Objectives (★) | ★★ flow | ★★★ budget | Start $ | Teaches and unlocks | Unlock |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | Meadowbrook | temperate small, `meadowbrook`, one gentle river, no mountains, no exits | dirt and street only | pop 300 | 80% | $9,000 | $20,000 | roads, Residential, Commercial and Office zones, Edit, Demolish (scripted tutorial, section 6) | start |
+| 1 | Meadowbrook | forest small, `meadowbrook`, one gentle stream, no mountains, no exits | dirt and street only | pop 300 | 80% | $9,000 | $20,000 | roads, Residential, Commercial and Office zones, Edit, Demolish (scripted tutorial, section 6) | start |
 | 2 | Two Bridges | temperate small, a wide river across the middle; starter offices north, homes south | every crossing is a bridge (x4) | pop 600; 25 trips/h | 75% | $20,000 | $30,000 | avenue, bridges, townhouses, Grid tool, heat map | 1★ |
-| 3 | Cedar Crossing | temperate medium, flat, a central crossroads of avenues | rush hour: `COMMUTE_SD` 0.4, so everyone leaves 7-9 | pop 900; 55 trips/h at 08:00 | 80% | $30,000 | $40,000 | roundabouts S/M/L, one-way, store | 3★ |
+| 3 | Cedar Crossing | forest medium, flat, a central crossroads of avenues | rush hour: `COMMUTE_SD` 0.4, so everyone leaves 7-9 | pop 900; 55 trips/h at 08:00 | 80% | $30,000 | $40,000 | roundabouts S/M/L, one-way, store | 3★ |
 | 4 | Pine Pass | alpine medium, a mountain wall with one pass; highway exit beyond it | tunnels x5, few flat lots | pop 1,000; 20 exports/day | 70% | $55,000 | $60,000 | viaducts L1-10, ramps, tunnels, Industrial zone, apartment block, factory | 5★ |
 | 5 | Harbor Isles | archipelago medium, islands joined by short bridges, freight exit on the largest | small islands, so lots are scarce and density matters | pop 1,200; 60 exports/day | 75% | $50,000 | $60,000 | boulevard, lane connections, freight terminal, office tower, logistics park | 7★ |
 | 6 | Sunvale Corridor | desert large, two exits on opposite edges joined by a through route | visitors x3, plus 100 through-trips/day driving exit to exit | pop 1,500; 150 visitor arrivals/day; a mall plaza | 75% | $90,000 | $90,000 | highway, interchanges, mall, mall plaza | 9★ |
-| 7 | Stadium Heights | temperate medium, hills; a 3-lane boulevard crossing next to the stadium site | match surges; ring space is tight by the stadium | pop 1,800; one match with ≥ 85% fans on time | 75% | $70,000 | $80,000 | stadium, events, light phase editor, protected lefts | 12★ |
+| 7 | Stadium Heights | forest medium, hills; a 3-lane boulevard crossing next to the stadium site | match surges; ring space is tight by the stadium | pop 1,800; one match with ≥ 85% fans on time | 75% | $70,000 | $80,000 | stadium, events, light phase editor, protected lefts | 12★ |
 | 8 | Riverside Metro | temperate large, 2 rivers, mountains, 3 exits | all of the above at scale | pop 3,000; ambulance Fast ≥ 90% (last 10) | 75% | $140,000 | $120,000 | hospital, towers | 15★ |
 | B1 | Lakeside Loop | archipelago-lite, one big lake ringed by land | one ring road around the lake | pop 1,500 | 80% | $40,000 | $50,000 | (bonus) | achievement Star Collector |
 | B2 | Canyon Gate | desert medium, canyon walls, 2 exits | tight budget | pop 2,000; 60 exports/day | 80% | $60,000 | $60,000 | (bonus) | achievement Perfectionist |

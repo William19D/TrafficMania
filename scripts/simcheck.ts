@@ -37,7 +37,7 @@ Math.random = () => { throw new Error('Math.random used: route it through random
 const fail = (msg: string): never => { console.log('SIMCHECK FAIL: ' + msg); process.exit(1); };
 
 // Blank world: no terrain, no starter town, every level unlocked
-const SIM: GameConfig = { ...DEFAULT_CONFIG, seed: 'simcheck', size: 'small' };
+const SIM: GameConfig = { ...DEFAULT_CONFIG, biome: 'temperate', seed: 'simcheck', size: 'small' };
 const blank = (): Game => {
   const w = new Game(SIM);
   setSeed(12345);
@@ -65,6 +65,13 @@ const trip = (from: Node, to: Node): Trip => makeTrip('commute', from.building!,
   if (maps.size !== Object.keys(BIOMES).length) fail('terrain: two biomes gave the same map');
   const t = generateTerrain({ ...SIM, biome: 'archipelago', size: 'medium' });
   if (t.lakes.length < 4) fail(`terrain: archipelago has only ${t.lakes.length} lakes`);
+  // Forest: dense groves, several lakes, streams, almost no sand; forest and temperate grass reads green (G above R and B)
+  const f = generateTerrain({ ...SIM, biome: 'forest', size: 'medium' });
+  if (f.trees.length < 400 || f.lakes.length < 3 || f.rivers.some(r => r.width > 30) || f.patches.filter(p => p.kind === 'sand').length > 1) fail(`terrain: forest ${f.trees.length} trees, ${f.lakes.length} lakes`);
+  for (const k of ['forest', 'temperate'] as const) {
+    const [r, g, bl] = [1, 3, 5].map(i => parseInt(BIOMES[k].land.slice(i, i + 2), 16));
+    if (g <= r || g <= bl) fail(`terrain: ${k} land ${BIOMES[k].land} is not green`);
+  }
   // Starter town: 4 homes and the 3 workplaces; on easy a starter street gives every home a driveway, on normal nothing has a road
   for (const difficulty of ['easy', 'normal'] as const) {
     const w = new Game({ ...SIM, difficulty }), homes = w.buildings.filter(b => b.kind === 'home'), gates = w.buildings.filter(b => b.kind === 'gate');

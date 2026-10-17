@@ -74,7 +74,7 @@ New file `src/core/config.ts` holds `GameConfig`, `DIFFICULTY`, `BIOMES`, `SIZES
 // src/core/config.ts
 export type Mode = 'career' | 'creative';
 export type Difficulty = 'easy' | 'normal' | 'hard';
-export type Biome = 'temperate' | 'desert' | 'alpine' | 'archipelago';
+export type Biome = 'forest' | 'temperate' | 'desert' | 'alpine' | 'archipelago';
 export type MapSize = 'small' | 'medium' | 'large';
 export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize }
 export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'career', difficulty: 'normal', biome: 'temperate', size: 'medium' };
@@ -531,6 +531,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
   - **Trees**: each map tree gets one or two decorative neighbours, so clusters read as groves. Roads and buildings draw over trees, so the extras need no sim change. Species by biome: round (three lobes and a highlight), conifer (layered star), snowy conifer, palm, blossom and autumn. Desert is mostly palms, alpine is conifers and snowy conifers, and archipelago mixes palms in. Trees have soft shadows and are drawn top to bottom.
   - **Water glints**: `shimmer` draws dashed light lines that drift around each lake and down each river. It is the only animated terrain, a few strokes a frame.
   - **Biome palettes** are livelier: temperate land `#E6ECD8`, desert `#F2E6CB`, alpine `#E3EBE1`, archipelago `#E7EDD6`, plus greener grass patches. `BIOMES.treeOut` is gone.
+  - As built (M1, green maps): every map read sandy because the land fills were near-white beige and 40% of the big ground patches were sand. Now `BIOMES.sand` sets the sand share per biome (forest 5%, temperate 15%, archipelago 30%, desert and alpine snow 40%; a threshold on the same roll, so no map changes shape) and the grass is green: temperate `#D3E6B4`, alpine `#D8E6D2`, archipelago `#D6E8BA`, softer straw-green dry patches and banks. New **Forest** biome (`#BFDB9C`, the menu and `DEFAULT_CONFIG` default): 1,500-1,900 trees in woods (`grove` 3: clusters of 3² x 5-12 trees over 3 x 45px), 3-5 lakes with mossy banks, 1-2 streams (`riverW` 20-30px), meadows with more flowers and bushes, round and conifer mixed, a darker forest floor under the woods (`DECO.floor`), green foothills on the mountains. Campaign Meadowbrook, Cedar Crossing and Stadium Heights are forest; desert stays on Sunvale Corridor and Canyon Gate. Saves keep their own biome in `cfg`, so they regenerate the same terrain; temperate only changed colours for that reason. Daylight is untinted from 07:30 to 17:00, so midday never washes yellow. simcheck pins its main city to temperate and checks the forest's trees, lakes, streams and sand, and that forest and temperate land is green.
 - Exits: each exit has a highway sign beside its inbound lane: a green board on two legs with a white border, a blue `H` shield, the direction and "HIGHWAY EXIT".
 - Cost: a frame renders in about 0.5-0.7 ms of script on a 30-building street (1280x720). A ground rebuild (new map or new zoom bucket) takes about 25 ms.
 - simcheck: every variant's body and chimney stand inside the footprint, offices come in at least 3 heights, and a street of 10 buildings 50px apart shows at least 5 looks.

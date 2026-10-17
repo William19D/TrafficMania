@@ -35,7 +35,7 @@ function outside(p: Vec, m: number): boolean {
 }
 
 // River that enters from the left or top edge and walks in 70px steps
-function makeRiver(): River {
+function makeRiver(w: [number, number] = [34, 50]): River {
   const fromLeft = rng() < 0.5;
   const base = fromLeft ? 0 : Math.PI / 2;
   let p: Vec = fromLeft
@@ -51,7 +51,7 @@ function makeRiver(): River {
     points.push(p);
     if (i > 1 && outside(p, 60)) break;
   }
-  return { points, width: rand(34, 50) };
+  return { points, width: rand(...w) };
 }
 
 // Rounded blob: n vertices at radius r * [k, 1]
@@ -88,7 +88,7 @@ function terrain(cfg: GameConfig): Terrain {
   // a campaign map fixes its counts, so its Challenge (Hard) has the same terrain
   const b = BIOMES[cfg.biome], d = DIFFICULTY[cfg.difficulty], o = mapById(cfg.map)?.terrain;
   const t: Terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: cfg.biome };
-  for (let i = int(o?.rivers ?? b.rivers ?? d.rivers); i > 0; i--) t.rivers.push(makeRiver());
+  for (let i = int(o?.rivers ?? b.rivers ?? d.rivers); i > 0; i--) t.rivers.push(makeRiver(b.riverW));
   const count = o ? int(o.mountains) : Math.max(0, int(d.mountains) + b.mountains);
   for (let tries = 0; tries < 300 && t.mountains.length < count; tries++) {
     const r = rand(60, 120);
@@ -113,17 +113,17 @@ function terrain(cfg: GameConfig): Terrain {
     const r = rand(150, 320);
     t.patches.push({
       poly: blob(rand(0, WORLD.w), rand(0, WORLD.h), r, 14, 0.75),
-      kind: rng() < 0.4 ? 'sand' : 'grass',
+      kind: rng() < b.sand ? 'sand' : 'grass',
     });
   }
 
-  // Trees in clusters of 5-12, off water and mountains
-  const trees = int(b.trees);
+  // Trees in clusters of 5-12 within 45px (grove g: x g² trees over x g the radius, so woods), off water and mountains
+  const trees = int(b.trees), g = b.grove ?? 1;
   for (let tries = 0; tries < 400 && t.trees.length < trees; tries++) {
     const c = { x: rand(40, WORLD.w - 40), y: rand(40, WORLD.h - 40) };
-    const n = 5 + Math.floor(rng() * 8);
+    const n = Math.round((5 + Math.floor(rng() * 8)) * g * g);
     for (let i = 0; i < n && t.trees.length < trees; i++) {
-      const a = rand(0, Math.PI * 2), d = rand(0, 45);
+      const a = rand(0, Math.PI * 2), d = rand(0, 45 * g);
       const p = { x: c.x + Math.cos(a) * d, y: c.y + Math.sin(a) * d };
       if (inWater(t, p, 12) || inMountain(t, p, 10)) continue;
       if (t.trees.some(q => dist(p, q) < 9)) continue;
