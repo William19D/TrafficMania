@@ -2,7 +2,7 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, deckH, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, BRAKE, CAR_LEN, CAR_W, DEFAULT_TYPE, deckH, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, PRIORITY, RIGHT, STOP, STRAIGHT, YIELD, applyPreset, approachOf, clonePlan, cycleSign, links, moveOf, planOf, setLink, setSeconds, signOf } from '../src/network/Junction.ts';
 import { stepDone, tutorialSteps } from '../src/ui/Tutorial.ts';
 import { dueTip } from '../src/ui/Tips.ts';
@@ -119,7 +119,7 @@ const invariants = (w: Game): void => {
   }
 };
 // Overlaps the lane check misses. Across a node: a car never closer than touching to the first car on its exit lane that came the same
-// way. On screen: two cars on one edge or on consecutive lanes (a junction or ring hand-off) heading the same way (within 30 degrees)
+// way (by its lane, unless the car is granted the node: one waiting in another lane is not on that path yet). On screen: two cars on one edge or on consecutive lanes (a junction or ring hand-off) heading the same way (within 30 degrees)
 // are never drawn closer than 0.8 x touching along their heading while less than a car width apart across it.
 // ponytail: cars entering one lane from two approaches are measured on screen only (their path gap is no distance); O(n^2), so not
 // in the rush hour
@@ -127,7 +127,7 @@ const overlaps = (w: Game, what: string, drawn = true): void => {
   const t = w.time.toFixed(2), g = w.graph;
   for (const c of w.cars) {
     const f = c.exit?.cars[0];
-    if (!f || f === c || c.lane.to !== c.exit!.from || f.prev !== c.lane.from) continue;
+    if (!f || f === c || c.lane.to !== c.exit!.from || f.prev !== c.lane.from || (f.prevOffset !== c.lane.offset && c.granted !== c.lane.to)) continue;
     const gap = c.lane.edge.length - c.s + f.s - sep(c, f);
     if (gap < -0.5) fail(`${what}: cars overlap across node ${c.lane.to.id} by ${(-gap).toFixed(1)}px at t=${t}`);
   }
@@ -728,6 +728,14 @@ for (const [k, b] of Object.entries(BIOMES)) {
   const lum = (c: string): number => [1, 3, 5].reduce((n, i) => n + parseInt(c.slice(i, i + 2), 16), 0);
   if (lum(b.bands[2]) <= lum(b.bands[0])) fail(`mountains: ${k} peak ${b.bands[2]} is darker than its foot ${b.bands[0]}`);
 }
+// Two drawn car bodies overlap, less 1px slack each side (separating axis test of two rectangles)
+const bodies = (p: { x: number; y: number; angle: number }, lp: number, q: { x: number; y: number; angle: number }, lq: number): boolean => {
+  const dx = q.x - p.x, dy = q.y - p.y, h = (CAR_W - 2) / 2;
+  return [p.angle, p.angle + Math.PI / 2, q.angle, q.angle + Math.PI / 2].every(t => {
+    const ux = Math.cos(t), uy = Math.sin(t), ext = (r: { angle: number }, l: number) => Math.abs(Math.cos(r.angle - t)) * (l / 2 - 1) + Math.abs(Math.sin(r.angle - t)) * h;
+    return Math.abs(dx * ux + dy * uy) < ext(p, lp) + ext(q, lq);
+  });
+};
 // Roundabout sizes: a 4-arm cross flooded from every arm (each car to another exit) through a ring of every size. Every car gets
 // through, a large ring holds more cars at once than a small one, nothing overlaps (lanes, across nodes, on screen), and on and around
 // the ring a car never turns more than 35 degrees in 0.1 s nor sheds speed faster than it brakes (no stop-then-jump at the entry).
@@ -788,6 +796,77 @@ for (const [k, b] of Object.entries(BIOMES)) {
     if (wg.rings.length !== 1 || !c || c.edges.length !== 4 || !joined() || Math.abs(w.money - (cash + w.controlPrice('roundabout', 0))) > 1e-6) fail('ring sizes: removal');
   }
   if (most[2]! <= most[0]!) fail(`ring sizes: large ring held ${most[2]} cars at once, small ${most[0]}`);
+}
+// Ring lanes: the same cross flooded harder (avenue arms, each car to the next, opposite or far exit) through a large ring of 1, 2 and 3
+// lanes. Rings saved before lanes load with one; a medium ring takes at most 2 and the lanes cost more. More lanes carry more cars a
+// minute; cars enter further in the further they go (some ride inside), move out at the plain nodes and leave from the outer lane, and
+// one leaving from an inner lane does so only granted (the outer lanes clear there); nothing overlaps, turns sharply or stops dead.
+{
+  const rate: number[] = [];
+  for (const k of [1, 2, 3] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+    const H = [[1000, 450], [1550, 1000], [1000, 1550], [450, 1000]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, av));
+    w.demandOff = true;
+    Object.assign(w, { ringSize: 2, ringLanes: k });
+    const cash = w.money;
+    w.placeControl(J, 'roundabout');
+    const ring = wg.rings[0]!;
+    if (!ring || ring.lanes !== k || ring.nodes.some(v => v.edges.some(e => e.ring && e.lanes.length !== k))) fail(`ring lanes: ${k} lanes not placed (${w.message})`);
+    if (Math.abs(cash - w.money - w.controlPrice('roundabout', 2, k)) > 1e-6 || (k > 1 && w.controlPrice('roundabout', 2, k) <= w.controlPrice('roundabout', 2, (k - 1) as 1 | 2))) fail(`ring lanes: ${k}-lane price ${cash - w.money}`);
+    if (k === 3) {
+      const back = deserialize(serialize(w)).graph.rings[0]!, old = JSON.parse(serialize(w));
+      delete old.rings[0].lanes;
+      for (const e of old.edges) if (e.ring !== undefined) e.type = { ...e.type, lanes: 1 };
+      if (back.lanes !== 3 || deserialize(JSON.stringify(old)).graph.rings[0]!.lanes !== 1) fail('ring lanes: save / load');
+    }
+    H.forEach((h, i) => {
+      for (let j = 0; j < 20; j++) {
+        const lane = wg.lanesFrom(h.edges[0]!, h)[j % 2]!, c = new Car(lane, trip(h, H[(i + 1 + j % 3) % 4]));
+        c.s = 420 - (j >> 1) * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    const was = new Map<Car, { l: Lane; cl: Node | null; a: number[]; v: number }>();
+    let inside = 0, out = 0, inner = 0, t = 0;
+    for (; t < 90 * 60 && w.cars.length; t++) {
+      w.update(DT);
+      invariants(w);
+      // on screen between cars on the ring heading the same way (within 30 degrees, as the shared check): their drawn bodies (CAR_W wide,
+      // 1px slack each side) never overlap. ponytail: an entry and an exit at one arm node still clip in their arcs, as on a 1-lane ring
+      overlaps(w, `ring lanes ${k}`, false);
+      const on = w.cars.filter(c => c.lane.edge.ring), at = on.map(c => wg.carPos(c));
+      on.forEach((a, i) => on.forEach((b, j) => {
+        if (j > i && Math.cos(at[i]!.angle - at[j]!.angle) > Math.cos(Math.PI / 6) && bodies(at[i]!, a.len, at[j]!, b.len)) fail(`ring lanes ${k}: cars drawn on top of each other by the ring at t=${w.time.toFixed(2)}`);
+      }));
+      for (const c of w.cars) {
+        const h = was.get(c), p = wg.carPos(c);
+        if (h && h.l !== c.lane && h.l.edge.ring) {
+          const i0 = h.l.edge.lanes.indexOf(h.l);
+          if (c.lane.edge.ring && c.lane.edge.lanes.indexOf(c.lane) > i0) out++;
+          if (!c.lane.edge.ring && i0 < k - 1) { inner++; if (c.clearing !== h.l.to) fail(`ring lanes: a car left a ${k}-lane ring from lane ${i0} ungranted`); }
+        }
+        if (c.lane.edge.ring && c.lane.edge.lanes.indexOf(c.lane) < k - 1) inside++;
+        const a = [...(h?.a ?? []), p.angle].slice(-7);
+        if (dist(p, ring.hub) < ringOut(2) + 12) {
+          const turn = Math.abs(Math.atan2(Math.sin(p.angle - a[0]!), Math.cos(p.angle - a[0]!))) * 180 / Math.PI;
+          if (turn > 35) fail(`ring lanes: a car turned ${turn.toFixed(0)} degrees in 0.1s on a ${k}-lane ring`);
+          if (h && h.v - c.speed > BRAKE * DT + 1e-6) fail(`ring lanes: a car stopped dead on a ${k}-lane ring (${h.v.toFixed(1)} -> ${c.speed.toFixed(1)}px/s)`);
+        }
+        was.set(c, { l: c.lane, cl: c.clearing, a, v: c.speed });
+      }
+    }
+    if (k > 1 && (!inside || !out)) fail(`ring lanes: on a ${k}-lane ring ${inside} car-ticks inside, ${out} moves out`);
+    if (w.score !== 80) fail(`ring lanes: ${w.score} of 80 cars through a ${k}-lane ring`);
+    console.log(`ring lanes: ${k} lane(s) ${(w.score * 3600 / t).toFixed(1)} cars a minute (inner exits ${inner}, moves out ${out})`);
+    rate.push(w.score * 3600 / t);
+  }
+  if (!(rate[1]! > rate[0]!) || rate[2]! < rate[1]!) fail(`ring lanes: cars a minute by lanes ${rate}`);
+  const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000);
+  for (const [x, y] of [[1000, 700], [1300, 1000], [1000, 1300]]) w.commitPath(w.planPath([J, { x, y }], 0, DEFAULT_TYPE));
+  if (!w.setControl(J, 'roundabout', 1, 3) || wg.rings[0]!.lanes !== 2) fail('ring lanes: a medium ring took 3 lanes');
+  if (!w.setControl(wg.rings[0]!.hub, 'roundabout', 0) || wg.rings[0]!.lanes !== 1) fail('ring lanes: a small ring kept 2 lanes');
 }
 // Ring value: a ring built and taken out puts back the arm pieces it took (type, oldest day), so a street stub by an avenue never comes
 // back as a free avenue spoke, and a road joined to the ring later pays for its spoke: the cash plus every road's and control's refund

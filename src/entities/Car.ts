@@ -1,4 +1,4 @@
-import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, RINGS, stopDist } from '../network/RoadGraph.ts';
+import { BRAKE, CAR_LEN, GAP, LANE_W, LC_M, LC_S, NODE_R, RINGS, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
 import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
@@ -120,7 +120,7 @@ export class Car {
       // through a bend (or past a driveway join) a car keeps its lane where the count does too, so two lanes never feed one unchecked
       const ls = e ? graph.lanesFrom(e, node) : [], mine = graph.lanesFrom(lane.edge, lane.from), same = ls[mine.indexOf(lane)];
       const ok = e && graph.arrowLanes(e, node, this.path[2]);
-      nextLane = keep ? x : !e ? null : same && ls.length === mine.length && !graph.needsControl(node, lane.edge) && (!ok || ok.includes(same)) ? same
+      nextLane = keep ? x : !e ? null : e.ring ? graph.ringPick(this, node, e) : same && ls.length === mine.length && !graph.needsControl(node, lane.edge) && (!ok || ok.includes(same)) ? same
         : graph.pickLane(e, node, graph.turn(this.path, 1), this.path[2]);
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
@@ -141,8 +141,10 @@ export class Car {
     // else the first car on the lanes ahead along the route within braking reach (short links: a ring's chords are shorter than a
     // truck), each the same lane index on (as through a bend)
     // ponytail: 150px like the stop line horizon below; a lane picked past a junction may differ, its stop line covers that
+    // On a ring a car granted in onto one of those lanes counts as at its start: it is about to be ahead.
     else for (let j = 1, d = remaining, l = nextLane; l; j++) {
-      const f = l.cars[0];
+      const f = l.cars[0], g = lane.edge.ring && l.edge.ring ? [...l.from.occupants].find(o => o.granted === l!.from && o.exit === l) : null;
+      if (g) { gap = d - sep(this, g); break; }
       if (f) { gap = d + f.s - sep(this, f); break; }
       if ((d += l.edge.length) > 150) break;
       const q = this.path?.[j + 1], e = q && graph.edgeBetween(l.to, q), ls = e ? graph.lanesFrom(e, l.to) : [];
@@ -150,15 +152,16 @@ export class Car {
     }
 
     // Intersection control: request a turn and wait before the node. Road traffic only stops at a driveway junction to keep it
-    // clear for a merging car (RoadGraph.held), and only when it still can.
-    const needs = !isDest && graph.needsControl(node, lane.edge);
+    // clear for a merging car (RoadGraph.held), and only when it still can. A ring car leaving from an inner lane waits at the node.
+    const needs = !isDest && (graph.needsControl(node, lane.edge) || graph.innerExit(lane, this.path?.[1]));
     const keep = (n: Node, d: number, via: Edge | null): boolean => !!via && !via.drive && graph.drivewayJunction(n) && graph.held(n, via)
       && d - stopDist(n) >= this.speed * this.speed / (2 * BRAKE);
     if (needs && this.granted !== node) {
       // farther out (RoadGraph.queueAt) only in lane order: never ahead of the car in front
       const at = remaining < 70 || (remaining < 120 && (!ahead || ahead.queued) && remaining < graph.queueAt(node, lane.edge, this));
       if (at && !this.queued) { node.queue.push(this); this.queued = true; }
-      gap = Math.min(gap, remaining - stopDist(node));
+      // a ring car leaving from an inner lane waits mid-chord, between the arcs (a chord is barely longer than the stop distance)
+      gap = Math.min(gap, remaining - (lane.edge.ring ? lane.edge.length / 2 - GAP : stopDist(node)));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);
     } else if (!isDest && keep(node, remaining, lane.edge)) {
@@ -166,6 +169,7 @@ export class Car {
     } else if (!isDest && this.path) {
       // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
       // ponytail: 150px horizon covers the fastest driver's braking + reaction headway on a highway (~145px); widen it if KINDS or TIERS get faster
+      const r = nextLane?.edge.ring ? nextLane : lane, ring = r.edge.ring ? r.edge.lanes.indexOf(r) : -1;
       for (let j = 0, d = remaining; j + 1 < this.path.length && d < 150; j++) {
         const n = this.path[j + 1]!, x = graph.edgeBetween(this.path[j]!, n);
         d += x?.length ?? Infinity;
@@ -174,6 +178,8 @@ export class Car {
         // where a road crosses a curve) is reached from the link after the joint, so it rolls onto that link and stops there
         const line = d - stopDist(n), roll = remaining + GAP + 1;
         if (graph.needsControl(n, x)) { gap = Math.min(gap, Math.max(line, roll)); break; }
+        // ponytail: assumes the lane it takes past this node all the way; a car that moves out later slowed a little for nothing
+        if (x?.ring && ring >= 0 && graph.innerExit(x.lanes[ring], this.path[j + 2])) { gap = Math.min(gap, Math.max(d - x.length / 2 + GAP, roll)); break; }
         if (keep(n, d, x)) { gap = Math.min(gap, line); break; }
       }
     }
@@ -186,9 +192,16 @@ export class Car {
       // braked down to by the node box; so a car also slows down before a slower tier
       // ponytail: one node ahead only; a sharper corner < ~35px (braking distance) past it is taken late, walk this.path if that shows
       const cos = ((node.x - lane.from.x) * (nextLane.to.x - node.x) + (node.y - lane.from.y) * (nextLane.to.y - node.y)) / (lane.edge.length * nextLane.edge.length);
-      const v = Math.max(TURN_SPEED, Math.min(this.top(lane.edge, graph), this.top(nextLane.edge, graph)) * cos);
+      // the arc onto or off a ring spans half a chord: past the plain case (an arm's first lane, the outer ring lane) it hooks (an arm
+      // lane further out meets the ring further round) or swings across lanes, so half the corner speed
+      // ponytail: one factor for every such arc; derive it from the arc's curvature if wide arms crawl
+      const [r, o] = lane.edge.ring ? [lane, nextLane] : [nextLane, lane];
+      const deep = !lane.edge.ring !== !nextLane.edge.ring && (r.offset < 0 || Math.abs(o.offset) > LANE_W / 2) ? 1 : 0;
+      const v = Math.max(TURN_SPEED * (1 - 0.5 * deep), Math.min(this.top(lane.edge, graph), this.top(nextLane.edge, graph)) * cos);
       target = Math.min(target, Math.sqrt(v * v + 2 * BRAKE * Math.max(0, remaining - NODE_R)));
     }
+    // no speeding up within NODE_R past the node onto or off a ring (its arc)
+    if (this.prev && this.s < NODE_R && !lane.edge.ring !== !graph.edgeBetween(this.prev, lane.from)?.ring) target = Math.min(target, Math.max(this.speed, TURN_SPEED * 0.6));
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
     this.brake = target < this.speed || this.speed < 1;
     const s0 = this.s;
@@ -222,6 +235,8 @@ export class Car {
     this.s = ns;
     this.queued = false;
     this.path = null;
+    // a ring's chords are shorter than a car: its entry is clear once it passes the next ring node
+    if (this.clearing && lane.edge.ring && nextLane.edge.ring) { this.clearing.occupants.delete(this); this.clearing = null; }
     if (this.granted === node) { this.clearing?.occupants.delete(this); this.clearing = node; this.granted = null; }
     return 'ok';
   }

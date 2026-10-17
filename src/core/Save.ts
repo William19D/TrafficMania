@@ -10,7 +10,7 @@ import type { Commuter, Parts } from '../entities/Building.ts';
 import type { Trip, TripReport } from '../entities/Trip.ts';
 import { RoadGraph, clearR } from '../network/RoadGraph.ts';
 import { dist } from '../util/geom.ts';
-import type { Control, RingSize, RoadType, Spoke } from '../network/RoadGraph.ts';
+import type { Control, RingLanes, RingSize, RoadType, Spoke } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
 import { milestonesAt, run0 } from './Campaign.ts';
@@ -41,8 +41,8 @@ export interface SaveData {
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number; ring?: RingSize }[];
   edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number; ring?: Ref }[];
-  // absent before ring roundabouts (a 'roundabout' node is rebuilt as a ring on load)
-  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[]; spokes?: (Spoke | null)[] }[];
+  // absent before ring roundabouts (a 'roundabout' node is rebuilt as a ring on load); lanes: absent before multi-lane rings (1)
+  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[]; spokes?: (Spoke | null)[]; lanes?: RingLanes }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -82,7 +82,7 @@ export function serialize(g: Game): string {
       a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
       ring: e.ring ? ri.get(e.ring) : undefined,
     })),
-    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!), spokes: r.nodes.map(v => r.spokes.get(v) ?? null) })),
+    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!), spokes: r.nodes.map(v => r.spokes.get(v) ?? null), lanes: r.lanes })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,
   };
@@ -115,7 +115,7 @@ export function deserialize(json: string): Game {
   const N = d.nodes.map(({ x, y, b, ...n }) => Object.assign(graph.addNode(x, y, b < 0 ? null : B[b]), n));
   const R = (d.rings ?? []).map(x => {
     const hub = Object.assign(graph.node(x.x, x.y), { control: 'roundabout', ring: x.size, controlDay: x.day } as const), nodes = x.nodes.map(i => N[i]);
-    const r = { hub, nodes, spokes: new Map(nodes.flatMap((v, i) => x.spokes?.[i] ? [[v, x.spokes[i]!] as const] : [])) };
+    const r = { hub, nodes, spokes: new Map(nodes.flatMap((v, i) => x.spokes?.[i] ? [[v, x.spokes[i]!] as const] : [])), lanes: x.lanes ?? 1 };
     graph.rings.push(r);
     return r;
   });
@@ -157,8 +157,8 @@ export function deserialize(json: string): Game {
 // settings, the feed, the camera hooks and the terrain stay; picks and selections into the old objects go.
 // ponytail: a whole save per step (cars go back to their doors, the clock rewinds to the step); diff the graph if undo must keep the sim
 export function restore(g: Game, json: string): void {
-  const n = deserialize(json), { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version } = g;
-  Object.assign(g, n, { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version: version + 1 });
+  const n = deserialize(json), { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, ringLanes, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version } = g;
+  Object.assign(g, n, { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, ringLanes, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version: version + 1 });
   if (tool === 'place') g.setTool('road');
 }
 

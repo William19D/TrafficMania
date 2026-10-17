@@ -2,10 +2,10 @@ import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, shoreSplits, findStarterTown } from '../world/MapGenerator.ts';
-import type { Control, Node, Edge, EdgeFlags, Lane, RingSize, RoadType } from '../network/RoadGraph.ts';
+import type { Control, Node, Edge, EdgeFlags, Lane, RingLanes, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { clonePlan, edgeAngle, planFits, planOf } from '../network/Junction.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, RINGS, clearR, onRing, ringOut, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, RINGS, clearR, onRing, ringCost, ringOut, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
@@ -179,8 +179,9 @@ export class Game {
   roadType: RoadType = { ...DEFAULT_TYPE };
   // Grid tool block size in tiles
   gridSize: 3 | 4 | 6 = 4;
-  // Roundabout tool: size of the next ring (RINGS)
+  // Roundabout tool: size of the next ring (RINGS) and its ring lanes (up to the size's rl)
   ringSize: RingSize = 0;
+  ringLanes: RingLanes = 1;
   // Road tool: true = new roads curve to meet the roads they join (tangentAt), false = always straight; a drag bends either
   roadCurve = true;
   // Interchange tool: the junction picked and the template shown on it
@@ -1083,21 +1084,22 @@ export class Game {
     return this.edgePrice(e) * this.refundX(e.day);
   }
 
-  controlPrice(kind: Control, ring: RingSize = this.ringSize): number {
-    return CONTROL_COST[kind] * (kind === 'roundabout' ? RINGS[ring].cost : 1);
+  controlPrice(kind: Control, ring: RingSize = this.ringSize, lanes: RingLanes = this.ringLanes): number {
+    return CONTROL_COST[kind] * (kind === 'roundabout' ? ringCost(ring, Math.min(lanes, RINGS[ring].rl) as RingLanes) : 1);
   }
 
   // less a ring's fresh spokes (RoadGraph.spokesOf), which its removal lays
   controlRefund(n: Node): number {
     const r = n.control === 'roundabout' ? this.graph.ringOf(n) : null;
     const spokes = r ? this.graph.spokesOf(r, this.today).filter(x => x.fresh).reduce((m, { v, a, s }) => m + this.price(r.hub, v, { ...a, type: s.type }), 0) : 0;
-    return this.controlPrice(n.control, n.ring) * this.refundX(n.controlDay) - spokes;
+    return this.controlPrice(n.control, n.ring, r?.lanes ?? 1) * this.refundX(n.controlDay) - spokes;
   }
 
   upkeepPerDay(): number {
     let sum = 0;
     for (const e of this.graph.edges) sum += this.edgePrice(e) * T.UPKEEP_RATE;
-    for (const n of [...this.graph.nodes, ...this.graph.rings.map(r => r.hub)]) sum += CONTROL_UPKEEP[n.control] * (n.control === 'roundabout' ? RINGS[n.ring].cost : 1);
+    for (const n of this.graph.nodes) sum += CONTROL_UPKEEP[n.control];
+    for (const r of this.graph.rings) sum += CONTROL_UPKEEP.roundabout * ringCost(r.hub.ring, r.lanes);
     for (const b of this.buildings) if (b.special) sum += SPECIALS[b.special].upkeep;
     return sum * DIFFICULTY[this.cfg.difficulty].upkeep;
   }
@@ -1938,7 +1940,7 @@ export class Game {
   placeControl(p: Vec, kind: Control): void {
     const r = this.graph.ringAt(p, 4), n = r?.hub ?? this.graph.nearestNode(p, NODE_R + 6);
     if (!n || n.building || (!r && n.edges.length < 3)) { this.say('Place on an intersection'); return; }
-    this.setControl(n, kind, kind === 'roundabout' ? this.ringSize : undefined);
+    this.setControl(n, kind, kind === 'roundabout' ? this.ringSize : undefined, kind === 'roundabout' ? this.ringLanes : undefined);
   }
 
   // Why a ring of this size does not fit at junction n, or round ring hub n for a resize ('' = it fits): at most RINGS arms of at most
@@ -1974,19 +1976,19 @@ export class Game {
   }
 
   // Switching sells the old control under the refund rule; 'none' just sells it. A roundabout (n: its hub or one of its nodes) keeps its
-  // size unless one is given (the tool's for a new one); a resize is a switch. A ring is built round the junction or taken out (back to
+  // size and ring lanes unless given (the tool's for a new one; lanes capped by the size); a resize or lane change is a switch. A ring is built round the junction or taken out (back to
   // one node joining the arms), the cars on the pieces that go back to their origins, and the open panel follows. Driveways joining
   // inside the new ring's clear radius are laid again outside it.
-  setControl(n: Node, kind: Control, ring?: RingSize): boolean {
+  setControl(n: Node, kind: Control, ring?: RingSize, lanes?: RingLanes): boolean {
     const g = this.graph, r = g.ringOf(n);
     if (r) n = r.hub;
-    const size = ring ?? (r ? n.ring : this.ringSize);
-    if (n.control === kind && (kind !== 'roundabout' || n.ring === size)) return true;
+    const size = ring ?? (r ? n.ring : this.ringSize), k = Math.min(lanes ?? r?.lanes ?? this.ringLanes, RINGS[size].rl) as RingLanes;
+    if (n.control === kind && (kind !== 'roundabout' || (n.ring === size && r?.lanes === k))) return true;
     const locked = kind === 'roundabout' ? this.lockOf('roundabout') : '';
     if (locked) { this.say(locked); return false; }
     const tight = kind === 'roundabout' ? this.ringRoom(n, size) : '';
     if (tight) { this.say(tight); return false; }
-    const cost = this.controlPrice(kind, size) - this.controlRefund(n);
+    const cost = this.controlPrice(kind, size, k) - this.controlRefund(n);
     if (cost > this.money) { this.say('Not enough money'); return false; }
     let m = n;
     if (r) { const x = g.removeRing(r, this.today); this.dropCars(x.cars); m = x.node; }
@@ -1994,7 +1996,7 @@ export class Game {
       const drives = g.edges.filter(e => e.drive && [e.a, e.b].some(v => !v.building && dist(v, m) < clearR(size)));
       for (const e of drives) this.dropCars(g.removeEdge(e));
       // ponytail: ringRoom passed, so every arm reaches the circle and the build cannot fail
-      const b = g.buildRing(m, size, this.today)!;
+      const b = g.buildRing(m, size, this.today, k)!;
       this.dropCars(b.cars);
       m = b.ring.hub;
       if (drives.length) this.connect();
