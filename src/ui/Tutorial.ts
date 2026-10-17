@@ -31,6 +31,7 @@ const mid = (g: Game): Vec[] => {
 // Junctions of real roads (driveways make T-junctions of their own)
 const junctions = (g: Game) => g.graph.nodes.filter(n => !n.building && n.edges.filter(e => !e.drive).length >= 3);
 const lights = (g: Game) => g.graph.nodes.filter(n => n.control === 'light');
+const homeLots = (g: Game) => g.lots.filter(l => l.zone === 'home').length;
 const reaches = (g: Game, from: Building[], to?: Building): boolean => !!to && from.some(h => !!findPath(g.graph, h.node, to.node));
 
 // Built per start(): targets come from the live town (any zone the map could not place falls back to the first building)
@@ -39,7 +40,7 @@ export function tutorialSteps(g: Game): Step[] {
   const office = g.buildings.find(b => b.kind === 'office') ?? g.buildings[0];
   const shop = g.buildings.find(b => b.kind === 'shop') ?? g.buildings[0];
   const door = (b?: Building): Vec[] => b ? [at(b.node)] : [];
-  let placed = homes.length; // homes on the map when the placing step starts
+  let zoned = homeLots(g); // Residential lots when the zoning step starts
   const centre = homes.length ? [{ x: homes.reduce((n, b) => n + b.node.x, 0) / homes.length, y: homes.reduce((n, b) => n + b.node.y, 0) / homes.length }] : [];
   return [
     {
@@ -62,11 +63,10 @@ export function tutorialSteps(g: Game): Step[] {
       hint: '[data-speed="4"]',
     },
     {
-      title: 'Place new buildings', task: 'Press B (or Buildings), then click beside a road to place a home.',
-      text: 'Every level brings a batch of buildings to place; they wait in the tray. Near a road a building turns to face it and gets a free driveway. Keep homes away from factories and busy roads. R turns a building that stands free.',
-      // the tray always holds a home for this step
-      enter: g => { placed = g.buildings.filter(b => b.kind === 'home').length; if (g.tutorialActive) g.tray.home = Math.max(1, g.tray.home); },
-      done: g => g.buildings.filter(b => b.kind === 'home').length > placed, hint: '.buildbtn, .bmenu [data-zone="home"], .tray',
+      title: 'Zone new homes', task: 'Press Z (or Build, then Residential) and drag along a road to paint lots.',
+      text: 'The city grows by itself where you zone: homes, shops, offices and workshops appear on empty lots while their demand bar (top left) is up and traffic flows. A drag zones both sides of the road (Shift: one side); start a drag on a lot of the same zone to erase. Keep homes away from factories and busy roads.',
+      enter: g => { zoned = homeLots(g); topUp(g); }, targets: g => mid(g),
+      done: g => homeLots(g) > zoned, hint: '.buildbtn, .bmenu [data-zone="home"], .tray',
     },
     {
       title: 'Open the shop', task: 'Build a road from the shop door to the middle of one of your roads.',
@@ -95,8 +95,8 @@ export function tutorialSteps(g: Game): Step[] {
       done: g => g.overlay === 'heat', hint: '[data-view="heat"]',
     },
     {
-      title: 'Money and levels', task: 'Press Finish and keep the traffic flowing!',
-      text: 'The money chip shows your balance and the net per day: taxes from residents (more when they are happy) and business income, minus road upkeep. Demolish refunds a road built today in full, an older one by half. The people chip shows the next level: it brings new buildings and unlocks road tiers and tools. Go bankrupt or let happiness collapse and the game ends.',
+      title: 'Money and growth', task: 'Press Finish and keep the traffic flowing!',
+      text: 'The money chip shows your balance and the net per day: taxes from residents (more when they are happy) and business income, minus road upkeep. Demolish refunds a road built today in full, an older one by half. The people chip shows the next level: it unlocks road tiers and tools. Buildings stuck in bad traffic get a pin with a countdown and are abandoned when it runs out; below $0 the bank lends you money.',
       hint: '.chip.money, .chip.people',
     },
   ];

@@ -7,9 +7,10 @@ import type { Vec } from '../util/geom.ts';
 import { dist, snapAngle } from '../util/geom.ts';
 import { moveOf, setLink } from '../network/Junction.ts';
 import { cubicPoints, bendControls } from '../util/curve.ts';
+import { commitZone, planZone } from '../core/Zones.ts';
 import { editable, handleAt, linkAt, linkUI, targetAt } from './LaneLinks.ts';
 
-// Number keys follow the dock left to right; Buildings is B, and B again steps through the tray (past the last kind it lets go)
+// Number keys follow the dock left to right; Z toggles the zone brush, Tab steps through its zones (Unzone last)
 export const KEY_TOOLS: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'edit', 'demolish'];
 const CLICK_PX = 6, HIT_PX = 9;
 
@@ -34,6 +35,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let run: Edge[] | null = null; // Edit tool: the run pressed on (bent while dragging)
   let grab: Building | null = null; // Edit tool: the building pressed on (dragging it moves it); then the move being dragged
   let grid: Vec[] = []; // Grid tool: the corner, then the end of the first side
+  let brush: Vec | null = null; // Zone tool: where the drag started
   let shift = false, snap = false; // Shift: straight this road; Ctrl / Alt: its end turns in 15° steps around the anchor
 
   const blocked = () => game.gameOver || game.pendingLevel > 0;
@@ -46,6 +48,8 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     run = null;
     grab = null;
     grid = [];
+    brush = null;
+    game.zonePlan = null;
     linkUI.drag = null;
   };
 
@@ -96,6 +100,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     else if (game.tool === 'interchange') game.pickInterchange(w);
     else if (game.tool === 'demolish') game.demolishAt(w);
     else if (game.tool === 'place') game.placeBuilding(w);
+    else if (game.tool === 'zone') { game.zonePlan = planZone(game, w, w, game.zone, shift); brush = game.zonePlan ? w : null; }
     else game.placeControl(w, game.tool);
   }, { signal });
 
@@ -128,6 +133,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       return;
     }
     if (game.tool === 'grid' && grid.length && !blocked()) { plan = game.planGrid(grid[0], grid[1] ?? w, grid[1] ? w : null); return; }
+    if (game.tool === 'zone' && brush && !blocked()) { game.zonePlan = planZone(game, brush, w, game.zone, shift); return; }
     if (game.tool !== 'road' || blocked()) { if (mode !== 'idle') cancel(); return; }
     if (mode === 'placing' && anchor) plan = autoPlan(anchor, aim(anchor, w));
     else if ((mode === 'pressed' || mode === 'bending') && anchor && end && press) {
@@ -161,6 +167,12 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       } else if (press && !blocked() && dist(press, { x: e.clientX, y: e.clientY }) <= CLICK_PX) {
         game.select(renderer.screenToWorld(e.clientX, e.clientY));
       }
+      cancel();
+      return;
+    }
+    if (game.tool === 'zone') {
+      const p = brush && !blocked() ? planZone(game, brush, renderer.screenToWorld(e.clientX, e.clientY), game.zone, shift) : null;
+      if (p) commitZone(game, p);
       cancel();
       return;
     }
@@ -219,15 +231,17 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
       if (blocked()) return;
       game.speed = game.speed === 0 ? 1 : 0;
     } else if (e.ctrlKey || e.metaKey || e.altKey) return;
-    else if (e.key === 'b' || e.key === 'B') {
-      const k = game.tool === 'place' ? game.nextKind(game.placing) : undefined;
-      if (game.tool !== 'place') { cancel(); game.startPlacing(); }
-      else if (k && ZONE_KEYS.indexOf(k) > ZONE_KEYS.indexOf(game.placing!)) game.startPlacing(k);
-      else game.setTool('road');
+    else if (e.key === 'z' || e.key === 'Z') { cancel(); if (game.tool === 'zone') game.setTool('road'); else game.setZone(game.zone); }
+    else if (e.key === 'Tab' && game.tool === 'zone') {
+      e.preventDefault();
+      const order = [...ZONE_KEYS, null];
+      cancel();
+      game.setZone(order[(order.indexOf(game.zone) + 1) % order.length]);
     } else if ((e.key === 'r' || e.key === 'R') && game.tool === 'place') game.placeAngle += Math.PI / 2;
     else if (e.key === 'v' || e.key === 'V') { game.roadCurve = !game.roadCurve; replan(); }
     else if (e.key === 'Escape' && linkUI.drag) linkUI.drag = null;
-    else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool(game.moving ? 'edit' : 'road'); }
+    else if (e.key === 'Escape' && brush) cancel();
+    else if (e.key === 'Escape') { cancel(); game.select(null); game.ichg = null; if (game.tool === 'place') game.setTool(game.moving ? 'edit' : 'road'); else if (game.tool === 'zone') game.setTool('road'); }
     else if (e.key === 'PageUp' || e.key === '+' || e.key === '=') { e.preventDefault(); game.setLevel(game.level + 1); }
     else if (e.key === 'PageDown' || e.key === '-') { e.preventDefault(); game.setLevel(game.level - 1); }
   }, { signal });
@@ -238,6 +252,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     if (document.body.dataset.tool !== game.tool) document.body.dataset.tool = game.tool;
     if ((mode !== 'idle' || run) && (game.tool !== (run ? 'edit' : 'road') || blocked())) cancel();
     if (grid.length && (game.tool !== 'grid' || blocked())) cancel();
+    if (brush && (game.tool !== 'zone' || blocked())) cancel();
     if (game.selected && game.tool !== 'edit') game.select(null);
     if (game.tool !== 'edit' || !editable(game.inspect) || blocked()) { linkUI.drag = null; linkUI.hover = ''; }
   };
@@ -247,6 +262,6 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
     get anchor() { live(); return grid[0] ?? anchor; },
     get handle() { live(); return handle; },
     get hover() { live(); return blocked() ? null : hover; },
-    get busy() { return mode !== 'idle' || !!run || grid.length > 0 || !!linkUI.drag; },
+    get busy() { return mode !== 'idle' || !!run || grid.length > 0 || !!brush || !!linkUI.drag; },
   };
 }

@@ -18,6 +18,7 @@ import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
+import { commitZone, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
@@ -38,6 +39,7 @@ const blank = (): Game => {
   w.terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: 'temperate' };
   w.graph = new RoadGraph();
   w.buildings = [];
+  w.lots = [];
   w.tutorialActive = true;
   w.money = 1e6;
   w.cityLevel = LEVELS.length;
@@ -483,13 +485,12 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   w.startPlacing('home');
   if (!w.planPlace({ x: 1000, y: 150 })?.road) fail('road shape: no building snaps to the land part of a road over a river');
 }
-// Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed from the tray beside a street face it,
-// get free driveways and a commute between them arrives; pushing the population past level 2's milestone adds its batch to the
-// tray and pays the grant once
+// Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed beside a street face it,
+// get free driveways and a commute between them arrives; pushing the population past level 2's milestone unlocks the avenue and
+// pays the grant once
 {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
   w.cityLevel = 1;
-  w.tray = { ...LEVELS[0].batch };
   w.demandOff = true;
   if (w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, { tier: 'avenue', lanes: 1, oneWay: false }).ok) fail('levels: avenue built at level 1');
   w.setTool('roundabout');
@@ -501,7 +502,6 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   if (!w.placeBuilding({ x: 600, y: 570 })) fail('levels: office not placed');
   const [H, O] = w.buildings;
   if (!H.connected || !O.connected || Math.abs(H.angle - Math.PI / 2) > 1e-9 || Math.abs(O.angle + Math.PI / 2) > 1e-9) fail(`levels: placed ${H.angle} ${O.angle} connected ${H.connected} ${O.connected}`);
-  if (w.tray.home !== LEVELS[0].batch.home - 1 || w.tray.office !== LEVELS[0].batch.office - 1) fail(`levels: tray ${JSON.stringify(w.tray)}`);
   if (w.placeBuilding({ x: 300, y: 440 })) fail('levels: placed a building on top of another');
   w.queueTrip(H, O, 'commute');
   for (let t = 0; t < 20 * 60; t++) w.update(DT);
@@ -510,13 +510,8 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   H.residents = levelPop(2);
   w.update(DT);
   w.update(DT);
-  if (w.cityLevel !== 2 || w.pendingLevel !== 2 || w.tray.home !== LEVELS[0].batch.home - 1 + LEVELS[1].batch.home) fail(`levels: level ${w.cityLevel}, tray ${JSON.stringify(w.tray)}`);
+  if (w.cityLevel !== 2 || w.pendingLevel !== 2) fail(`levels: level ${w.cityLevel}`);
   if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
-  // the last shop placed hands the tool the next kind left (a factory); the last factory puts the tool away
-  w.tray = { home: 0, shop: 1, office: 0, industry: 1 };
-  w.startPlacing('shop');
-  if (!w.placeBuilding({ x: 780, y: 440 }) || w.tool !== 'place' || w.placing !== 'industry') fail(`levels: after the last shop ${w.tool} ${w.placing}`);
-  if (!w.placeBuilding({ x: 800, y: 575 }) || w.tool !== 'road' || w.placing) fail(`levels: after the last factory ${w.tool} ${w.placing}`);
 }
 // Driveways: homes placed facing each other across a street, doors 13px apart along it, share one junction instead of leaving a
 // stretch of road shorter than a truck between two (which locked both), and both commutes arrive
@@ -534,8 +529,8 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   if (w.score !== 2) fail(`driveways: ${w.score} of 2 commutes from facing homes arrived`);
 }
 // Happiness: an identical home 60px from a staffed factory scores 25+ points under one 600px away.
-// Fails: career money below 0 at DEBT_DAYS midnights in a row is bankrupt (the countdown says 1 day before it), city happiness
-// under failHappy from day FAIL_FROM_DAY at FAIL_DAYS midnights is 'unhappy'; creative and the tutorial never fail
+// Fails (Challenge only): money below 0 at DEBT_DAYS midnights in a row is bankrupt (the countdown says 1 day before it), city
+// happiness under failHappy from day FAIL_FROM_DAY at FAIL_DAYS midnights is 'unhappy'; career, creative and the tutorial never fail
 {
   const w = blank(), F = town(w, 1000, 300, 'industry').building!;
   F.staffed = 1;
@@ -547,17 +542,20 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   if (hf - hn < 25) fail(`happiness: home by the factory ${hn.toFixed(0)}, far one ${hf.toFixed(0)}`);
   const midnight = (g: Game) => { g.time = ((g.today + 1) * 24 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
   const d = DIFFICULTY[SIM.difficulty];
-  for (const [mode, tut] of [['career', false], ['creative', false], ['career', true]] as const) {
+  const CH = 'challenge' as GameConfig['mode']; // ponytail: G3 adds the mode to GameConfig
+  for (const [mode, tut] of [[CH, false], ['career', false], ['creative', false], [CH, true]] as const) {
     const g = blank();
     g.cfg = { ...SIM, mode };
     g.tutorialActive = tut;
     g.money = -1;
-    for (let i = 1; i < d.debtDays; i++) midnight(g);
-    if (!tut && mode === 'career' && (g.gameOver || g.alarm?.kind !== 'bankrupt' || g.alarm.days !== 1)) fail(`fail: alarm ${JSON.stringify(g.alarm)} before bankruptcy`);
+    for (let i = 1; i < d.debtDays; i++) { midnight(g); if (mode === CH) g.money = -1; }
+    if (!tut && mode === CH && (g.gameOver || g.alarm?.kind !== 'bankrupt' || g.alarm.days !== 1)) fail(`fail: alarm ${JSON.stringify(g.alarm)} before bankruptcy`);
     for (let i = 0; i < 3; i++) midnight(g);
-    if (g.gameOver !== (mode === 'career' && !tut ? 'bankrupt' : '')) fail(`fail: ${mode}${tut ? ' tutorial' : ''} in debt gave '${g.gameOver}'`);
+    if (g.gameOver !== (mode === CH && !tut ? 'bankrupt' : '')) fail(`fail: ${mode}${tut ? ' tutorial' : ''} in debt gave '${g.gameOver}'`);
+    if ((g.loan > 0) !== (mode === 'career')) fail(`fail: ${mode} in debt took a loan of ${g.loan}`);
   }
   const g = blank();
+  g.cfg = { ...SIM, mode: CH };
   g.tutorialActive = false;
   g.happiness = d.failHappy - 1;
   if (g.alarm?.kind !== 'unhappy' || g.alarm.days !== TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS - 2) fail(`fail: unhappy alarm ${JSON.stringify(g.alarm)} on day 1`);
@@ -720,7 +718,6 @@ for (const [k, b] of Object.entries(BIOMES)) {
   const w = blank(), wg = w.graph, J = wg.addNode(800, 800), R = clearR(2);
   const ends = [[300, 800], [1300, 800], [800, 300]].map(([x, y], i) => town(w, x, y, 'home', i === 2));
   for (const e of ends) w.commitPath(w.planPath([J, e], 0, DEFAULT_TYPE));
-  w.tray.home = 99;
   for (const x of [645, 725, 875, 955]) { w.startPlacing('home'); w.placeBuilding({ x, y: 760 }); }
   w.demandOff = true;
   w.ringSize = 2;
@@ -881,9 +878,9 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 20 * 60 && !done()[2]; t++) w.update(DT);
   expect(2, 'a commute');
   steps[3].enter!(w);
-  w.startPlacing('home');
-  if (done()[3] || !w.placeBuilding({ x: 150, y: 470 })) fail('tutorial: home placing');
-  expect(3, 'placing a home');
+  w.setZone('home');
+  if (done()[3] || !commitZone(w, planZone(w, { x: 500, y: 420 }, { x: 800, y: 420 }, 'home')!)) fail(`tutorial: zoning homes (${w.message})`);
+  expect(3, 'zoning homes');
   if (done()[4]) fail('tutorial: the shop counted before its road');
   w.commitPath(w.planPath([S.node, { x: 600, y: 420 }], 0, street));
   expect(4, 'the shop road');
@@ -897,10 +894,9 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   // a replay on a city in progress (tutorialActive off) tops nothing up
   w.tutorialActive = false;
   w.money = 5;
-  w.tray.home = 0;
   steps[1].enter!(w);
   steps[3].enter!(w);
-  if (w.money !== 5 || w.tray.home !== 0) fail(`tutorial: a replay gave $${w.money - 5} and ${w.tray.home} homes`);
+  if (w.money !== 5) fail(`tutorial: a replay gave $${w.money - 5}`);
 }
 // Short link: plain junctions J1 and J2 only 32px apart (shorter than a car needs to clear J1 before J2's line) with traffic both
 // ways and from both side roads: a car waiting at the next line lets go of the box behind it, so no gridlock and every trip arrives
@@ -920,7 +916,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
   w.demandOff = true;
   w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 900, y: 500 }], 0, street));
-  w.tray.home = w.tray.office = 99;
   for (let x = 150; x < 820; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
   for (const x of [60, 880]) { w.startPlacing('office'); w.placeBuilding({ x, y: 540 }); }
   const [o1, o2] = w.buildings.filter(b => b.kind === 'office');
@@ -936,7 +931,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
   w.demandOff = true;
   w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
-  w.tray.home = w.tray.office = 99;
   for (const x of [60, 1480]) { w.startPlacing('office'); w.placeBuilding({ x, y: 540 }); }
   for (const x of [740, 780]) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
   const [o1, o2] = w.buildings.filter(b => b.kind === 'office'), [h1, h2] = w.buildings.filter(b => b.kind === 'home');
@@ -965,7 +959,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     else road([200, y], [1480, y], y === 450 ? { tier: 'avenue', lanes: 2, oneWay: false } : street);
   }
   road([200, 700], [1160, 450], { tier: 'avenue', lanes: 1, oneWay: false }, 2);
-  w.tray = { home: 999, shop: 999, office: 999, industry: 999 };
   let k = 0;
   const place = (p: Vec): void => { k++; w.startPlacing(k % 11 === 0 ? 'shop' : k % 5 === 0 ? 'office' : k % 37 === 0 ? 'industry' : 'home'); w.placeBuilding(p); };
   for (const y of ys) for (let x = 220; x < 1470; x += 40) for (const d of [-40, 40]) if ((x + y + d) % 120 < 60) place({ x, y: y + d });
@@ -985,12 +978,11 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (maxWait > GIVE_UP_S - 2 || w.stats.failed || smooth < 0.75) fail(`rush hour: longest stop ${maxWait.toFixed(1)}s, ${w.stats.failed} failed, ${(smooth * 100).toFixed(0)}% smooth of ${w.stats.arrived}`);
 }
 // Demolish and move: an office demolished while cars head to it (an occupied one takes a second click) leaves nothing pointing at it
-// (cars, trips, commuters, reports, nodes), its cars on the way head to another workplace, it goes back to the tray, saves and loads, and the sim runs on; a home moved down the street
+// (cars, trips, commuters, reports, nodes), its cars on the way head to another workplace, it is free, saves and loads, and the sim runs on; a home moved down the street
 // keeps its residents and commuters, costs MOVE_COST, and its commuters get home to the new door
 {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
   w.commitPath(w.planPath([{ x: 60, y: 500 }, { x: 1500, y: 500 }], 0, street));
-  w.tray.home = w.tray.office = w.tray.shop = 99;
   for (let x = 150; x < 700; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
   for (const [k, x] of [['office', 300], ['shop', 700], ['office', 1100]] as const) { w.startPlacing(k); w.placeBuilding({ x, y: 540 }); }
   const refs = (what: string): void => {
@@ -1005,16 +997,10 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (let t = 0; t < 6 * HOUR * 60 && (w.cars.filter(c => c.trip.to === O1).length < 2 || !w.reports.some(r => r.to === O1)); t++) w.update(DT);
   const enRoute = w.cars.filter(c => c.trip.to === O1 && !c.trip.back);
   if (enRoute.length < 2) fail(`demolish: only ${enRoute.length} cars headed to the office`);
-  const tray = w.tray.office;
   if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: an occupied office went on the first click');
   const cash = w.money;
-  w.money = 0;
-  if (w.tryDemolish(O1) || !w.buildings.includes(O1)) fail('demolish: went with no money for MOVE_COST');
-  w.money = cash;
-  w.tryDemolish(O1);
-  if (!w.tryDemolish(O1) || w.buildings.includes(O1) || w.tray.office !== tray + 1) fail('demolish: the second click did not remove it into the tray');
-  // back in the tray costs a move, so demolish and re-place never beats Move
-  if (w.money !== cash - TUNING.MOVE_COST) fail(`demolish: cost $${cash - w.money}, not MOVE_COST`);
+  if (!w.tryDemolish(O1) || w.buildings.includes(O1)) fail('demolish: the second click did not remove it');
+  if (w.money !== cash) fail(`demolish: cost $${cash - w.money}`);
   refs('demolish');
   if (!enRoute.some(c => w.cars.includes(c) && c.trip.to !== O1 && c.trip.to.jobs > 0)) fail('demolish: no car on its way was sent to another workplace');
   const json = serialize(w);
@@ -1041,7 +1027,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false }, cues = (): string => { const c = [...w.sfx].join(); w.sfx.clear(); return c; };
   w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 900, y: 500 }], 0, street));
   const built = cues();
-  w.tray.home = 9;
   w.startPlacing('home'); w.placeBuilding({ x: 400, y: 460 });
   const placed = cues();
   w.demolishAt({ x: 800, y: 500 });
@@ -1065,7 +1050,6 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (const x of [40, 120]) w.demolishAt({ x, y: 500 });
   if (stub.length !== 2 || stub.some(e => !e.exit || !w.graph.edges.includes(e)) || w.money !== cash || w.upkeepPerDay() !== up) fail('exits: a split stub piece lost its exit flag');
   w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 1500, y: 500 }], 0, street));
-  w.tray.home = w.tray.industry = w.tray.shop = 99;
   for (let x = 340; x < 760; x += 40) { w.startPlacing('home'); w.placeBuilding({ x, y: 460 }); }
   w.startPlacing('industry'); w.placeBuilding({ x: 1000, y: 540 });
   w.startPlacing('shop'); w.placeBuilding({ x: 1300, y: 540 });
@@ -1079,11 +1063,12 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   while (w.clock < 78) { w.update(DT); invariants(w); }
   if (via(true) < 2 || via(false) < 2 || traded() <= 0) fail(`exits: ${via(true)} exports left, ${via(false)} imports arrived, $${traded()} trade`);
 }
-// No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0)
+// No roads: a career player who builds nothing loses the residents within days (a home with nowhere to go scores 0), but the game
+// goes on (soft fail); nothing grows on the starter lots without a road
 {
-  const w = new Game({ ...SIM, difficulty: 'normal' });
+  const w = new Game({ ...SIM, difficulty: 'normal' }), n = w.buildings.length;
   while (!w.gameOver && w.day < 8) w.update(0.5);
-  if (w.gameOver !== 'unhappy' || w.day > TUNING.FAIL_FROM_DAY + TUNING.FAIL_DAYS) fail(`no roads: '${w.gameOver}' on day ${w.day}`);
+  if (w.gameOver || w.population >= 1 || w.buildings.length !== n || w.lots.length !== n - w.buildings.filter(b => b.kind === 'gate').length) fail(`no roads: '${w.gameOver}' on day ${w.day}, ${w.population} residents, ${w.buildings.length - n} grown`);
 }
 // Building art: every variant's body and chimney stand inside the footprint, offices come in several heights, and a street of
 // ten buildings 50px apart shows at least five looks
@@ -1204,6 +1189,89 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (sizes.join() !== '0,1' || v.graph.nodes.some(n => n.control === 'roundabout') || homes.some(a => homes.some(b => a !== b && !findPath(v.graph, a, b, null, true))))
     fail(`old save: roundabouts loaded as rings of sizes ${sizes}`);
   for (let t = 0; t < 10 * 60; t++) { v.update(DT); invariants(v); }
+}
+// Zones: a street painted both ways pays ZONE_COST a lot; at Residential demand (a fresh town: R >= 0.5) homes grow on the lots of the
+// street the town reaches, none on an unconnected street (no access); with a job shortage (R <= 0) none grow; erasing empty lots
+// refunds them. Gridlock (every street at heat 1, trips giving up) abandons a home after DOWN_H hours with a cause, good traffic for
+// RECOVER_H brings it back, another DOWN_H of gridlock while abandoned clears it and leaves its lot zoned. Lots and growth save and load.
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.tutorialActive = false;
+  w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 1100, y: 500 }], 0, street));
+  w.commitPath(w.planPath([{ x: 100, y: 900 }, { x: 1100, y: 900 }], 0, street));
+  w.startPlacing('office');
+  w.placeBuilding({ x: 1050, y: 540 });
+  const O = w.buildings[0], m0 = w.money, p = planZone(w, { x: 150, y: 500 }, { x: 850, y: 500 }, 'home')!;
+  if (!O.connected || !p?.ok || p.add.length < 36 || p.cost !== p.add.length * TUNING.ZONE_COST.home) fail(`zones: ${p?.add.length} lots for $${p?.cost} (${p?.reason})`);
+  commitZone(w, p);
+  if (w.money !== m0 - p.cost || w.lots.length !== p.add.length) fail(`zones: paid $${m0 - w.money} for ${w.lots.length} lots`);
+  if (planZone(w, { x: 150, y: 500 }, { x: 850, y: 500 }, 'shop')!.rezone.length !== p.add.length) fail('zones: painting another zone over the lots does not re-zone them');
+  commitZone(w, planZone(w, { x: 150, y: 900 }, { x: 850, y: 900 }, 'home')!);
+  const f = w.lots.filter(l => l.y > 700).sort((p, q) => p.x - q.x)[0], inLot = { x: f.x - Math.cos(f.angle) * 5, y: f.y - Math.sin(f.angle) * 5 };
+  const m1 = w.money, e = planZone(w, inLot, { x: 300, y: 900 }, 'home')!;
+  if (lotAt(w, inLot) !== f || !e.erase.length || e.add.length) fail('zones: a drag from a lot of the held zone does not erase');
+  commitZone(w, e);
+  if (w.money !== m1 + e.erase.length * TUNING.ZONE_COST.home || w.lots.some(l => e.erase.includes(l))) fail(`zones: erasing ${e.erase.length} lots refunded $${w.money - m1}`);
+  const hours = (n: number, each = (): void => {}): void => { for (let i = 0; i < n; i++) { each(); zoneHour(w, w.components()); } };
+  hours(8);
+  const homes = (): typeof w.buildings => w.buildings.filter(b => b.kind === 'home');
+  const grown = homes();
+  if (grown.length < 4 || grown.some(b => b.y > 700 || !b.lots.length || b.tier !== 1 || !b.connected)) fail(`zones: ${grown.length} homes grew, ${grown.filter(b => b.y > 700).length} off the town's roads`);
+  if (grown.some(b => Math.abs(b.residents - b.cap * TUNING.PLACED_OCC) > 1e-9)) fail('zones: a grown home did not move in PLACED_OCC full');
+  // a job shortage: R falls to 0 or below and nothing more grows
+  grown[0].residents = 400;
+  hours(1);
+  const n0 = homes().length;
+  hours(8);
+  if (w.demand.home > 0 || homes().length !== n0) fail(`zones: R ${w.demand.home.toFixed(2)} grew ${homes().length - n0} homes`);
+  grown[0].residents = grown[0].cap * TUNING.PLACED_OCC;
+  // gridlock: every street at heat 1 and every recent trip given up
+  const H = grown[1], lot = H.lots[0];
+  const jam = (): void => { for (const x of w.graph.edges) x.heat = 1; for (const b of w.buildings) b.recent = [{ at: w.time, score: 0, shop: false }]; };
+  const flow = (): void => { for (const x of w.graph.edges) x.heat = 0; for (const b of w.buildings) b.recent = [{ at: w.time, score: 1, shop: false }]; };
+  hours(TUNING.DOWN_H - 1, jam);
+  if (H.abandoned || H.downH !== TUNING.DOWN_H - 1 || !H.cause) fail(`gridlock: after ${TUNING.DOWN_H - 1} h abandoned ${H.abandoned}, countdown ${H.downH}, cause ${H.cause?.text}`);
+  hours(1, jam);
+  if (!H.abandoned || H.residents || H.jobs || w.commuters.some(c => c.home === H && c.at === 'home') || !w.message.includes('abandoned')) fail(`gridlock: not abandoned after DOWN_H (${w.message})`);
+  hours(TUNING.RECOVER_H, flow);
+  if (H.abandoned || H.residents !== H.cap * TUNING.PLACED_OCC) fail('gridlock: no recovery after RECOVER_H of good traffic');
+  hours(2 * TUNING.DOWN_H, jam);
+  if (w.buildings.includes(H) || !w.lots.includes(lot) || lot.building || lot.zone !== 'home') fail('gridlock: an abandoned home was not cleared back to a zoned lot');
+  const json = serialize(w), v = deserialize(json);
+  if (serialize(v) !== json || v.lots.length !== w.lots.length || v.lots.some(l => l.building && !l.building.lots.includes(l))) fail('zones: lots do not round-trip');
+  // an older save has no lots: each building gets one of its zone under it
+  const d = JSON.parse(json) as { lots?: unknown; buildings: { tier?: number }[] };
+  delete d.lots;
+  for (const b of d.buildings) delete b.tier;
+  const old = deserialize(JSON.stringify(d));
+  if (old.buildings.some(b => b.kind !== 'gate' && (b.tier || b.lots.length !== 1 || b.lots[0].zone !== b.kind)) || old.lots.length !== old.buildings.length) fail('zones: an old save did not get its lots');
+}
+// Bank: below $0 on the hour a career city borrows LOAN_STEP at a time up to the cap, then it is frozen (zoning refused); interest is
+// charged hourly; Repay pays LOAN_STEP back. Creative never borrows.
+{
+  const hour = (g: Game): void => { g.time = (Math.floor(g.clock) + 1 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
+  const w = blank(), cap = TUNING.LOAN_CAP * DIFFICULTY[SIM.difficulty].money / 40000;
+  w.tutorialActive = false;
+  w.demandOff = true;
+  w.money = -1;
+  hour(w);
+  if (w.loan !== TUNING.LOAN_STEP || w.money < TUNING.LOAN_STEP - 2) fail(`bank: loan ${w.loan}, money ${w.money}`);
+  for (let i = 0; i < 10; i++) { w.money = -1; hour(w); }
+  if (w.loan !== cap || !w.frozen) fail(`bank: loan ${w.loan} of ${cap}, frozen ${w.frozen}`);
+  w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 600, y: 500 }], 0, { tier: 'street', lanes: 1, oneWay: false }), true, 0);
+  if (planZone(w, { x: 150, y: 500 }, { x: 500, y: 500 }, 'home')?.ok) fail('bank: zoning while frozen');
+  w.money = 20000;
+  const i0 = w.ledger.today.interest;
+  hour(w);
+  if (Math.abs(w.ledger.today.interest - i0 - cap * TUNING.LOAN_RATE / 24) > 1e-6) fail(`bank: interest ${w.ledger.today.interest - i0}`);
+  const m = w.money;
+  if (!w.repay() || w.loan !== cap - TUNING.LOAN_STEP || w.money !== m - TUNING.LOAN_STEP || w.frozen) fail(`bank: repay left ${w.loan}`);
+  const c = blank();
+  c.cfg = { ...SIM, mode: 'creative' };
+  c.money = -1;
+  hour(c);
+  if (c.loan) fail('bank: creative borrowed');
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

@@ -74,6 +74,16 @@ export const ZONES: Record<Site, { label: string; w: number; h: number; resident
   industry: { label: 'Factory', w: 56, h: 40, residents: 0, jobs: 25, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
   gate: { label: 'Highway exit', w: 30, h: 16, residents: 0, jobs: 0, fill: '#2F8F5B', out: '#1F6B42', roof: '#3FA36B' },
 };
+// Zones (docs/design/game-v3.md 2): what the brush paints, and the tier-1 building each lot grows (G2 adds the higher tiers).
+// A legacy building (old saves, the starter town) keeps its ZONES footprint and capacity (tier 0).
+export const ZONE_NAME: Record<Zone, string> = { home: 'Residential', shop: 'Commercial', office: 'Office', industry: 'Industrial' };
+export interface TierDef { name: string; lots: number; w: number; h: number; residents: number; jobs: number }
+export const TIER_DEFS: Record<Zone, TierDef[]> = {
+  home: [{ name: 'House', lots: 1, w: 28, h: 24, residents: 30, jobs: 0 }],
+  shop: [{ name: 'Corner shop', lots: 1, w: 28, h: 28, residents: 0, jobs: 10 }],
+  office: [{ name: 'Office', lots: 1, w: 28, h: 36, residents: 0, jobs: 30 }],
+  industry: [{ name: 'Workshop', lots: 1, w: 28, h: 36, residents: 0, jobs: 12 }],
+};
 // Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
 // visit: a visitor from outside the map to a shop or office
 export type Purpose = 'commute' | 'shop' | 'freight' | 'visit';
@@ -84,23 +94,10 @@ export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   visit: { label: 'Visitors', color: '#1FA39A' },
 };
 
-// City levels (career): population to reach each one and the batch of buildings it puts in the tray. LEVELS[0] is the start
-// (the tray next to the starter town). Past the last level every ENDLESS_POP more residents grant ENDLESS_BATCH.
-// Tiers unlock at TIERS[t].level, other features at UNLOCKS[f].level; creative has everything.
-const batch = (home: number, shop: number, office: number, industry: number): Record<Zone, number> => ({ home, shop, office, industry });
-export const LEVELS: { pop: number; batch: Record<Zone, number> }[] = [
-  { pop: 0, batch: batch(6, 1, 3, 0) },
-  { pop: 220, batch: batch(6, 1, 2, 0) },
-  { pop: 400, batch: batch(7, 1, 1, 2) },
-  { pop: 580, batch: batch(8, 2, 2, 1) },
-  { pop: 800, batch: batch(9, 1, 3, 1) },
-  { pop: 1000, batch: batch(10, 2, 3, 1) },
-  { pop: 1250, batch: batch(10, 1, 3, 1) },
-  { pop: 1500, batch: batch(12, 2, 4, 1) },
-  { pop: 1800, batch: batch(12, 2, 4, 1) },
-  { pop: 2100, batch: batch(6, 1, 2, 1) },
-];
-export const ENDLESS_POP = 300, ENDLESS_BATCH = batch(6, 1, 2, 1);
+// City levels (career): population to reach each one; a level-up unlocks tiers (TIERS[t].level) and features (UNLOCKS[f].level)
+// and pays a grant. Past the last level every ENDLESS_POP more residents is one more level. Creative has everything.
+export const LEVELS: { pop: number }[] = [0, 220, 400, 580, 800, 1000, 1250, 1500, 1800, 2100].map(pop => ({ pop }));
+export const ENDLESS_POP = 300;
 export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 'junction' | 'grid' | 'interchange';
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
   roundabout: { level: 2, label: 'Roundabouts' },
@@ -144,8 +141,8 @@ export const TUNING = {
   TAX_RES: 5, TAX_COMMUTE: 2, TAX_SHOP: 4, TAX_FREIGHT: 25,
   FAIL_DAYS: 2, FAIL_FROM_DAY: 4, // career: happiness under DIFFICULTY.failHappy at FAIL_DAYS midnights in a row, from day FAIL_FROM_DAY
   LEVEL_GRANT: 2000,         // $ x level x taxMult on each level-up
-  PLACED_OCC: 0.4,           // a home placed from the tray moves in 40% full
-  MOVE_COST: 300,            // $ to move a building (career), or to demolish one back into the tray
+  PLACED_OCC: 0.4,           // a home that grows on a lot (or is placed) moves in 40% full
+  MOVE_COST: 300,            // $ to move a legacy building (career)
   SNAP_R: 80, DRIVE_GAP: 12, // the ghost snaps to an access road within SNAP_R px, its door DRIVE_GAP px past the road's edge
   POLLUTION_R: 260, NOISE_R: 100, NOISY: 0.35, // factory pollution reach, road noise reach, a tier the place tool warns about
   HEAT_TAU: 10,              // game seconds: congestion (edge heat, junction delay) EMA time constant
@@ -156,4 +153,14 @@ export const TUNING = {
   // $ per export leaving, import arriving, visitor arriving (x taxMult): the ledger's trade
   EXIT_STUB: 160, EXPORT_SHARE: 0.4, IMPORTS_PER_DAY: 3, IMPORT_STOCK: 5, IMPORT_SHOP: 0.5, VISITS: { shop: 4, office: 2 }, OUTSIDE_JOBS: 0.5,
   TAX_EXPORT: 40, TAX_IMPORT: 15, TAX_VISIT: 8,
+  // Zones (game-v3 2). Lots LOT_W px of frontage x LOT_D deep, their front edge DRIVE_GAP past the road's edge; the brush starts within
+  // BRUSH_R of an access road and follows the network up to BRUSH_MAX px; $ per lot (an empty lot unzoned refunds it all)
+  LOT_W: 32, LOT_D: 56, BRUSH_R: 40, BRUSH_MAX: 1500, ZONE_COST: { home: 40, shop: 60, office: 80, industry: 80 },
+  // Growth: each zone accrues max(0, demand) x SPAWN_RATE x growth buildings per hour, on the empty lot with the best access A
+  // (A = A_TRIPS trips + A_HEAT (1 - heat) + A_REACH reach); none under SPAWN_A. Under DOWN_A (or a home under GROW_LO happy) for DOWN_H
+  // hours a building is abandoned, DOWN_H more and it is cleared; abandoned, RECOVER_H hours at RECOVER_A or better bring it back
+  SPAWN_RATE: 1.5, SPAWN_A: 0.35, DOWN_A: 0.35, DOWN_H: 36, RECOVER_A: 0.5, RECOVER_H: 6, A_TRIPS: 0.6, A_HEAT: 0.25, A_REACH: 0.15, NEAR_R: 150,
+  // Bank (soft fail outside Challenge): below $0 on the hour it lends LOAN_STEP up to LOAN_CAP x difficulty money / 40,000, at
+  // LOAN_RATE of the balance per day (charged hourly); repaid by hand in LOAN_STEP
+  LOAN_STEP: 10000, LOAN_CAP: 50000, LOAN_RATE: 0.015,
 } as const;

@@ -25,9 +25,9 @@ type Rect = [number, number, number, number];
 // body: the part that stands up (casts the shadow, height px); chimney: where a factory's smoke leaves
 export interface Look { body: Rect; height: number; chimney: Vec | null }
 
-// The variant's bits set the shape (home: offset, hip roof, chimney, solar panels; office: floors; factory: teeth); its rng the colours
-export function look(kind: Site, v: number): Look {
-  const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2;
+// The variant's bits set the shape (home: offset, hip roof, chimney, solar panels; office: floors; factory: teeth); its rng the colours.
+// H, W: half the footprint's depth and width (a legacy building's ZONES footprint by default)
+export function look(kind: Site, v: number, H = ZONES[kind].h / 2, W = ZONES[kind].w / 2): Look {
   if (kind === 'home') { const d = v & 1 ? 2 : 0; return { body: [-H + 2, -W + 3 + d, 2 * H - 10, 2 * W - 6 - d], height: 4, chimney: null }; }
   if (kind === 'shop') return { body: [-H + 1, -W + 1, 2 * H - 8, 2 * W - 2], height: 5, chimney: null };
   if (kind === 'office') return { body: [-H + 3, -W + 3, 2 * H - 6, 2 * W - 6], height: 3 + 2 * floors(v), chimney: null };
@@ -36,17 +36,17 @@ export function look(kind: Site, v: number): Look {
 }
 const floors = (v: number): number => 2 + (v % 4);
 
-// Cached models per kind, variant and pixel scale (sprites are drawn rotated, one drawImage each); night: the same frame with
-// only its lit windows, which the renderer adds over the night tint
+// Cached models per kind, variant, footprint and pixel scale (sprites are drawn rotated, one drawImage each); night: the same frame
+// with only its lit windows, which the renderer adds over the night tint; grey: an abandoned building, washed out
 export const PAD = 1;
 const sprites = new Map<string, HTMLCanvasElement>();
-export function sprite(kind: Site, v: number, s: number, night = false): HTMLCanvasElement {
-  const key = `${kind}${v}${night ? 'n' : ''}@${s}`;
+export function sprite(kind: Site, v: number, s: number, night = false, w = ZONES[kind].w, h = ZONES[kind].h, grey = false): HTMLCanvasElement {
+  const key = `${kind}${v}${night ? 'n' : ''}${grey ? 'g' : ''}${w}x${h}@${s}`;
   let c = sprites.get(key);
   if (c) return c;
   // ponytail: one scale bucket is in use at a time, so a full cache is from old zooms
   if (sprites.size > 4 * VARIANTS * 4) sprites.clear();
-  const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2;
+  const H = h / 2, W = w / 2;
   c = document.createElement('canvas');
   c.width = Math.ceil((2 * H + 2 * PAD) * s);
   c.height = Math.ceil((2 * W + 2 * PAD) * s);
@@ -56,6 +56,11 @@ export function sprite(kind: Site, v: number, s: number, night = false): HTMLCan
   ctx.lineCap = ctx.lineJoin = 'round';
   if (night) paintNight(ctx, kind, v, H, W, s);
   else paint(ctx, kind, v, H, W);
+  if (grey) {
+    const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+    for (let i = 0; i < d.length; i += 4) { const y = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]; d[i] = d[i + 1] = d[i + 2] = 70 + y * 0.55; }
+    ctx.putImageData(img, 0, 0);
+  }
   sprites.set(key, c);
   return c;
 }
@@ -87,7 +92,7 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
     c.lineWidth = lw;
     c.stroke();
   };
-  const [bx, by, bw, bh] = look(kind, v).body, fx = bx + bw;
+  const [bx, by, bw, bh] = look(kind, v, H, W).body, fx = bx + bw;
 
   if (kind === 'home') {
     const roof = pick(ROOFS), lawn = pick(LAWNS);
@@ -200,7 +205,7 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
       lines([[x + sw - 0.4, by + 0.5, x + sw - 0.4, by + bh - 0.5]], '#BFD8EE', 0.8);
     }
     // chimney
-    const ch = look(kind, v).chimney!;
+    const ch = look(kind, v, H, W).chimney!;
     dot(ch.x, ch.y, 4, '#8F857D');
     dot(ch.x, ch.y, 3, '#A89E95');
     dot(ch.x, ch.y, 1.8, '#4A4541');
@@ -226,7 +231,7 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
 // Lit windows at night, top-down: light spilling from a home's windows and its porch lamp, a shop's glowing front and sign, an
 // office's curtain wall lit in patches, a factory's skylights and yard lamps. Warm, with a soft halo.
 function paintNight(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W: number, s: number): void {
-  const r = mulberry32(v * 4973 + 17), [bx, by, bw, bh] = look(kind, v).body, fx = bx + bw;
+  const r = mulberry32(v * 4973 + 17), [bx, by, bw, bh] = look(kind, v, H, W).body, fx = bx + bw;
   const warm = (x: number, y: number, w: number, h: number, a = 1): void => { c.globalAlpha = a; c.fillStyle = '#FFD27A'; c.fillRect(x, y, w, h); };
   c.shadowColor = '#FFB347';
   c.shadowBlur = 3 * s;

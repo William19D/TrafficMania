@@ -44,7 +44,7 @@ body[data-tool="light"] canvas,
 body[data-tool="roundabout"] canvas { cursor: pointer; }
 body[data-tool="demolish"] canvas { cursor: cell; }
 body[data-tool="edit"] canvas { cursor: pointer; }
-body[data-tool="place"] canvas { cursor: copy; }
+body[data-tool="place"] canvas, body[data-tool="zone"] canvas { cursor: copy; }
 body[data-tool="grid"] canvas { cursor: crosshair; }
 body[data-tool="interchange"] canvas { cursor: pointer; }
 
@@ -366,20 +366,6 @@ kbd {
 #hud .lock { display: none; position: absolute; top: 3px; right: 4px; width: 1em; height: 1em; }
 #hud [aria-disabled="true"] > .lock { display: inline-flex; }
 #hud .lane .lock { top: 1px; right: 1px; width: .8em; height: .8em; }
-.tool .badge {
-  position: absolute;
-  top: -6px; right: -6px;
-  min-width: 1.5em;
-  padding: 0 .35em;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: center;
-}
-.tool .badge.pulse { animation: pulse-badge 1.2s ease-in-out 3; }
-@keyframes pulse-badge { 50% { transform: scale(1.3); box-shadow: 0 0 0 4px var(--accent-soft); } }
 
 /* tutorial hint */
 #hud .hint { animation: hint 1.2s ease-in-out infinite; box-shadow: 0 0 0 3px var(--accent); }
@@ -436,7 +422,6 @@ kbd {
 .buildbtn .chev { position: absolute; top: 2px; right: 4px; width: 1em; height: 1em; transition: transform .16s var(--ease); }
 #hud .buildbtn[aria-expanded="true"] { box-shadow: inset 0 0 0 2px var(--accent); }
 .buildbtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
-#hud .buildbtn.ready[aria-pressed="false"] > .bico .ico { color: var(--accent); }
 .bico { display: inline-flex; }
 /* the active tool's options beside Build (road shape, type, elevation) */
 .ctx.ring > :not(.rsz), .ctx:not(.ring) > .rsz { display: none; }
@@ -462,8 +447,9 @@ kbd {
 .bgrp h3 kbd { font-size: 12px; text-transform: none; }
 .brow { display: flex; gap: 6px; align-items: stretch; }
 #hud .bmenu .zone { flex-direction: column; justify-content: center; gap: .2em; width: auto; min-width: 4.5em; min-height: 4em; font-size: var(--label); }
-.bmenu .zone .zn { margin: 0; padding: 0; color: var(--muted); }
-.bnone { align-self: center; max-width: 10em; color: var(--muted); font-size: var(--label); }
+#hud .bmenu .zone { position: relative; }
+.bmenu .zone .dm { position: absolute; top: 6px; right: 6px; }
+.bmenu .zone .dm i { width: 5px; height: 16px; }
 
 /* ---------- E: toasts ---------- */
 .toasts {
@@ -575,7 +561,7 @@ kbd {
 .stats b { font-size: 1.5em; }
 .modal .actions { display: flex; justify-content: flex-end; margin-top: 1.25em; }
 
-/* H: bottom-left column above the dock line: the building tray, then the car colour legend */
+/* H: bottom-left column above the dock line: the zone brush (while it is held), then the car colour legend */
 .leftcol {
   position: absolute;
   left: var(--edge-l);
@@ -589,13 +575,27 @@ kbd {
 .tray-h { font-size: var(--label); color: var(--muted); font-weight: 600; padding: 0 .375em; }
 #hud .zone { display: flex; align-items: center; gap: .5em; width: 100%; padding: .375em .5em; border-radius: 8px; font-weight: 600; }
 #hud .zone[aria-pressed="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
-.zone .zn { margin-left: auto; padding-left: .75em; }
+.zone .dm { margin-left: auto; padding-left: .75em; }
+.tray-f { font-weight: 500; padding-top: .25em; }
+.zone.unzone > .ico { width: 2em; height: 2em; padding: .3em; margin-right: .25em; color: var(--danger); }
+/* zone demand (game-v3 2): a thin vertical track per zone, filled up from its middle for demand (zone colour), down in red for a surplus */
+.chip.demand { gap: 5px; padding: 0 .5em; }
+.dm { display: inline-flex; flex-direction: column; align-items: center; }
+.dm i { position: relative; display: block; width: 6px; height: 22px; border-radius: 2px; background: #E6E3DC; box-shadow: var(--well); overflow: hidden; }
+.dm i::after { content: ''; position: absolute; left: 0; right: 0; bottom: 50%; height: calc(var(--d, 0) * 50%); background: var(--zc); }
+.dm i::before { content: ''; position: absolute; left: 0; right: 0; top: calc(50% - .5px); height: 1px; background: rgba(0, 0, 0, .18); }
+.dm.neg i::after { bottom: auto; top: 50%; background: var(--danger); }
+.dm small { margin-top: 1px; font-size: 10px; font-weight: 700; line-height: 1; color: var(--muted); }
+.dm[data-z="home"] { --zc: #5E9C4C; }
+.dm[data-z="shop"] { --zc: #3F7FC0; }
+.dm[data-z="office"] { --zc: #7468A8; }
+.dm[data-z="industry"] { --zc: #C08A2E; }
+/* bank loan: a chip that repays on click */
+#hud .chip.loan { --hue: #B07A1E; border: 1px solid transparent; background: none; font: inherit; color: inherit; cursor: pointer; }
 .zpic { display: inline-block; flex: none; width: 1.4em; height: 1.4em; margin-right: .25em; vertical-align: -.3em; }
 .tray-h kbd { margin-left: .25em; font-size: 12px; }
 #hud .zone { min-height: 2.75em; }
 .zone .zpic { width: 2em; height: 2em; }
-/* buildings wait in the tray: the dock's Buildings icon takes the accent until the tool is picked */
-#hud .tool.ready[aria-pressed="false"] > .ico { color: var(--accent); }
 .lvl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
 .lvl-grid > div { padding: .75em 1em; background: var(--soft); border-radius: 10px; }
 .lvl-grid h3 { margin: 0 0 .5em; font-size: var(--label); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -924,7 +924,7 @@ kbd { background: #F3F1EB; box-shadow: 0 1px 0 rgba(60, 50, 30, .14); }
 .tool[data-tool="light"], .bico[data-t="light"] { --hue: #E08A00; }
 .tool[data-tool="roundabout"], .bico[data-t="roundabout"] { --hue: #0F9C9C; }
 .tool[data-tool="interchange"], .bico[data-t="interchange"] { --hue: #4F5BD5; }
-.tool[data-tool="place"], .bico[data-t="place"] { --hue: #2E9E5B; }
+.tool[data-tool="place"], .bico[data-t="place"], .tool[data-tool="zone"], .bico[data-t="zone"] { --hue: #2E9E5B; }
 .tool[data-tool="edit"] { --hue: #2F6FED; }
 .tool[data-tool="demolish"] { --hue: #E5484D; }
 .bico[data-t="build"], .bico:not([data-t]) { --hue: #EA6F1A; }
@@ -940,13 +940,7 @@ kbd { background: #F3F1EB; box-shadow: 0 1px 0 rgba(60, 50, 30, .14); }
 #hud .tool:hover > .ico:not(.lock, .chev), #hud .tool:hover > .bico > .ico { filter: brightness(1.1) saturate(1.1); }
 #hud .tool[aria-pressed="true"] > .ico:not(.lock, .chev), #hud .tool[aria-pressed="true"] > .bico > .ico { box-shadow: 0 0 0 2px #fff; }
 #hud .tool.destroy[aria-pressed="true"] > .ico { box-shadow: 0 0 0 2px #fff, 0 0 0 4px rgba(229, 72, 77, .35); }
-/* waiting buildings: the tile glows instead of turning blue */
-#hud .tool.ready[aria-pressed="false"] > .ico:not(.lock), #hud .buildbtn.ready[aria-pressed="false"] > .bico .ico {
-  color: #fff;
-  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--accent);
-}
 #hud [aria-disabled="true"] > .ico:not(.lock) { filter: grayscale(1); }
-.tool .badge { background: var(--accent); box-shadow: 0 0 0 2px #fff; }
 
 /* resource badges: round solid coins in the resource's colour */
 .chip.money { --hue: #2E9E5B; }

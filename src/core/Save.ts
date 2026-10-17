@@ -11,6 +11,7 @@ import type { Trip, TripReport } from '../entities/Trip.ts';
 import { RoadGraph } from '../network/RoadGraph.ts';
 import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
+import { adoptLots, demandOf } from './Zones.ts';
 
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
@@ -18,10 +19,13 @@ interface BuildingData {
   kind: Site; x: number; y: number; angle: number; residents: number; stock: number; staffed: number; shopAcc: number; truckAcc: number;
   importAcc?: number; visitAcc?: number; // absent before outside connections
   happy: number; parts: Parts; recent: Building['recent']; pending: TripData[]; parked: TripData[];
+  tier?: number; abandoned?: boolean; access?: number; downH?: number; upH?: number; // absent before zones (a legacy building)
 }
 export interface SaveData {
   v: 1; cfg: GameConfig; time: number; lastHour: number; assignAt: number; money: number; score: number; upkeepDay: number;
-  cityLevel: number; tray: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
+  // tray: before zones (ignored); lots, loan, spawnAcc: absent before them (each building then gets a lot of its own)
+  cityLevel: number; tray?: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
+  lots?: { x: number; y: number; angle: number; w: number; zone: Zone; b: Ref }[]; loan?: number; spawnAcc?: Record<Zone, number>;
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
@@ -46,11 +50,13 @@ export function serialize(g: Game): string {
   };
   const data: SaveData = {
     v: 1, cfg: g.cfg, time: g.time, lastHour: g.lastHour, assignAt: g.assignAt, money: g.money, score: g.score, upkeepDay: g.upkeepDay,
-    cityLevel: g.cityLevel, tray: g.tray, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
-    stats: g.stats, ledger: g.ledger, roadType: g.roadType,
+    cityLevel: g.cityLevel, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
+    stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc,
+    lots: g.lots.map(l => ({ x: l.x, y: l.y, angle: l.angle, w: l.w, zone: l.zone, b: l.building ? bi.get(l.building)! : -1 })),
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
       truckAcc: b.truckAcc, importAcc: b.importAcc, visitAcc: b.visitAcc, happy: b.happy, parts: b.parts, recent: b.recent, parked: b.parked.map(t => trip(t)),
+      tier: b.tier, abandoned: b.abandoned, access: b.access, downH: b.downH, upH: b.upH,
       // a car on the road waits at its origin's door again
       pending: [...b.pending.map(t => trip(t)), ...g.cars.filter(c => c.trip.from === b).map(c => trip(c.trip, g.time))],
     })),
@@ -80,7 +86,13 @@ export function deserialize(json: string): Game {
     Object.assign(b, { residents: x.residents, stock: x.stock, staffed: x.staffed, shopAcc: x.shopAcc, truckAcc: x.truckAcc, happy: x.happy, parts: x.parts, recent: x.recent });
     b.importAcc = x.importAcc ?? 0;
     b.visitAcc = x.visitAcc ?? 0;
+    Object.assign(b, { tier: x.tier ?? 0, abandoned: x.abandoned ?? false, access: x.access ?? 0.7, downH: x.downH ?? 0, upH: x.upH ?? 0 });
     return b;
+  });
+  g.lots = (d.lots ?? []).map(({ b, ...l }) => {
+    const lot = { ...l, building: b < 0 ? null : B[b] };
+    lot.building?.lots.push(lot);
+    return lot;
   });
   const C = g.commuters = d.commuters.map(c => ({ ...c, home: B[c.home], work: c.work < 0 ? null : B[c.work] }));
   const trip = (t: TripData): Trip => ({ ...t, from: B[t.from], to: B[t.to], who: t.who < 0 ? null : C[t.who], jam: null });
@@ -100,8 +112,12 @@ export function deserialize(json: string): Game {
   }
   g.reports = d.reports.map(r => ({ ...r, from: B[r.from], to: B[r.to] }));
   Object.assign(g.metrics, d.metrics);
-  const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
-  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, roadType });
+  const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
+  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, roadType });
+  g.loan = d.loan ?? 0;
+  if (d.spawnAcc) g.spawnAcc = d.spawnAcc;
+  if (!d.lots) adoptLots(g);
+  g.demand = demandOf(g);
   g.ledger = { today: { ...ledger0(), ...ledger.today }, yesterday: { ...ledger0(), ...ledger.yesterday } };
   // ponytail: the exits of an older save go down over whatever the player built there
   if (d.buildings.some(x => x.importAcc === undefined)) g.addExits();

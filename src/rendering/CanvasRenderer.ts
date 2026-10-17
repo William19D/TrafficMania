@@ -1,14 +1,16 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
-import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
+import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
 import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, onRing, ringOut, roadWidth } from '../network/RoadGraph.ts';
 import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
 import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
+import type { Lot } from '../core/Zones.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
 import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
+import { corners, lotAt, lotRect } from '../core/Zones.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
 import { birds, boats, cloudShadows, pedestrians } from './Ambience.ts';
@@ -233,6 +235,7 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
     };
     halo(0);
+    this.lots(game);
 
     // Ground roads: the cached static layer, then the live lane arrows, heat, signals and signs over it
     const nodes0 = levelNodes(0);
@@ -282,6 +285,7 @@ export class CanvasRenderer {
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
     if (game.armed) this.outlineB(game.armed, RED, 6);
+    if (game.zonePlan && game.tool === 'zone') this.zonePreview(game);
 
     // Followed car: its route ahead as a dashed accent line, and a ring around it
     if (fc) {
@@ -388,10 +392,11 @@ export class CanvasRenderer {
     for (const b of game.buildings) {
       const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
       if (b.connected) {
+        if (b.downH) { this.pin(b, top, over); continue; }
         // homes: a red dot while households are moving out (every home's happiness under an overlay), residents and happiness under the cursor
-        if (b.kind !== 'home') continue;
+        if (b.kind !== 'home' || b.abandoned) continue;
         if (b.happy < TUNING.GROW_LO || game.overlay !== 'none') { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, happyColor(b.happy)); }
-        if (over) this.text(b.residents < 1 ? `Abandoned · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${ZONES.home.residents} residents · ${Math.round(b.happy)}% happy`,
+        if (over) this.text(b.residents < 1 ? `Empty · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${b.cap} residents · ${Math.round(b.happy)}% happy`,
           b.x, top, 'bold 11px system-ui', b.happy < TUNING.GROW_LO ? RED : DARK);
         continue;
       }
@@ -403,6 +408,86 @@ export class CanvasRenderer {
     }
 
     this.offscreenMarkers(game, dpr);
+  }
+
+  // Downgrade pin (Mini Motorways): amber with a ring counting down to abandonment (grey and red for an abandoned building, toward
+  // clearing); under the cursor its cause, and a dashed line to where to fix it
+  private pin(b: Building, top: number, over: boolean): void {
+    const ctx = this.ctx, y = top - 4, k = Math.min(1, b.downH / TUNING.DOWN_H), col = b.abandoned ? RED : AMBER;
+    this.circle(b.x, y, 8, '#FFFFFF');
+    this.circle(b.x, y, 6, b.abandoned ? '#8A8A8A' : col);
+    ctx.beginPath();
+    ctx.arc(b.x, y, 8, -Math.PI / 2, -Math.PI / 2 + k * 2 * Math.PI);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = 'bold 9px system-ui';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('!', b.x, y + 0.5);
+    if (!over || !b.cause) return;
+    const at = b.cause.at;
+    if (at) {
+      ctx.setLineDash([4, 4]);
+      this.polyline([{ x: b.x, y }, at]);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      this.ring(at.x, at.y, 12, col, 2.5);
+    }
+    const left = Math.ceil(TUNING.DOWN_H - b.downH);
+    this.text(`${b.cause.text} · ${b.abandoned ? 'cleared' : 'abandoned'} in ${left} h`, b.x, y - 16, 'bold 11px system-ui', b.abandoned ? RED : DARK);
+  }
+
+  // Zoned lots: an empty one a dashed plot in its zone's colours, a built one a faint plot under its building
+  private lots(game: Game): void {
+    const ctx = this.ctx;
+    for (const l of game.lots) {
+      const z = ZONES[l.zone], r = lotRect(l);
+      this.polyline(corners({ ...r, w: r.w - 3, h: r.h - 3 }), true);
+      ctx.globalAlpha = l.building ? 0.2 : 0.4;
+      ctx.fillStyle = z.roof;
+      ctx.fill();
+      if (!l.building) {
+        ctx.globalAlpha = 0.9;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = z.out;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Zone brush drag: the path along the roads, the lots it adds (zone colours), re-zones (new colours, red where a building goes) or
+  // erases (red dashed), and the label: lots, price and the demand it answers, or why not
+  private zonePreview(game: Game): void {
+    const ctx = this.ctx, p = game.zonePlan!, z = p.zone ? ZONES[p.zone] : null;
+    ctx.globalAlpha = 0.35;
+    this.polyline(p.path);
+    ctx.strokeStyle = p.ok ? ACCENT : RED;
+    ctx.lineWidth = 10;
+    ctx.stroke();
+    const plot = (l: Lot, fill: string | null, out: string, dash: boolean): void => {
+      const r = lotRect(l);
+      this.polyline(corners({ ...r, w: r.w - 3, h: r.h - 3 }), true);
+      if (fill) { ctx.globalAlpha = 0.6; ctx.fillStyle = fill; ctx.fill(); }
+      ctx.globalAlpha = 1;
+      if (dash) ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = out;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    if (z) for (const l of p.add) plot(l, z.roof, z.out, false);
+    if (z) for (const l of p.rezone) plot(l, z.roof, l.building ? RED : z.out, false);
+    for (const l of p.erase) plot(l, null, RED, true);
+    ctx.globalAlpha = 1;
+    const end = p.path[p.path.length - 1];
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    this.text(p.ok ? p.label : '⚠ ' + p.reason, end.x + 14, end.y - 10, 'bold 12px system-ui', p.ok && !p.demolish ? '#2E8B4A' : RED);
   }
 
   // Screen-edge markers for buildings without a road outside the view: zone-coloured square, red arrow toward it
@@ -567,7 +652,7 @@ export class CanvasRenderer {
   // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
   // dashed red outline.
   private building(b: Building, time: number): void {
-    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.kind, v), alpha = ctx.globalAlpha;
+    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.kind, v, h, w), alpha = ctx.globalAlpha;
     const c = Math.cos(b.angle), sn = Math.sin(b.angle), toWorld = (x: number, y: number): Vec => ({ x: b.x + x * c - y * sn, y: b.y + x * sn + y * c });
     // shadow: the body swept down-right by its height (the hull of the body and its offset copy)
     const [bx, by, bw, bh] = L.body, o = L.height;
@@ -580,7 +665,7 @@ export class CanvasRenderer {
     ctx.rotate(b.angle);
     // an empty home (everyone moved out) fades
     if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = alpha * 0.45;
-    const img = sprite(b.kind, v, this.artS);
+    const img = sprite(b.kind, v, this.artS, false, b.w, b.h, b.abandoned);
     ctx.drawImage(img, -h - PAD, -w - PAD, img.width / this.artS, img.height / this.artS);
     b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => {
       ctx.beginPath();
@@ -634,7 +719,7 @@ export class CanvasRenderer {
       if (b) {
         const who = game.occupants(b);
         this.outlineB(b, RED, 4);
-        below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ` · back to the tray · ${fmtMoney(game.moveCost)}`}`, b, RED);
+        below(game.armed === b ? `Click again: ${who}` : `Demolish ${b.label.toLowerCase()}${b.lots.length ? ' · the lot stays zoned' : ''}`, b, RED);
         return;
       }
       const n = g.ringAt(p, 4)?.hub ?? g.nearestNode(p, NODE_R + 4);
@@ -684,6 +769,13 @@ export class CanvasRenderer {
       else if (!game.ichg) label('Click to pick an interchange', n.x, n.y + 18, ACCENT);
     } else if (game.tool === 'place') {
       this.ghost(game, p);
+    } else if (game.tool === 'zone') {
+      // where a drag would start, and whether it paints or erases
+      const hit = g.nearestEdge(p, TUNING.BRUSH_R, 0), on = lotAt(game, p), z = game.zone;
+      if (!hit || hit.edge.drive || hit.edge.ring || !TIERS[hit.edge.type.tier].access) { label('Drag along a road to zone its sides', p.x, p.y, DARK); return; }
+      this.ring(hit.point.x, hit.point.y, NODE_R, z ? ZONES[z].out : RED, 2.5);
+      label(!z ? 'Drag over lots to unzone them' : on?.zone === z ? `Drag to erase ${ZONE_NAME[z]} lots` : `Drag along the road to paint ${ZONE_NAME[z]} · Shift: one side`,
+        hit.point.x, hit.point.y, z ? DARK : RED);
     } else if (game.tool === 'edit') {
       // same order as Game.select: car, junction, building, road
       const c = game.carAt(p);
@@ -702,7 +794,7 @@ export class CanvasRenderer {
       const b = game.buildingUnder(p);
       if (b) {
         this.outlineB(b, ACCENT, 4);
-        below(`${ZONES[b.kind].label}: click for details · drag to move`, b, ACCENT);
+        below(`${b.label}: click for details${b.lots.length ? '' : ' · drag to move'}`, b, ACCENT);
         return;
       }
       const run = game.runAt(p);
@@ -1231,8 +1323,8 @@ export class CanvasRenderer {
     this.lamps(ground, (x, y) => ctx.drawImage(gl, x - R, y - R, 2 * R, 2 * R));
     ctx.globalAlpha = d.night;
     for (const b of game.buildings) {
-      if (b.kind === 'gate' || (b.kind === 'home' && b.residents < 1)) continue;
-      const img = sprite(b.kind, variant(b.x, b.y), this.artS, true);
+      if (b.kind === 'gate' || b.abandoned || (b.kind === 'home' && b.residents < 1)) continue;
+      const img = sprite(b.kind, variant(b.x, b.y), this.artS, true, b.w, b.h);
       ctx.save();
       ctx.translate(b.x, b.y);
       ctx.rotate(b.angle);

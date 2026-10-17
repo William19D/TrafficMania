@@ -1,10 +1,10 @@
 import type { Game, Overlay, Tool } from '../core/Game.ts';
 import type { Ledger, PathPlan } from '../core/Game.ts';
-import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelBatch, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
+import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelPop, levelUnlocks, ZONE_KEYS } from '../core/Game.ts';
 import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
-import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, TUNING as T } from '../core/config.ts';
+import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
 import type { Purpose, Site, Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
@@ -25,13 +25,14 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and lane connections.` },
   roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring is faster and takes more and wider roads, but needs more room). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
-  place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
-  edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and lane connections (drag from a lane to a road), or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
-  demolish: { label: 'Demolish', tip: `Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes back to the tray (${fmtMoney(T.MOVE_COST)} in career; an occupied one takes a second click).` },
+  zone: { label: 'Zones', tip: 'Drag along a road to zone the lots on both sides (Shift: one side); buildings grow there when the zone is in demand and traffic flows. A drag that starts on a lot of the held zone erases. Tab: next zone, Esc stops.' },
+  place: { label: 'Place', tip: 'Click where the building goes. Esc puts it back.' },
+  edit: { label: 'Edit', tip: 'Click a car to follow it, a building for its details, a junction for its control, light phases and lane connections (drag from a lane to a road), or a road to change its type. Drag a road to bend it.' },
+  demolish: { label: 'Demolish', tip: 'Click a road, sign, light, roundabout or building to remove it. Roads refund 100% on the day you built them, 50% later; a building goes for free and its lot stays zoned (an occupied one takes a second click).' },
 };
 // Tools in the Build menu; Edit and Demolish stay in the dock
-const BUILD: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'place'];
-const keyOf = (t: Tool): string => t === 'place' ? 'B' : String(KEY_TOOLS.indexOf(t) + 1);
+const BUILD: Tool[] = ['road', 'grid', 'light', 'roundabout', 'interchange', 'zone'];
+const keyOf = (t: Tool): string => t === 'zone' ? 'Z' : String(KEY_TOOLS.indexOf(t) + 1);
 // Tray picture of a zone: a small front view in its map colours (house, shop with an awning, office tower, factory)
 const ZONE_PIC: Record<Site, (f: string, o: string, r: string) => string> = {
   home: (f, o, r) => `<path d="M5 11h14v10H5z" fill="${f}"/><path d="M2.5 12 12 4l9.5 8z" fill="${r}"/><path d="M10 15h4v6h-4z" fill="${o}"/>`,
@@ -44,7 +45,16 @@ const zonePic = (z: Site): string => {
   const { fill, out, roof } = ZONES[z];
   return `<svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="${out}" stroke-width="1.5" stroke-linejoin="round">${ZONE_PIC[z](fill, out, roof)}</svg>`;
 };
-const count = (n: number): string => n === Infinity ? '∞' : String(n);
+// A zone's brush button: its picture, name and a demand bar (filled up for demand, red down for a surplus); z 'none' = Unzone
+const zoneBtn = (z: Zone | 'none'): string => z === 'none'
+  ? `<button class="zone unzone" data-zone="none" aria-pressed="false" data-tip="Unzone: drag over lots to clear them. An empty lot refunds its price">${icon('demolish')}<span>Unzone</span></button>`
+  : `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONE_NAME[z]}: drag along a road to zone it. ${ZONE_TIP[z]}">${zonePic(z)}<span>${ZONE_NAME[z]}</span><span class="dm" data-z="${z}"><i></i></span></button>`;
+const ZONE_TIP: Record<Zone, string> = {
+  home: 'Homes grow when there are jobs to fill.',
+  shop: 'Shops grow when residents and visitors need somewhere to shop.',
+  office: 'Offices grow when residents lack jobs.',
+  industry: 'Workshops grow when shops need goods and exits take exports.',
+};
 
 const ONEWAY_TIP = 'One-way: half the price, cars only drive in the direction you build';
 const laneTip = (n: number) => `${n} lane${n > 1 ? 's' : ''} per direction. Price ×${n}`;
@@ -96,13 +106,13 @@ const FRIENDLY: Record<string, string> = {
   'Buildings need a ground road': 'Buildings need a ground road: come down to the ground before the door',
   'Nearby roads are in the way': 'Nearby roads are in the way: an interchange needs clear land around the junction',
 };
-const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|None left|No buildings|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
+const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|No room|The bank froze|Repaying takes|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
   [KEY_TOOLS.map(t => TOOLS[t].label).join(' / '), KEY_TOOLS.map(kbd).join(' ')],
-  ['Build menu: roads, junctions, buildings', 'click Build; <kbd>Esc</kbd> or a click outside closes it. The keys pick its tools directly'],
-  ['Place buildings (again: next kind) / turn one', '<kbd>B</kbd> / <kbd>R</kbd>'],
+  ['Build menu: roads, junctions, zones', 'click Build; <kbd>Esc</kbd> or a click outside closes it. The keys pick its tools directly'],
+  ['Zone brush / next zone', '<kbd>Z</kbd> / <kbd>Tab</kbd>; drag along a road (<kbd>Shift</kbd>: one side), start on a lot of the zone to erase'],
   ['Place road', 'click start, click end'],
   ['Bend road', 'hold on the end point and drag'],
   ['Straight / curved roads', '<kbd>V</kbd> switches; hold <kbd>Shift</kbd> for one straight road'],
@@ -116,7 +126,7 @@ export const CONTROLS: [string, string][] = [
   ['Edit road', `${kbd('edit')}, click to select, drag to bend`],
   ['Edit junction', `${kbd('edit')}, click a junction: control and light phases; drag from a lane to a road to connect it, click a line to remove it`],
   ['Follow a car / building details', `${kbd('edit')}, click it; <kbd>Esc</kbd> stops`],
-  ['Move / demolish a building', `${kbd('edit')}, drag it (<kbd>Esc</kbd> puts it back) / ${kbd('demolish')}, click it`],
+  ['Demolish a building', `${kbd('demolish')}, click it (its lot stays zoned)`],
   ['Heat map / noise and pollution', '<kbd>C</kbd> switches the overlay'],
   ['Metrics / trip reports', '<kbd>M</kbd> / <kbd>T</kbd>'],
   ['Trip purpose dots on vehicles', '<kbd>P</kbd>'],
@@ -239,7 +249,7 @@ function toolBtn(t: Tool): string {
   const k = keyOf(t);
   return `<button class="tool${t === 'demolish' ? ' destroy' : ''}" data-tool="${t}" aria-pressed="false" data-tip="${TOOLS[t].tip}" data-key="${k}">`
     + `<span class="kb" aria-hidden="true">${k}</span>${icon(t)}<span class="lbl">${TOOLS[t].label}</span>`
-    + `${icon('lock', 'lock')}${t === 'place' ? '<b class="badge num" hidden></b>' : ''}</button>`;
+    + `${icon('lock', 'lock')}</button>`;
 }
 
 interface Toast { text: string; el: HTMLElement; n: number; timer: ReturnType<typeof setTimeout> }
@@ -255,7 +265,7 @@ export class HUD {
   helpOpen = false;
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
-    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; tray?: string; trayN?: number; modal?: string;
+    clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
     views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
@@ -284,6 +294,8 @@ export class HUD {
         <div class="chip money" data-tip="Money" tabindex="0">${icon('money')}<b class="num"></b><small class="net num"></small><span class="delta" aria-hidden="true"></span></div>
         <div class="chip people" tabindex="0" data-tip="">${icon('people')}<span class="pp"><span><b class="pv num"></b><small class="pn num"></small></span><span class="pbar"><i></i></span></span></div>
         <div class="chip happy" tabindex="0" data-tip="">${icon('smile')}<b class="hv num"></b></div>
+        <div class="chip demand" tabindex="0" data-tip="" aria-label="Zone demand">${ZONE_KEYS.map(z => `<span class="dm" data-z="${z}"><i></i><small>${ZONE_NAME[z][0]}</small></span>`).join('')}</div>
+        <button class="chip loan" hidden data-action="repay" data-tip="">${icon('money')}<b class="ln num"></b></button>
         <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
         <div class="chip danger alarm" hidden tabindex="0" data-tip="">${icon('warning')}<b class="atxt"></b></div>
@@ -343,7 +355,7 @@ export class HUD {
         </div>
       </div>
       <div class="panel dock" role="toolbar" aria-label="Tools">
-        <button class="tool buildbtn" data-action="build" aria-expanded="false" aria-controls="bmenu" data-tip="Build: roads, junctions and buildings"><span class="bico"></span><span class="lbl">Build</span>${icon('chev', 'chev')}<b class="badge num" hidden></b></button>
+        <button class="tool buildbtn" data-action="build" aria-expanded="false" aria-controls="bmenu" data-tip="Build: roads, junctions and zones"><span class="bico"></span><span class="lbl">Build</span>${icon('chev', 'chev')}</button>
         <div class="ctx" role="group" aria-label="Tool options">
         <button class="lane wide rmode" data-action="curve" data-key="V"></button>
         <div class="seg gsz" role="group" aria-label="Grid block size" hidden>
@@ -382,15 +394,13 @@ export class HUD {
       <div class="panel bmenu" id="bmenu" role="group" aria-label="Build menu">
         <div class="bgrp"><h3>Roads</h3><div class="brow">${toolBtn('road')}${toolBtn('grid')}</div></div>
         <div class="bgrp"><h3>Junctions</h3><div class="brow">${toolBtn('light')}${toolBtn('roundabout')}${toolBtn('interchange')}</div></div>
-        <div class="bgrp"><h3>Buildings <kbd>B</kbd></h3><div class="brow">
-          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
-          <small class="bnone">None waiting: the next level brings more</small>
-        </div></div>
+        <div class="bgrp"><h3>Zones <kbd>Z</kbd></h3><div class="brow">${ZONE_KEYS.map(zoneBtn).join('')}${zoneBtn('none')}</div></div>
       </div>
       <div class="leftcol">
-        <div class="panel tray" role="group" aria-label="Buildings to place">
-          <small class="tray-h">Pick a building <kbd>B</kbd></small>
-          ${ZONE_KEYS.map(z => `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONES[z].label}: pick it, then click the map near a road. B steps to the next kind">${zonePic(z)}<span>${ZONES[z].label}</span><b class="zn num"></b></button>`).join('')}
+        <div class="panel tray" role="group" aria-label="Zone brush" hidden>
+          <small class="tray-h">Zone brush <kbd>Tab</kbd></small>
+          ${ZONE_KEYS.map(zoneBtn).join('')}${zoneBtn('none')}
+          <small class="tray-h tray-f">Shift: one side · bars: demand</small>
         </div>
         <div class="panel legend" role="group" aria-label="Map legend">${LEGEND.none}</div>
       </div>
@@ -404,7 +414,8 @@ export class HUD {
 
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
     for (const b of this.toolBtns) b.onclick = () => { game.setTool(b.dataset.tool as Tool); this.setBuild(false); };
-    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.startPlacing(b.dataset.zone as Zone); this.setBuild(false); }; });
+    root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.setZone(b.dataset.zone === 'none' ? null : b.dataset.zone as Zone); this.setBuild(false); }; });
+    this.q('[data-action="repay"]').onclick = () => game.repay();
     this.q('[data-action="build"]').onclick = () => this.setBuild(!this.buildOpen);
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
@@ -670,15 +681,13 @@ export class HUD {
       g.speed = 0;
       const lv: number[] = [];
       for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
-      const unlocks = lv.flatMap(levelUnlocks), batch = Object.fromEntries(ZONE_KEYS.map(z => [z, 0])) as Record<Zone, number>;
-      for (const n of lv) { const b = levelBatch(n); for (const z of ZONE_KEYS) batch[z] += b[z]; }
+      const unlocks = lv.flatMap(levelUnlocks);
       const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0), won = lv.includes(LEVELS.length);
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
           <h2 id="m-title">${icon('star')} ${won ? 'City complete!' : `Level ${g.pendingLevel}!`}</h2>
-          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents bring another batch.` : '. New buildings wait in the tray: place them beside your roads so the city keeps growing.'}</p>
+          <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents is another level.` : '. Zone more lots where the demand bars are high: the city grows where traffic flows.'}</p>
           <div class="lvl-grid">
-            <div><h3>New buildings</h3>${ZONE_KEYS.filter(z => batch[z]).map(z => `<p>${zonePic(z)}${ZONES[z].label} <b class="num">×${batch[z]}</b></p>`).join('')}</div>
             <div><h3>Unlocked</h3>${unlocks.length ? unlocks.map(u => `<p>${icon('check')}${esc(u)}</p>`).join('') : '<p class="muted">Nothing new this time</p>'}
               <p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
           </div>
@@ -900,27 +909,31 @@ export class HUD {
   private updateBuilding(): void {
     const g = this.game, b = g.picked, panel = this.q('.bpanel');
     const mine = b ? g.reports.filter(r => r.from === b || r.to === b).slice(-5).reverse() : [];
-    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${g.armed === b}|${mine.map(r => r.seconds).join()}` : '';
+    const key = b ? `${g.buildings.indexOf(b)}|${Math.floor(g.clock)}|${b.connected}|${b.abandoned}|${g.armed === b}|${mine.map(r => r.seconds).join()}` : '';
     if (key === this.last.bld) return;
     this.last.bld = key;
     panel.hidden = !b;
     if (!b) return;
-    const z = ZONES[b.kind], pc = (x: number) => `${Math.round(100 * x)}%`;
+    const pc = (x: number) => `${Math.round(100 * x)}%`;
     const bar = (label: string, v: number, bad = false) =>
       `<div class="pbar2${bad ? ' bad' : ''}"><span>${label}</span><i><i style="width:${pc(Math.min(1, v))}"></i></i><b class="num">${pc(v)}</b></div>`;
     let body = '';
     if (b.kind === 'home') {
       const mineC = g.commuters.filter(c => c.home === b), p = b.parts;
-      body = `<p class="jnote">${Math.round(b.residents)} / ${z.residents} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
+      body = `<p class="jnote">${Math.round(b.residents)} / ${b.cap} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
         + bar('Jobs', p.job) + bar('Shops', p.shop) + bar('Trips', p.trips) + bar('Pollution', p.pollution, true) + bar('Noise', p.noise, true);
     } else {
-      body = `<p class="jnote">${z.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
+      body = `<p class="jnote">${b.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
     }
+    // traffic access drives growth; a countdown says how long until it is abandoned (or cleared) and why
+    if (b.kind !== 'gate') body += bar('Traffic access', b.access, b.access < T.DOWN_A);
+    if (b.abandoned) body += '<p class="jnote bad">Abandoned: no residents, jobs or trips until traffic access recovers</p>';
+    if (b.cause && b.downH) body += `<p class="jnote bad">${esc(b.cause.text)} · ${b.abandoned ? 'cleared' : 'abandoned'} in ${Math.ceil(T.DOWN_H - b.downH)} h</p>`;
     if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
     const who = g.occupants(b);
-    body += `<div class="jpre"><button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`
-      + `<button class="btn" data-b="demolish" data-tip="${g.creative ? 'Removes it' : `Back to the tray, to place again · ${fmtMoney(g.moveCost)}`}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
-    this.q('.btitle').innerHTML = `${zonePic(b.kind)}${z.label}`;
+    body += `<div class="jpre">${b.lots.length ? '' : `<button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`}`
+      + `<button class="btn" data-b="demolish" data-tip="Free${b.lots.length ? '; its lot stays zoned and grows a new building' : ''}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
+    this.q('.btitle').innerHTML = `${zonePic(b.kind)}${b.label}${b.lots.length && b.kind !== 'gate' ? ` <small>${ZONE_NAME[b.kind as Zone]}</small>` : ''}`;
     this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
   }
 
@@ -958,7 +971,7 @@ export class HUD {
     // Money in whole dollars with a 200ms flash per change. Net per day = taxes at today's rate + business and trade income
     // (yesterday's, or today's so far on the first day) - the network's upkeep; grants are one-off
     const money = Math.round(g.money);
-    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay);
+    const l = g.today ? g.ledger.yesterday : g.ledger.today, net = Math.round(g.taxPerDay() + l.business + l.trade - g.upkeepDay - g.loan * T.LOAN_RATE);
     if (money !== L.money || net !== L.net) {
       const c = this.q('.money'), prev = L.money, d = money - (prev ?? money);
       L.money = money;
@@ -970,13 +983,13 @@ export class HUD {
       c.classList.toggle('debt', money < 0);
       const y = g.ledger.yesterday, t = g.ledger.today;
       const day = (x: Ledger) => `taxes ${fmtMoney(x.taxes)}, business ${fmtMoney(x.business)}, trade ${fmtMoney(x.trade)}, upkeep −${fmtMoney(x.upkeep)}, building ${fmtMoney(-x.build)}`
-        + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '');
+        + (x.grants ? `, grants ${fmtMoney(x.grants)}` : '') + (x.interest ? `, interest −${fmtMoney(x.interest)}` : '');
       c.dataset.tip = `Money. Residents pay ${fmtMoney(g.taxPerDay())}/day in taxes (more when they are happy); workers, shoppers and goods`
         + ` arriving pay business income. Exports, imports and visitors through the highway exits pay trade income`
         + (g.linkedExits().length ? '.' : ': none is linked yet, build a road to one at the map edge.')
         + ` Roads and controls cost ${fmtMoney(g.upkeepDay)}/day upkeep.`
         + ` Yesterday: ${day(y)}. Today so far: ${day(t)}.`
-        + (g.creative ? '' : ` In debt at ${DIFFICULTY[g.cfg.difficulty].debtDays} midnights in a row = bankrupt.`);
+        + (g.creative ? '' : ` Below $0 the bank lends ${fmtMoney(T.LOAN_STEP)} at a time, up to ${fmtMoney(g.loanCap)}, at ${T.LOAN_RATE * 100}% a day.`);
       if (prev !== undefined && Number.isFinite(d) && d !== 0) {
         (c.querySelector('.delta') as HTMLElement).textContent = d > 0 ? `+${fmtMoney(d)}` : `−${fmtMoney(-d)}`;
         flash(c, d > 0 ? 'gain' : 'spend', ['gain', 'spend']);
@@ -999,7 +1012,7 @@ export class HUD {
       const bt = BUILD.includes(g.tool), bb = this.q('.buildbtn');
       bb.setAttribute('aria-pressed', String(bt));
       const bi = this.q('.bico'); bi.innerHTML = icon(bt ? g.tool : 'build'); bi.dataset.t = bt ? g.tool : 'build';
-      bb.dataset.tip = `Build: roads, junctions and buildings${bt ? `. Now: ${TOOLS[g.tool].label}` : ''}`;
+      bb.dataset.tip = `Build: roads, junctions and zones${bt ? `. Now: ${TOOLS[g.tool].label}` : ''}`;
       this.setBuild(false);
     }
 
@@ -1031,28 +1044,29 @@ export class HUD {
       if (up) flash(this.q('.lvl'), 'bump');
     }
 
-    // Tray: one card per zone with buildings left; the dock badge counts them all
-    const yk = `${ZONE_KEYS.map(z => g.tray[z]).join(',')}|${g.placing}|${g.tool}`;
-    if (yk !== L.tray) {
-      const before = L.trayN;
-      L.tray = yk;
-      let total = 0;
-      this.root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => {
-        const z = b.dataset.zone as Zone, n = g.tray[z];
-        total += n;
-        b.hidden = n < 1;
-        b.setAttribute('aria-pressed', String(g.placing === z));
-        (b.querySelector('.zn') as HTMLElement).textContent = `×${count(n)}`;
+    // Zone demand (hourly): the bars in the top chip and on every brush button; the brush panel shows while the brush is held
+    const zk = `${ZONE_KEYS.map(z => g.demand[z].toFixed(2)).join()}|${g.zone}|${g.tool}`;
+    if (zk !== L.zones) {
+      L.zones = zk;
+      this.root.querySelectorAll<HTMLElement>('.dm').forEach(m => {
+        const d = g.demand[m.dataset.z as Zone];
+        m.style.setProperty('--d', String(Math.abs(d)));
+        m.classList.toggle('neg', d < 0);
       });
-      // the left tray is the Place tool's picker; the Build menu holds the same cards
-      this.q('.tray').hidden = total < 1 || g.tool !== 'place';
-      this.q('.bnone').hidden = total >= 1;
-      const badge = this.q('.badge');
-      badge.hidden = total < 1;
-      this.q('.buildbtn').classList.toggle('ready', total >= 1);
-      badge.textContent = count(total);
-      L.trayN = total;
-      if (before !== undefined && total > before && Number.isFinite(total)) flash(badge, 'pulse');
+      this.root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => b.setAttribute('aria-pressed', String(g.tool === 'zone' && (b.dataset.zone === 'none' ? !g.zone : g.zone === b.dataset.zone))));
+      this.q('.tray').hidden = g.tool !== 'zone';
+      const pct = (z: Zone) => `${ZONE_NAME[z]} ${g.demand[z] > 0 ? '+' : ''}${Math.round(g.demand[z] * 100)}`;
+      this.q('.demand').dataset.tip = `Zone demand (up: the city wants more; down: it has too many): ${ZONE_KEYS.map(pct).join(', ')}.`
+        + ' Homes want jobs, jobs want workers, shops want customers and visitors, workshops want shops to supply and exits to export through.';
+    }
+    const lk = `${Math.round(g.loan)}|${g.frozen}`;
+    if (lk !== L.loan) {
+      L.loan = lk;
+      const c = this.q('.loan');
+      c.hidden = !g.loan;
+      this.q('.ln').textContent = `Loan ${fmtMoney(g.loan)}`;
+      c.dataset.tip = `Bank loan: ${fmtMoney(g.loan)} at ${T.LOAN_RATE * 100}% a day (${fmtMoney(g.loan * T.LOAN_RATE)}/day). Click to repay ${fmtMoney(Math.min(T.LOAN_STEP, g.loan))}.`
+        + (g.frozen ? ' At the limit and still in debt: the city is frozen.' : '');
     }
 
     if (toolChanged || g.level !== L.level) {
@@ -1145,16 +1159,19 @@ export class HUD {
       this.q('.hv').textContent = `${hp}%`;
       c.dataset.tip = `City happiness ${hp}%, averaged over a day. Jobs ${pc(cp.job)}, shops ${pc(cp.shop)}, trips ${pc(cp.trips)},`
         + ` pollution ${pc(cp.pollution)}, noise ${pc(cp.noise)}. Happy homes fill up and pay more taxes; under ${T.GROW_LO}% people move out.`
-        + (g.creative ? '' : ` Under ${DIFFICULTY[g.cfg.difficulty].failHappy}% for ${T.FAIL_DAYS} midnights in a row from day ${T.FAIL_FROM_DAY}, the residents leave.`);
+        + (g.challenge ? ` Under ${DIFFICULTY[g.cfg.difficulty].failHappy}% for ${T.FAIL_DAYS} midnights in a row from day ${T.FAIL_FROM_DAY}, the residents leave.` : ' Unhappy homes are abandoned.');
     }
 
     // Career fail countdown: Debt: 2 days to bankruptcy / Unhappy: 1 day left
-    const a = g.alarm, ak = a ? `${a.kind}|${a.days}` : '';
+    const a = g.alarm, ak = a ? `${a.kind}|${a.days}` : g.frozen ? 'frozen' : '';
     if (ak !== L.alarm) {
       L.alarm = ak;
       const c = this.q('.alarm'), s = a && a.days > 1 ? 's' : '';
-      c.hidden = !a;
-      if (a) {
+      c.hidden = !ak;
+      if (!a && ak) {
+        this.q('.atxt').textContent = 'Frozen';
+        c.dataset.tip = 'The bank froze the city: nothing grows and you cannot zone until money is back over $0. Cut upkeep or get more trips through.';
+      } else if (a) {
         this.q('.atxt').textContent = a.kind === 'bankrupt' ? `Debt: ${a.days} day${s} to bankruptcy` : `Unhappy: ${a.days} day${s} left`;
         c.dataset.tip = a.kind === 'bankrupt'
           ? 'Below $0 at midnight counts toward bankruptcy. Earn more (grow the city, get trips through) or demolish roads you do not need.'
