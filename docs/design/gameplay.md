@@ -386,7 +386,7 @@ Every step leaves the game playable (engine, renderer, HUD, input and tutorial) 
 
 **S9 Grid tool and one-click interchanges.**
 - Ramps first. A path whose start node is on level `La` and whose end is on `Lb` (dock level, or the snapped node's level) steps by 1 level per group of segments: segment i gets `round(La + (Lb - La) * i / (n - 1))`, which needs at least `|Lb - La| + 1` segments of at least 1 tile (`Too steep: make the ramp longer`). `nodeLevelOk` accepts inner ramp joints (2 edges, levels differ by 1). Doors become ground-only (`Buildings need a ground road`), and the renderer draws a ramp joint in its upper layer.
-- Grid tool: drag a rectangle, choose block size 3/4/6 tiles in the dock context, and it builds the street lines with the current type through `planPath`. Preview and cost come first, and it commits all or nothing.
+- Grid tool: drag a rectangle, choose block size 3/4/6 tiles in the dock context, and it builds the street lines with the current type through `planPath`. Preview and cost come first, and it commits all or nothing. A line along an existing road keeps that road's type (`planPath` with `retype` off): only the Road tool retypes what it is drawn over.
 - Interchange tool: click a junction node with exactly 4 approaches whose axes are within 20° of perpendicular, and whose approaches stay straight for at least `R` = 200px.
   - Diamond: the secondary axis is rebuilt at L2 over a 2R span, with ramps L0<->L2, plus 4 one-way ramps.
   - Cloverleaf: the overpass plus 4 loop ramps (radius 70px) and 4 outer ramps.

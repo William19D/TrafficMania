@@ -1134,8 +1134,9 @@ export class Game {
   // Ends on two levels make a ramp: segment i of n sits at 'level' clamped to within i levels of the start and n-1-i of the end, one
   // level per segment (a ramp is resampled to a joint per tile, and needs |end - start| + 1 segments). Doors take ground roads only.
   // ends: fixed end levels, snapped only there; snapMid false: the anchors between stay where they are (templates, whose ramps run
-  // alongside the road they join). One-way roads travel in the order of 'points'.
-  planPath(points: Vec[], level = this.level, type = this.roadType, ends?: [number, number], snapMid = true): PathPlan {
+  // alongside the road they join). retype false: stretches over an existing road keep its type (grids). One-way roads travel in the
+  // order of 'points'.
+  planPath(points: Vec[], level = this.level, type = this.roadType, ends?: [number, number], snapMid = true, retype = true): PathPlan {
     const plan: PathPlan = { points: [], segs: [], cost: 0, ok: false, reason: 'Too short', type: { ...type }, level };
     if (points.length < 2) return plan;
     const end = (p: Vec, k: 0 | 1): Snap => ends ? this.snap(p, ends[k]) : this.snapEnd(p, level);
@@ -1195,7 +1196,7 @@ export class Game {
       if (r.exists) {
         // drawn over with another type: that stretch is retyped, the price change paid or refunded as the Edit tool does
         const e = a.node && b.node ? this.graph.edgeBetween(a.node, b.node) : a.edge ?? b.edge, len = dist(a.point, b.point);
-        if (!e || e.ring || e.level !== L || len < 1 || sameType(e.type, type)) continue;
+        if (!retype || !e || e.ring || e.level !== L || len < 1 || sameType(e.type, type)) continue;
         const d = this.change((this.edgePrice(e, type) - this.edgePrice(e)) * len / dist(e.a, e.b), e.day);
         seg.up = true;
         plan.cost += d;
@@ -1763,7 +1764,7 @@ export class Game {
       note: c ? `${nu} × ${nv} block${nu * nv === 1 ? '' : 's'}` : 'First side',
     };
     for (const l of lines) {
-      const p = this.planPath(l, 0, type, [0, 0]);
+      const p = this.planPath(l, 0, type, [0, 0], true, false);
       if (p.reason === 'Already exists') continue;
       plan.segs.push(...p.segs);
       plan.cost += p.cost;
@@ -1779,7 +1780,7 @@ export class Game {
     if (!plan.ok) { if (plan.reason !== 'Too short') this.say(plan.reason); return false; }
     // ponytail: checked as a whole above; live, a line only differs by snapping onto the lines laid before it
     for (const l of this.gridLines(a, b, c).lines) {
-      const p = this.planPath(l, 0, this.roadType, [0, 0]);
+      const p = this.planPath(l, 0, this.roadType, [0, 0], true, false);
       if (p.ok) this.commitPath(p, false);
     }
     this.connect();

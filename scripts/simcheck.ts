@@ -1058,6 +1058,15 @@ for (const kind of ['yield', 'stop'] as const) {
   if (deg(4) !== 2 || deg(3) !== 6 || deg(2) !== 4 || w.graph.nodes.length !== 12 || Math.abs(m0 - plan.cost - w.money) > 1e-6) {
     fail(`grid: ${deg(4)} crossings, ${deg(3)} T-junctions, ${deg(2)} corners of ${w.graph.nodes.length}, paid ${m0 - w.money} for ${plan.cost}`);
   }
+  // a grid started along a day-old avenue in Challenge leaves it an avenue (the Road tool retypes what it runs over, the Grid tool doesn't)
+  const v = blank(), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false }, p = { x: 200, y: 400 }, q = { x: 840, y: 400 }, r = { x: 200, y: 720 };
+  Object.assign(v, { demandOff: true, cfg: { ...v.cfg, mode: 'challenge' } });
+  v.commitPath(v.planPath([p, q], 0, av));
+  v.time += 24 * HOUR;
+  v.roadType = { tier: 'street', lanes: 1, oneWay: false };
+  const gp = v.planGrid(p, q, r);
+  if (!gp.ok || !v.commitGrid(p, q, r)) fail(`grid: along an avenue ${gp.reason}`);
+  if (v.graph.edges.some(e => e.a.y === 400 && e.b.y === 400 && e.type.tier !== 'avenue')) fail('grid: the avenue it started along was retyped');
 }
 // Interchanges on a boulevard (main road) crossing an avenue: no node joins the two roads at one level any more, and a trip between
 // every pair of arms arrives (the trumpet on a T)
