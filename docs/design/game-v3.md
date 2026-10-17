@@ -16,8 +16,8 @@ Product goals:
 
 A roundabout is no longer a node with a fake ring. Placing one removes the junction node and builds a real one-way ring of edges:
 - The ring is a polygon of `RING_CHORDS[size]` vertices at radius `R` around the old node position, joined by one-way, 1-lane ring edges (counter-clockwise on screen, as today).
-- Each arm road is cut where it crosses the circle. Its end joins the ring vertex nearest its bearing, and the vertices are rotated so the first arm sits exactly on one.
-- Ring vertices are plain degree-2 nodes. Arm vertices are T-junctions: arm, ring-in, ring-out.
+- Each arm road, followed through its bends, is cut where it crosses the circle, and the cut point is the arm's ring vertex. Each arc between two arms is split into `round(arc / (360° / chords))` equal chords, so arms sit exactly on vertices.
+- Ring vertices are plain degree-2 nodes. Arm vertices are T-junctions (arm, ring-in, ring-out) with control `none`; the entry rules below key on `onRing(n)`.
 - Turns at every vertex use the normal `arcPos` blend, so heading and speed are continuous. `ringPos`, `ringIn`, `ringStop` and the roundabout cap in `may()` go.
 
 | Size | R (lane centre) | Ring road width | Outer radius | Island radius | Chords (length) | Ring limit px/s (km/h) | Max arms | Max arm lanes/dir | Clear radius | Cost x | Stored cars |
@@ -33,16 +33,16 @@ A roundabout is no longer a node with a fake ring. Placing one removes the junct
 - **Stored cars** = `2πR / 20`. It replaces the 3/5/8 cap: throughput comes from geometry, not a counter.
 - Price: `ROUNDABOUT_COST x Cost x` + `ROUNDABOUT_UPKEEP x Cost x` per day, with the ring edges free (they are part of the control). These are the old multipliers.
 - Placement needs 3..Max arms arms, at least `360 / (max arms + 1)` degrees apart. Refusals: `Too many lanes for a Small roundabout`, `Arms too close together`, `Too close to the next junction`.
-- Edge flags: ring edges get `ring: number` (the ring id, 0 = none). They are not access roads (no driveways, no lots), and they are drawn as one ring road around a grass island (decor: section 7 cosmetics).
+- Ring edges are one-way 1-lane avenue edges (12px wide) with `Edge.ring` pointing at their `Ring` (null = none). They are free, not access roads (no driveways, no lots), and drawn as arcs of the circle around a grass island (decor: section 7 cosmetics).
 
-**Ring record:** `Ring { id; x; y; size: RingSize; nodes: Node[] }` in `RoadGraph.rings`.
+**Ring record:** `Ring { hub: Node; nodes: Node[] }` in `RoadGraph.rings`. The hub is a node off the graph at the centre with control `roundabout`, `ring` = size and `controlDay`: the junction panel, the control price, refunds and upkeep use it as they used the old roundabout node.
 - Edit-clicking any ring edge or vertex opens the roundabout panel: size S/M/L with the price difference, and Remove.
 - Changing size rebuilds the ring. Cars on it go back to their trip origin, as on demolish.
 - Remove restores a plain node joining the arms (refunded under the road rule, by `controlDay`).
 
 **Entry and exit:**
 - An arm vertex is a `yield` node whose main edges are the two ring edges.
-- **Entry:** an entering car (arm to ring-out) uses the driveway gap-merge (`roadNear`). It needs every ring car still to pass the vertex at least `MERGE_GAP` s away. Exiting ring cars (ring-in to arm) are ignored, because they don't cross.
+- **Entry:** an entering car (arm to ring-out) uses a gap-merge like the driveway one (`ringNear`). Every ring car still to pass the vertex, and every car granted in at an upstream entry, must be its braking distance plus `MERGE_GAP` s plus the entering car's own time to the vertex away. Ring cars leaving at that vertex are ignored, because they don't cross.
 - **No courtesy merge on rings.** `MERGE_S` starvation does not hold ring traffic, which would gridlock the ring.
 - **Room check:** a car enters only if every lane on its ring path plus its exit lane has room for it (`fits` over the whole ring path), so a blocked exit holds cars at the entry line, not on the ring.
 - Inbound lanes of a multi-lane arm enter one car at a time per vertex.
@@ -53,12 +53,19 @@ A roundabout is no longer a node with a fake ring. Placing one removes the junct
 - Rings win at medium, balanced flows. Lights win on big unbalanced crossings and in tight grids where a ring doesn't fit. Map 7 is built around that (section 4).
 - ponytail: single-lane rings. Add 2-lane rings (inner lane for far exits) only if Large rings with 3-lane arms still jam in playtest.
 
-**Migration:** on load, every node with `control: 'roundabout'` (old saves) is rebuilt as a ring of its saved `ring` size. Lane connections (`plan`) on arms carry over to the arm vertex.
+**Migration:** on load, every node with `control: 'roundabout'` (old saves) is rebuilt as a ring of its saved `ring` size, a smaller one where an arm is too short for it, else a plain junction. Its lane connections are dropped: a ring arm has one move. Saves keep `v: 1` and gain `rings` and `edges[].ring` (indexes).
+
+**Building and joining:**
+- Driveways joining inside the new ring's clear radius are laid again outside it (`connect` slides a join along the road out of every clear radius).
+- A new road may join a ring at its ends only, from outside, on a vertex without a road or by splitting a ring edge, within the size's arm, lane and spacing rules. It may not cross a ring, nor split, join or end an arm inside a clear radius (`Too close to the roundabout`).
 
 **Overlap fixes** (from the plan):
-- A blocked hand-off waits at the stop line, and `Car.ts:189` never snaps to `s = length`.
-- Opposite left turns get arcs offset by `LANE_OFFSET` to their own side.
-- `commitBend` and `setEdgeType` re-space cars and drop the ones that don't fit back to their origin.
+- A blocked hand-off waits where it was that tick (before the line), and `Car.ts` never snaps to `s = length`.
+- Left turns at a junction bow `LANE_OFFSET` toward the inside of the turn, so opposite lefts pass side by side.
+- `commitBend` and `setEdgeType` re-space cars (`RoadGraph.respace`) and drop the ones that don't fit back to their origin.
+- A car looks for the car ahead through the links ahead (same lane index) within 150px, not just the next lane, and keeps its lane index through bends and driveway joins where the lane count stays the same.
+- Two lanes never feed one exit lane at once: `fits` refuses a car while one from another lane is granted into it.
+- A driveway merge also counts a car granted onto the road at the upstream node.
 
 **simcheck:** cross-node gap, drawn overlap (`carPos` distance ≥ 0.8 x car length for same-heading pairs), ring heading change ≤ 35° per 0.1 s and no speed reset at entry, short link next to a Large ring, and invariants for each ring size.
 
