@@ -248,8 +248,8 @@ Grading:
 
 | # | Map | Biome, size, seed idea | Constraint | Objectives (★) | ★★ flow | ★★★ budget | Start $ | Teaches and unlocks | Unlock |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | Meadowbrook | temperate small, `meadowbrook`, one gentle river, no mountains, no exits | dirt and street only | pop 300 | 80% | $9,000 | $20,000 | roads, Residential and Commercial zones, Edit, Demolish (scripted tutorial, section 6) | start |
-| 2 | Two Bridges | temperate small, a wide river across the middle; starter offices north, homes south | every crossing is a bridge (x4) | pop 600; 25 trips/h | 75% | $20,000 | $30,000 | avenue, bridges, Office zone, townhouses, Grid tool, heat map | 1★ |
+| 1 | Meadowbrook | temperate small, `meadowbrook`, one gentle river, no mountains, no exits | dirt and street only | pop 300 | 80% | $9,000 | $20,000 | roads, Residential, Commercial and Office zones, Edit, Demolish (scripted tutorial, section 6) | start |
+| 2 | Two Bridges | temperate small, a wide river across the middle; starter offices north, homes south | every crossing is a bridge (x4) | pop 600; 25 trips/h | 75% | $20,000 | $30,000 | avenue, bridges, townhouses, Grid tool, heat map | 1★ |
 | 3 | Cedar Crossing | temperate medium, flat, a central crossroads of avenues | rush hour: `COMMUTE_SD` 0.4, so everyone leaves 7-9 | pop 900; 55 trips/h at 08:00 | 80% | $30,000 | $40,000 | roundabouts S/M/L, one-way, store | 3★ |
 | 4 | Pine Pass | alpine medium, a mountain wall with one pass; highway exit beyond it | tunnels x5, few flat lots | pop 1,000; 20 exports/day | 70% | $55,000 | $60,000 | viaducts L1-10, ramps, tunnels, Industrial zone, apartment block, factory | 5★ |
 | 5 | Harbor Isles | archipelago medium, islands joined by short bridges, freight exit on the largest | small islands, so lots are scarce and density matters | pop 1,200; 60 exports/day | 75% | $50,000 | $60,000 | boulevard, lane connections, freight terminal, office tower, logistics park | 7★ |
@@ -351,7 +351,7 @@ The objectives panel (region O) shows the step's goal with a progress bar. Arrow
 
 - **Skip** ends the script but keeps the map.
 - `tm_tutorial_done = '1'` from older versions marks the script seen: map 1 starts with the panel and no script.
-- simcheck plays the steps through on a scripted town, as it does today.
+- simcheck plays the steps through on the real Meadowbrook with a scripted newcomer, then on to 300 residents and a star.
 
 **Tips** (Factorio style) are bottom-right cards (region F) shown the first time something happens. Each tip is shown once per profile (`profile.tips`), at most one is on screen, the rest queue, and a menu toggle turns them off.
 
@@ -369,6 +369,29 @@ The objectives panel (region O) shows the step's goal with a progress bar. Arrow
 | first use of each new tool | one line per tool (ring sizes, lane connections, tunnels, ...) |
 | first event of each kind | what it is and how to earn its reward |
 | first milestone choice | Pick one. The other offer comes back later. |
+
+### G6 as built (where it differs from the above)
+Code: `src/ui/Tutorial.ts` (`tutorialSteps`, `stepDone`, the card), `src/ui/Tips.ts` (`dueTip`, the tip card), `Game.note` / `news` /
+`newsN`, the bell and feed panel and region O's checklist in `HUD.ts`, `CanvasRenderer.centerOn` (eased) and its off-screen markers.
+- **Office zone opens on map 1** (Office tier 1 level 2 -> 1). Without it map 1 stalled at about 240 residents: shops alone never give
+  enough jobs, so R demand went negative below the 300 goal. Map 2 no longer teaches it.
+- **Steps:** as the table, except step 6 asks for 2 Commercial *and* 2 Office lots plus 1 shop or office grown, and step 7 is "Check the
+  traffic": the heat map on and every road's heat under 0.4 (no scripted 8:00 jam, no hour of calm: a forced jam can strand a newcomer).
+  Step 4 has no dashed brush path, only the ring on the longest road. Steps with a goal move on 1.2 s after it is met; 1 and 8 take Next /
+  Finish. Growth x4 (`TUT_GROWTH`) and the $20,000 top-ups run for the whole script, events, milestones and grading wait until it ends.
+- **Region O** shows the 8 steps as a checklist (done, current with its bar, to come) while the script runs; the card (region F) holds the
+  explanation, the step's `n / of` and Skip. A save made mid-script loads without it.
+- **Seen once per profile:** `profile.tips` gets `'tutorial'` on Skip or Finish (`tm_tutorial_done` still counts). The help panel's button
+  starts a new Meadowbrook with the script (after a confirm when the city is past day 1; the city is autosaved first).
+- **Tips:** checked twice a second, not while the script runs, a modal is up or the menu is open; a tip closes itself after 20 s and has
+  Show me (jumps) when it has a spot. Thresholds simplified: jam = any road heat > 0.7 now; demand > 0.5 (not 0.8 for a day) with
+  100+ residents; unhappy = under `GROW_LO`. Added: "Homes stopped growing: people need jobs" (R <= 0, O > 0.2). The milestone tip
+  fires after the first pick. Tool tips for grid, light, roundabout, interchange, Edit and Demolish (road and zones are the tutorial's).
+  The toggle and "Show seen tips again" are on the Profile page.
+- **Feed:** `Game.note(text, at?)` says it and keeps the last 40 (not saved): bank loans and repayments, downgrades and abandons (at the
+  cause, else the building), events (start at the road or target, rewards, call-offs), match day, exit linked, new best stars,
+  milestone picks, achievements. The bell (N) shows an unread badge; a row with a spot eases the camera there.
+- **Off-screen arrows:** accent discs at the screen edge for the tutorial's targets (objectives other than the script have no spot).
 
 ---
 
