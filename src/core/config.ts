@@ -74,24 +74,18 @@ export const ZONES: Record<Site, { label: string; w: number; h: number; resident
   industry: { label: 'Factory', w: 56, h: 40, residents: 0, jobs: 25, fill: '#E2B866', out: '#B08938', roof: '#EDD097' },
   gate: { label: 'Highway exit', w: 30, h: 16, residents: 0, jobs: 0, fill: '#2F8F5B', out: '#1F6B42', roof: '#3FA36B' },
 };
-// Zones (docs/design/game-v3.md 2): what the brush paints, and the tier-1 building each lot grows (G2 adds the higher tiers).
-// A legacy building (old saves, the starter town) keeps its ZONES footprint and capacity (tier 0).
+// Zones (docs/design/game-v3.md 2): what the brush paints; the tiers each lot grows through are TIER_DEFS (below TUNING)
 export const ZONE_NAME: Record<Zone, string> = { home: 'Residential', shop: 'Commercial', office: 'Office', industry: 'Industrial' };
-export interface TierDef { name: string; lots: number; w: number; h: number; residents: number; jobs: number }
-export const TIER_DEFS: Record<Zone, TierDef[]> = {
-  home: [{ name: 'House', lots: 1, w: 28, h: 24, residents: 30, jobs: 0 }],
-  shop: [{ name: 'Corner shop', lots: 1, w: 28, h: 28, residents: 0, jobs: 10 }],
-  office: [{ name: 'Office', lots: 1, w: 28, h: 36, residents: 0, jobs: 30 }],
-  industry: [{ name: 'Workshop', lots: 1, w: 28, h: 36, residents: 0, jobs: 12 }],
-};
 // Trip purposes: car colour on the map and in the legend (a return trip keeps its purpose)
 // visit: a visitor from outside the map to a shop or office
-export type Purpose = 'commute' | 'shop' | 'freight' | 'visit';
+// emergency: a hospital's ambulance out to a home and back
+export type Purpose = 'commute' | 'shop' | 'freight' | 'visit' | 'emergency';
 export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   commute: { label: 'Commute', color: '#5A6FD8' },
   shop: { label: 'Shopping', color: '#E8608E' },
   freight: { label: 'Freight', color: '#E39B2D' },
   visit: { label: 'Visitors', color: '#1FA39A' },
+  emergency: { label: 'Emergency', color: '#E5484D' },
 };
 
 // City levels (career): population to reach each one; a level-up unlocks tiers (TIERS[t].level) and features (UNLOCKS[f].level)
@@ -163,4 +157,59 @@ export const TUNING = {
   // Bank (soft fail outside Challenge): below $0 on the hour it lends LOAN_STEP up to LOAN_CAP x difficulty money / 40,000, at
   // LOAN_RATE of the balance per day (charged hourly); repaid by hand in LOAN_STEP
   LOAN_STEP: 10000, LOAN_CAP: 50000, LOAN_RATE: 0.015,
+  // Tiers (game-v3 3): UPGRADE_H hours in a row with access UP_A+, the zone's demand over UP_D and (homes) UP_FULL of capacity at
+  // UP_HAPPY+ happiness or (workplaces) UP_STAFF staffed grow a building one tier onto the next lots along its frontage
+  UPGRADE_H: 12, UP_A: 0.7, UP_D: 0.1, UP_FULL: 0.9, UP_HAPPY: 65, UP_STAFF: 0.8,
+  // Specials: a demolish refunds SPECIAL_REFUND; a terminal stands within TERMINAL_R of a highway exit; a hospital per HOSPITAL_POP residents
+  // sends an ambulance on EMERGENCY_POP residents' calls a day, a Fast one (within FAST_X of its ideal) cheers homes within CHEER_R by
+  // CHEER points for a day; a stadium's match every MATCH_DAYS day brings min(FANS_MAX, FANS + pop / FANS_POP) fans (FANS_OUT of them from
+  // linked exits) arriving the 2 hours before KICKOFF, each paying FAN_PAY on time, and leaving from MATCH_END
+  SPECIAL_REFUND: 0.5, TERMINAL_R: 400, HOSPITAL_POP: 2000, EMERGENCY_POP: 200, FAST_X: 1.3, CHEER_R: 300, CHEER: 3, CALL_STAY: 0.25,
+  MATCH_DAYS: 2, FANS: 60, FANS_POP: 15, FANS_MAX: 240, FANS_OUT: 0.4, KICKOFF: 19, MATCH_END: 22, FAN_PAY: 25,
 } as const;
+
+// Building tiers (game-v3 3): lots wide (footprint LOT_W x lots - 4 along the front, h deep), capacity, the city level that unlocks it
+// (G3's maps replace levels). draw: a shop's pull per job; visits: visitors a day from linked exits; trucks: freight a day x staffed;
+// pollution: px reach (0 = none); export: share of its trucks leaving through an exit; noise: road-like noise at homes within NOISE_R;
+// noiseX: how much a home minds noise
+export interface TierDef {
+  name: string; lots: number; w: number; h: number; residents: number; jobs: number; level: number;
+  draw: number; visits: number; trucks: number; pollution: number; export: number; noise: number; noiseX: number;
+}
+const tier = (name: string, lots: number, w: number, h: number, residents: number, jobs: number, level: number, x: Partial<TierDef> = {}): TierDef =>
+  ({ name, lots, w, h, residents, jobs, level, draw: 1, visits: 0, trucks: 0, pollution: 0, export: TUNING.EXPORT_SHARE, noise: 0, noiseX: 1, ...x });
+export const TIER_DEFS: Record<Zone, TierDef[]> = {
+  home: [
+    tier('House', 1, 28, 24, 30, 0, 1), tier('Townhouses', 2, 60, 28, 70, 0, 2),
+    tier('Apartment block', 2, 60, 40, 160, 0, 4), tier('Tower', 3, 92, 42, 320, 0, 8, { noiseX: 1.5 }),
+  ],
+  shop: [
+    tier('Corner shop', 1, 28, 28, 0, 10, 1, { visits: 2 }), tier('Store', 2, 60, 32, 0, 25, 3, { visits: 4 }),
+    tier('Mall', 4, 124, 44, 0, 80, 6, { draw: 1.5, visits: 12 }),
+  ],
+  office: [tier('Office', 1, 28, 36, 0, 30, 1, { visits: 2 }), tier('Office tower', 2, 60, 42, 0, 120, 5, { visits: 6 })],
+  industry: [
+    tier('Workshop', 1, 28, 36, 0, 12, 1, { trucks: 4, pollution: 160 }), tier('Factory', 2, 60, 40, 0, 30, 4, { trucks: 8, pollution: 260 }),
+    tier('Logistics park', 4, 124, 44, 0, 60, 5, { trucks: 20, pollution: 200, export: 0.7, noise: 0.5 }),
+  ],
+};
+// A legacy building (old saves, the starter town): its ZONES footprint and capacity, the old visitors, trucks and pollution
+export const LEGACY: Record<Site, TierDef> = Object.fromEntries((Object.keys(ZONES) as Site[]).map(k => [k, tier(ZONES[k].label, 1, ZONES[k].w, ZONES[k].h,
+  ZONES[k].residents, ZONES[k].jobs, 1, k === 'industry' ? { trucks: TUNING.TRUCKS_PER_DAY, pollution: TUNING.POLLUTION_R } : k === 'shop' || k === 'office' ? { visits: TUNING.VISITS[k] } : {})])) as Record<Site, TierDef>;
+
+// Specials (game-v3 3): traffic attractors the player places (place tool) once the city level unlocks them. kind: the zone they work as
+// (jobs, demand, shopping); cost / upkeep $; limit: how many may stand (Game.specialLimit)
+export type Special = 'plaza' | 'terminal' | 'stadium' | 'hospital';
+export interface SpecialDef extends TierDef { kind: Zone; cost: number; upkeep: number; tip: string }
+const special = (kind: Zone, cost: number, upkeep: number, tip: string, t: TierDef): SpecialDef => ({ ...t, kind, cost, upkeep, tip });
+export const SPECIALS: Record<Special, SpecialDef> = {
+  plaza: special('shop', 10000, 50, 'Draws shoppers from far away and visitors from highway exits. Counts as 100 shop jobs. At most 2.',
+    tier('Mall plaza', 0, 124, 88, 0, 100, 6, { draw: 2, visits: 30 })),
+  terminal: special('industry', 12000, 60, 'Factories ship their exports and take their imports through it; its trucks run to the exit and pay 1.5x. One per linked exit, near it.',
+    tier('Freight terminal', 0, 120, 90, 0, 40, 5, { trucks: 30, export: 1 })),
+  stadium: special('office', 15000, 80, 'Match every 2nd day at 19:00: a surge of fans, $25 each on time. At most 1.',
+    tier('Stadium', 0, 140, 100, 0, 20, 7)),
+  hospital: special('office', 12000, 70, 'Sends ambulances to homes; they get priority at lights and yields. A fast call cheers the street. One per 2,000 residents.',
+    tier('Hospital', 0, 100, 80, 0, 60, 8)),
+};
+export const SPECIAL_KEYS = Object.keys(SPECIALS) as Special[];

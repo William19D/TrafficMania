@@ -12,13 +12,13 @@ import type { Trip } from '../src/entities/Trip.ts';
 import { Car, GIVE_UP_S, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, TIERS, TUNING, ZONES } from '../src/core/config.ts';
-import type { Biome, GameConfig, Zone } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, TUNING, ZONES } from '../src/core/config.ts';
+import type { Biome, GameConfig, Special, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
-import { commitZone, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
+import { commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
@@ -140,7 +140,7 @@ const overlaps = (w: Game, what: string, drawn = true): void => {
     if (lat < 6 && lon < 0.8 * sep(a, b)) fail(`${what}: cars drawn on top of each other (${lon.toFixed(1)}px apart) at t=${t} [${[a, b].map(c => `${c.kind} ${c.lane.from.id}>${c.lane.to.id} s=${c.s.toFixed(1)}/${c.lane.edge.length.toFixed(0)} v=${c.speed.toFixed(0)} lc=${c.lc.toFixed(2)} g=${c.granted?.id} cl=${c.clearing?.id} drive=${c.lane.edge.drive}`).join(" | ")}]`);
   }
 };
-const DT = 1 / 60, STEPS = 300 * 60;
+const DT = 1 / 60, STEPS = 300 * 60, T_UP = TUNING.UPGRADE_H;
 let maxCars = 0, lo = Infinity, hi = 0;
 const kinds = new Set<string>();
 // Exit lane per car last tick: it must not switch once inside the turn arc (the drawn arc would jump sideways)
@@ -175,7 +175,8 @@ if (commutes.length < 5 || rush < 0.7 * commutes.length) fail(`day cycle: ${rush
 if (!parkedAt.size || !game.reports.some(r => r.purpose === 'commute' && r.back)) fail('day cycle: no commuter reached work and came home');
 // Drivers differ: top speeds spread within ±10% (the overlap check above covers their safety)
 if (lo < 0.9 || hi > 1.1 || hi - lo < 0.1) fail(`driver top speeds ${lo.toFixed(2)}..${hi.toFixed(2)} x the kind's top speed`);
-if (kinds.size !== Object.keys(KINDS).length) fail(`vehicle kinds seen: ${[...kinds]}`);
+// every kind but the ambulance (hospital calls only) drives in the main run
+if (kinds.size !== Object.keys(KINDS).length - 1 || kinds.has('ambulance')) fail(`vehicle kinds seen: ${[...kinds]}`);
 
 // Money: a straight 10-tile avenue costs 10 x its tier rate, a same-day demolish gives it all back; built again and demolished
 // the next day it refunds REFUND_LATER after day 1's upkeep (paid hourly from START_HOUR); no money, no road
@@ -374,21 +375,21 @@ for (const [yx, yy, lo, hi] of [[500, 900, 0, TURN_SPEED + 1], [900, 570, MAX_SP
   for (let t = 0; t < 10 * 60; t++) w.update(DT);
   if (bus.lane !== out || J.occupants.size) fail(`box release: truck at s=${bus.s.toFixed(1)} on ${bus.lane === out ? 'the exit' : 'the approach'}, J holds ${J.occupants.size}`);
 }
-// Lights: a car on the red waits for green with its brake lights on
-{
+// Lights: a car on the red waits for green with its brake lights on; an ambulance turns the light green as it comes and goes through
+for (const kind of ['car', 'ambulance'] as const) {
   const w = blank(), wg = w.graph, flat: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
   const X = town(w, 100, 500), Y = town(w, 900, 500), Z = town(w, 500, 900), J = wg.addNode(500, 500);
   for (const [a, b] of [[X, J], [J, Y], [J, Z]]) w.commitPath(w.planPath([a!, b!], 0, flat));
   w.demandOff = true;
   w.placeControl(J, 'light');
-  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y));
+  const e = wg.edgeBetween(X, J)!, c = new Car(wg.lanesFrom(e, X)[0]!, trip(X, Y), kind);
   c.s = e.length - 80;
   c.lane.cars.push(c);
   w.cars.push(c);
   J.phase = lightGroup(J, e) ^ 1;
   for (let t = 0; t < (LIGHT_PERIOD - 1) * 60; t++) w.update(DT);
-  if (!c.brake) fail('lights: brake lights off while held at the red');
-  if (c.lane.from === J) fail('lights: a car ran the red light');
+  if (kind === 'car' && !c.brake) fail('lights: brake lights off while held at the red');
+  if ((c.lane.from === J) !== (kind === 'ambulance')) fail(`lights: ${kind === 'car' ? 'a car ran the red light' : 'an ambulance was held at the red'}`);
 }
 // Tiers: a car never beats its top speed x dirt's limit on dirt (it brakes before the avenue -> dirt joint M);
 // A* takes a longer highway over a shorter dirt road; highways never connect to a building;
@@ -1070,14 +1071,19 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   while (!w.gameOver && w.day < 8) w.update(0.5);
   if (w.gameOver || w.population >= 1 || w.buildings.length !== n || w.lots.length !== n - w.buildings.filter(b => b.kind === 'gate').length) fail(`no roads: '${w.gameOver}' on day ${w.day}, ${w.population} residents, ${w.buildings.length - n} grown`);
 }
-// Building art: every variant's body and chimney stand inside the footprint, offices come in several heights, and a street of
-// ten buildings 50px apart shows at least five looks
+// Building art: every variant's body and chimney of every model (legacy kinds, each tier, each special) stand inside its footprint,
+// each tier and special has a model of its own, offices come in several heights, and a street of ten buildings 50px apart shows at
+// least five looks
 {
-  for (const kind of ['home', 'shop', 'office', 'industry'] as const) for (let v = 0; v < VARIANTS; v++) {
-    const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2, { body: [x, y, w, h], chimney: c } = look(kind, v);
-    if (x < -H || y < -W || x + w > H || y + h > W || (c && (Math.abs(c.x) > H || Math.abs(c.y) > W))) fail(`art: ${kind} variant ${v} spills out of its footprint`);
+  const all = [...(['home', 'shop', 'office', 'industry'] as const).map(k => buildingAt(k, { x: 0, y: 0 }, 0)),
+    ...(Object.entries(TIER_DEFS) as [Zone, unknown[]][]).flatMap(([z, ts]) => ts.map((_, i) => buildingAt(z, { x: 0, y: 0 }, 0, i + 1))),
+    ...SPECIAL_KEYS.map(s => buildingAt(s, { x: 0, y: 0 }, 0))];
+  for (const b of all) for (let v = 0; v < VARIANTS; v++) {
+    const H = b.h / 2, W = b.w / 2, { body: [x, y, w, h], chimney: c } = look(b.art, v, H, W);
+    if (x < -H || y < -W || x + w > H || y + h > W || (c && (Math.abs(c.x) > H || Math.abs(c.y) > W))) fail(`art: ${b.art} variant ${v} spills out of its footprint`);
   }
-  if (new Set(Array.from({ length: VARIANTS }, (_, v) => look('office', v).height)).size < 3) fail('art: offices all one height');
+  if (new Set(all.slice(4).map(b => b.art)).size !== all.length - 4) fail(`art: models shared: ${all.map(b => b.art)}`);
+  if (new Set(Array.from({ length: VARIANTS }, (_, v) => look('office', v, ZONES.office.h / 2, ZONES.office.w / 2).height)).size < 3) fail('art: offices all one height');
   const street = new Set(Array.from({ length: 10 }, (_, i) => variant(300 + i * 50, 640)));
   if (street.size < 5 || variant(321.5, 77) !== variant(321.5, 77)) fail(`art: a street shows ${street.size} looks`);
 }
@@ -1246,6 +1252,118 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   for (const b of d.buildings) delete b.tier;
   const old = deserialize(JSON.stringify(d));
   if (old.buildings.some(b => b.kind !== 'gate' && (b.tier || b.lots.length !== 1 || b.lots[0].zone !== b.kind)) || old.lots.length !== old.buildings.length) fail('zones: an old save did not get its lots');
+}
+// Tiers: houses on adjacent lots of a street; one with good access, full and happy for UPGRADE_H hours grows into townhouses onto the
+// lot beside it, the house there merging in (its residents move in), its door at the middle of the two lots and its driveway laid again;
+// with the tier locked it never counts. DOWN_H hours of gridlock shrink it back to a house on one lot, the other lot left empty and zoned.
+// The tiers and specials save and load.
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.demandOff = true;
+  w.tutorialActive = false;
+  w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, street));
+  commitZone(w, planZone(w, { x: 400, y: 500 }, { x: 600, y: 500 }, 'home')!);
+  const row = w.lots.filter(l => l.y < 500).sort((p, q) => p.x - q.x), H = grow(w, row[2]), N = grow(w, row[3]);
+  w.lots = [row[2], row[3]];
+  w.connect();
+  const good = (): void => {
+    for (const x of w.graph.edges) x.heat = 0;
+    for (const b of w.buildings) { b.recent = [{ at: w.time, score: 1, shop: false }]; b.happy = 80; b.residents = b.cap; }
+    w.spawnAcc.home = -1e9;
+  };
+  const hours = (n: number, each: () => void): void => { for (let i = 0; i < n; i++) { each(); zoneHour(w, w.components()); } };
+  w.cityLevel = 1;
+  hours(T_UP + 2, good);
+  if (H.tier !== 1 || H.upH) fail(`tiers: a locked tier counted (${H.upH} h, tier ${H.tier})`);
+  w.cityLevel = LEVELS.length;
+  hours(T_UP - 1, good);
+  if (H.tier !== 1 || H.upH !== T_UP - 1) fail(`tiers: upgraded early or did not count (${H.upH} h)`);
+  const door0 = { ...H.node };
+  hours(1, good);
+  const mid = { x: (row[2].x + row[3].x) / 2, y: (row[2].y + row[3].y) / 2 };
+  if (H.tier !== 2 || H.label !== 'Townhouses' || H.lots.length !== 2 || w.buildings.includes(N) || row[3].building !== H) fail(`tiers: no merge (tier ${H.tier}, ${H.lots.length} lots)`);
+  if (H.residents !== 2 * TIER_DEFS.home[0].residents || !H.connected || dist(H.door(), mid) > 0.5 || dist(H.node, door0) < 5) fail(`tiers: merged ${H.residents} residents, door ${dist(H.door(), mid).toFixed(1)}px off the lots' middle`);
+  const json = serialize(w), v = deserialize(json);
+  if (serialize(v) !== json || v.buildings.find(b => b.tier === 2)?.lots.length !== 2) fail('tiers: a tier-2 building does not round-trip');
+  const jam = (): void => { for (const x of w.graph.edges) x.heat = 1; for (const b of w.buildings) b.recent = [{ at: w.time, score: 0, shop: false }]; };
+  hours(TUNING.DOWN_H, jam);
+  if (H.tier !== 1 || H.lots.length !== 1 || H.residents > H.cap || [row[2], row[3]].filter(l => l.building).length !== 1 || w.lots.length !== 2 || !H.connected || !w.message.includes('shrank')) fail(`tiers: no downgrade (tier ${H.tier}, ${H.lots.length} lots)`);
+}
+// Trips a day per tier (both legs, counted on day 2 of a street town): each home tier within ±30% of the spec table (game-v3 3), and a
+// factory sends more than a workshop, a logistics park more than a factory
+{
+  const day2 = (kind: Zone, tier: number): number => {
+    const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+    w.tutorialActive = false;
+    w.commitPath(w.planPath([{ x: 100, y: 500 }, { x: 1500, y: 500 }], 0, street));
+    const at = (k: Zone, x: number, t: number, up = false) => w.addBuilding(buildingAt(k, { x, y: up ? 480 : 520 }, up ? Math.PI / 2 : -Math.PI / 2, t));
+    const B = at(kind, 700, tier);
+    if (kind === 'home') { at('office', 250, 2, true); at('office', 1150, 2, true); at('shop', 1400, 1, true); }
+    else { at('home', 300, 4, true).residents = 320; at('home', 1100, 4, true).residents = 320; at('shop', 1400, 2, true); }
+    w.connect();
+    let n = 0;
+    const q = w.queueTrip.bind(w);
+    w.queueTrip = (f, t, p, back, who) => { if (w.day === 2 && (f === B || t === B) && (kind === 'home' || p === 'freight')) n++; return q(f, t, p, back, who); };
+    while (w.day < 3) { if (kind === 'home') B.residents = B.cap; w.update(DT * 2); }
+    return n;
+  };
+  const table = [10, 24, 54, 108];
+  table.forEach((x, i) => { const n = day2('home', i + 1); if (Math.abs(n - x) > 0.3 * x) fail(`trips: ${TIER_DEFS.home[i].name} made ${n} trips a day, the table says ~${x}`); });
+  const trucks = [1, 2, 3].map(t => day2('industry', t));
+  if (!(trucks[1] > trucks[0] && trucks[2] > trucks[1])) fail(`trips: trucks a day by industrial tier ${trucks}`);
+}
+// Specials: set down beside a street with the place tool, each paid for and adding its upkeep. A second stadium, a third plaza, a second
+// hospital under 4,000 residents and a terminal with no linked exit are refused, a terminal far from the exit too, one near it goes;
+// demolishing refunds SPECIAL_REFUND. A hospital's call drives an ambulance to the home and back; on a match day fans set off for the
+// stadium before kickoff and pay for arriving on time.
+{
+  const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  w.tutorialActive = false;
+  w.demandOff = true;
+  w.terrain.exits = [{ door: { x: 0, y: 500 }, end: { x: 160, y: 500 }, angle: 0 }];
+  w.addExits();
+  w.commitPath(w.planPath([{ x: 300, y: 500 }, { x: 1900, y: 500 }], 0, street));
+  const place = (s: Special, x: number, y: number): string => {
+    w.startPlacing(s);
+    const p = w.planPlace({ x, y })!;
+    if (p.ok) w.placeBuilding({ x, y });
+    return p.reason;
+  };
+  const m0 = w.money, u0 = w.upkeepPerDay();
+  for (const [s, x, y] of [['stadium', 500, 560], ['plaza', 800, 440], ['plaza', 1000, 440], ['hospital', 1300, 440]] as const) {
+    const why = place(s, x, y);
+    if (why) fail(`specials: ${s} refused: ${why}`);
+  }
+  const cost = SPECIALS.stadium.cost + 2 * SPECIALS.plaza.cost + SPECIALS.hospital.cost, up = SPECIALS.stadium.upkeep + 2 * SPECIALS.plaza.upkeep + SPECIALS.hospital.upkeep;
+  if (w.money !== m0 - cost || Math.abs(w.upkeepPerDay() - u0 - up) > 1e-9 || w.buildings.filter(b => b.special).some(b => !b.connected)) fail(`specials: paid $${m0 - w.money}, upkeep +${w.upkeepPerDay() - u0}`);
+  for (const [s, x, y, want] of [['stadium', 1700, 560, 'One stadium'], ['plaza', 1600, 440, 'At most 2'], ['hospital', 1500, 560, 'One hospital'], ['terminal', 400, 440, 'Link a highway']] as const) {
+    const why = place(s, x, y);
+    if (!why.startsWith(want)) fail(`specials: a ${s} was ${why ? `refused for '${why}'` : 'placed'}`);
+  }
+  w.commitPath(w.planPath([{ x: 160, y: 500 }, { x: 300, y: 500 }], 0, street));
+  if (!place('terminal', 1500, 560).startsWith('Build it within') || place('terminal', 330, 560)) fail('specials: the terminal ignored the exit distance');
+  const P = w.buildings.find(b => b.special === 'plaza')!, m1 = w.money;
+  w.tryDemolish(P);
+  if (w.buildings.includes(P) || w.money !== m1 + SPECIALS.plaza.cost * TUNING.SPECIAL_REFUND) fail(`specials: demolish refunded $${w.money - m1}`);
+  // an emergency call: the ambulance drives out and back, fast enough on empty roads to cheer the street
+  const home = w.addBuilding(buildingAt('home', { x: 1600, y: 480 }, Math.PI / 2, 1)), hosp = w.buildings.find(b => b.special === 'hospital')!;
+  w.connect();
+  w.demandOff = false;
+  w.queueTrip(hosp, home, 'emergency');
+  let amb = false;
+  for (let t = 0; t < 60 * 60 && !w.reports.some(r => r.purpose === 'emergency' && r.back); t++) { w.update(DT); amb ||= w.cars.some(c => c.kind === 'ambulance'); }
+  if (!amb || !w.reports.some(r => r.purpose === 'emergency' && r.back) || home.cheer <= w.time) fail(`specials: emergency call (ambulance ${amb}, cheer ${home.cheer.toFixed(0)})`);
+  // match day: day 2 at 17:00 the first half of the fans set off; one arriving before kickoff pays FAN_PAY
+  home.residents = home.cap;
+  const st = w.buildings.find(b => b.special === 'stadium')!, fans = Math.round(Math.min(TUNING.FANS_MAX, TUNING.FANS + w.population / TUNING.FANS_POP));
+  w.time = (24 + TUNING.KICKOFF - 2 - TUNING.START_HOUR) * HOUR + DT;
+  w.lastHour = 24 + TUNING.KICKOFF - 3;
+  w.update(DT);
+  const going = w.buildings.reduce((n, b) => n + b.pending.filter(t => t.to === st && t.purpose === 'visit').length, 0) + w.cars.filter(c => c.trip.to === st).length;
+  if (w.day !== 2 || Math.abs(going - fans / 2) > 1) fail(`specials: ${going} fans set off, expected ${fans / 2}`);
+  const b0 = w.ledger.today.business + w.ledger.today.trade;
+  for (let t = 0; t < 30 * 60; t++) w.update(DT);
+  if (!w.reports.some(r => r.to === st && r.purpose === 'visit') || w.ledger.today.business + w.ledger.today.trade - b0 < TUNING.FAN_PAY) fail('specials: no fan arrived or paid');
 }
 // Bank: below $0 on the hour a career city borrows LOAN_STEP at a time up to the cap, then it is frozen (zoning refused); interest is
 // charged hourly; Repay pays LOAN_STEP back. Creative never borrows.

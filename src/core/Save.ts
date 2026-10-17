@@ -3,7 +3,7 @@
 import { Game, HOUR, ledger0 } from './Game.ts';
 import type { Ledger } from './Game.ts';
 import { BIOMES, DIFFICULTY, SIZES, TUNING as T } from './config.ts';
-import type { GameConfig, Site, Zone } from './config.ts';
+import type { GameConfig, Site, Special, Zone } from './config.ts';
 import type { Metrics } from './Metrics.ts';
 import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
@@ -20,6 +20,7 @@ interface BuildingData {
   importAcc?: number; visitAcc?: number; // absent before outside connections
   happy: number; parts: Parts; recent: Building['recent']; pending: TripData[]; parked: TripData[];
   tier?: number; abandoned?: boolean; access?: number; downH?: number; upH?: number; // absent before zones (a legacy building)
+  special?: Special | null; cheer?: number; // absent before tiers
 }
 export interface SaveData {
   v: 1; cfg: GameConfig; time: number; lastHour: number; assignAt: number; money: number; score: number; upkeepDay: number;
@@ -56,7 +57,7 @@ export function serialize(g: Game): string {
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
       truckAcc: b.truckAcc, importAcc: b.importAcc, visitAcc: b.visitAcc, happy: b.happy, parts: b.parts, recent: b.recent, parked: b.parked.map(t => trip(t)),
-      tier: b.tier, abandoned: b.abandoned, access: b.access, downH: b.downH, upH: b.upH,
+      tier: b.tier, abandoned: b.abandoned, access: b.access, downH: b.downH, upH: b.upH, special: b.special, cheer: b.cheer,
       // a car on the road waits at its origin's door again
       pending: [...b.pending.map(t => trip(t)), ...g.cars.filter(c => c.trip.from === b).map(c => trip(c.trip, g.time))],
     })),
@@ -86,7 +87,7 @@ export function deserialize(json: string): Game {
     Object.assign(b, { residents: x.residents, stock: x.stock, staffed: x.staffed, shopAcc: x.shopAcc, truckAcc: x.truckAcc, happy: x.happy, parts: x.parts, recent: x.recent });
     b.importAcc = x.importAcc ?? 0;
     b.visitAcc = x.visitAcc ?? 0;
-    Object.assign(b, { tier: x.tier ?? 0, abandoned: x.abandoned ?? false, access: x.access ?? 0.7, downH: x.downH ?? 0, upH: x.upH ?? 0 });
+    Object.assign(b, { tier: x.tier ?? 0, abandoned: x.abandoned ?? false, access: x.access ?? 0.7, downH: x.downH ?? 0, upH: x.upH ?? 0, special: x.special ?? null, cheer: x.cheer ?? 0 });
     return b;
   });
   g.lots = (d.lots ?? []).map(({ b, ...l }) => {

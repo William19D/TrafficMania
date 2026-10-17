@@ -4,7 +4,7 @@ import { shade } from './BuildingArt.ts';
 
 // Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, paint and pixel scale; the renderer
 // draws one rotated drawImage per vehicle plus the live lights (brake, indicators, purpose dot) on top.
-export const VW: Record<Kind, number> = { car: 8, truck: 8.5, moto: 4 };
+export const VW: Record<Kind, number> = { car: 8, truck: 8.5, moto: 4, ambulance: 8 };
 // Sprite frame: VPAD px round the body lengthwise, VH px tall (room for the side mirrors and the shadow's blur)
 export const VPAD = 2, VH = 14;
 // Paint by weight, like a real car park: mostly white, black and silver, a rare yellow taxi. Trucks wear fleet liveries
@@ -25,7 +25,7 @@ export function pick(p: Palette, u: number): number {
   return p.length - 1;
 }
 
-const KI: Record<Kind, number> = { car: 0, truck: 1, moto: 2 };
+const KI: Record<Kind, number> = { car: 0, truck: 1, moto: 2, ambulance: 3 };
 const GLASS = '#2C3949', LAMP = '#FFF4C8';
 const sprites = new Map<number, HTMLCanvasElement>();
 
@@ -130,12 +130,21 @@ function draw(c: CanvasRenderingContext2D, kind: Kind, col: string, h: number, w
     heads(h - 0.9, w - 1.4);
     return;
   }
-  rect(-h, -w, 2 * h, 2 * w, 2.6, col, edge, 0.6);
-  // hood highlight, glazed cabin (rear window, side glass, windshield) and a lighter roof panel
-  rect(h - 4, -w + 1.6, 3.2, 2 * w - 3.2, 1.2, shade(col, 0.12));
-  rect(-h + 2.1, -w + 0.8, 2 * h - 7.5, 2 * w - 1.6, 1.2, GLASS);
-  rect(-h + 4, -w + 1.3, 2 * h - 10, 2 * w - 2.6, 1.1, shade(col, 0.2));
+  const amb = kind === 'ambulance';
+  rect(-h, -w, 2 * h, 2 * w, 2.6, amb ? '#F7F7F5' : col, amb ? '#9A9A96' : edge, 0.6);
+  if (amb) {
+    // boxy rear with a purpose stripe and a red cross
+    rect(-h + 0.8, -w + 0.9, 2 * h - 6.8, 2 * w - 1.8, 1, '#FFFFFF', '#D2D2CE', 0.4);
+    rect(-h + 1, -0.6, 2 * h - 7.2, 1.2, 0, col);
+    rect(-h + 3.2, -2.2, 1.2, 4.4, 0.2, '#E5484D');
+    rect(-h + 1.6, -0.6, 4.4, 1.2, 0.2, '#E5484D');
+  } else {
+    // hood highlight, glazed cabin (rear window, side glass, windshield) and a lighter roof panel
+    rect(h - 4, -w + 1.6, 3.2, 2 * w - 3.2, 1.2, shade(col, 0.12));
+    rect(-h + 2.1, -w + 0.8, 2 * h - 7.5, 2 * w - 1.6, 1.2, GLASS);
+    rect(-h + 4, -w + 1.3, 2 * h - 10, 2 * w - 2.6, 1.1, shade(col, 0.2));
+  }
   rect(h - 5.6, -w + 0.9, 1.9, 2 * w - 1.8, 0.8, GLASS);
-  mirrors(h - 5.2, shade(col, -0.35));
+  mirrors(h - 5.2, amb ? '#C8C8C4' : shade(col, -0.35));
   heads(h - 0.95, w - 1.3);
 }

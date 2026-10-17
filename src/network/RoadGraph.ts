@@ -18,6 +18,8 @@ export const LC_S = 0.6, LC_M = 110;
 // Max braking px/s/s. Merge: a driveway car takes a gap of MERGE_GAP s before road traffic reaches the junction; a car at the front
 // of its lane for MERGE_S (a driveway, a yield side road, a permissive left) makes the traffic it gives way to let it in
 export const BRAKE = 180, MERGE_GAP = 1, MERGE_S = 1;
+// px out from a light at which an ambulance turns it green
+export const AMB_R = 60;
 
 // Road types: tier (config TIERS), lanes PER DIRECTION; a one-way road only has lanes a->b
 export const LANE_W = 9;
@@ -551,11 +553,18 @@ export class RoadGraph {
       n.queue = n.queue.filter(c => c.lane.to === n);
       n.delay += ((n.queue.length ? n.queue.reduce((s, c) => s + c.wait, 0) / n.queue.length : 0) - n.delay) * k;
       const plan = n.control === 'light' || n.control === 'yield' || n.plan ? planOf(n) : null;
+      // Ambulance (game-v3 3): its whole lane goes first (a stable sort keeps the cars ahead of it in order); a light turns green for it
+      // when it is AMB_R out, a yield treats it as the main road, a stop lets it roll
+      const amb = n.queue.filter(c => c.kind === 'ambulance' && c.exit), ambL = new Set(amb.map(c => c.lane));
+      if (ambL.size) n.queue.sort((p, q) => +ambL.has(q.lane) - +ambL.has(p.lane));
       if (n.control === 'light') {
         const ph = plan!.phases;
         n.phaseTimer += dt;
         if (n.phase >= ph.length) n.phase = 0;
         if (n.phaseTimer >= ph[n.phase].seconds) { n.phaseTimer = 0; n.phase = (n.phase + 1) % ph.length; }
+        const a = amb.find(c => c.lane.edge.length - c.s < AMB_R), x = a && [approachOf(plan!, n, a.lane.edge), moveOf(n, a.lane.edge, a.exit!.edge)] as const;
+        const green = x ? ph.findIndex(p => p.sig[x[0]][x[1]] === 2) : -1, go = green >= 0 ? green : x ? ph.findIndex(p => p.sig[x[0]][x[1]] > 0) : -1;
+        if (go >= 0 && !(ph[n.phase].sig[x![0]][x![1]] > 0)) { n.phase = go; n.phaseTimer = 0; }
       }
       if (!n.queue.length) continue;
       // Arrival order; lights and the main road of a yield junction admit every car their signal lets go, a plain junction every car
@@ -579,7 +588,7 @@ export class RoadGraph {
       // or a light showing it yield) stops the traffic it gives way to, so it never waits until it gives up.
       const main = n.control === 'yield' ? mainEdges(n) : [];
       const starving = (c: Car): boolean => c.wait > MERGE_S && c.lane.cars[c.lane.cars.length - 1] === c && this.fits(n, c);
-      const side = n.queue.some(c => !main.includes(c.lane.edge) && starving(c));
+      const side = n.queue.some(c => !main.includes(c.lane.edge) && !ambL.has(c.lane) && starving(c));
       const lefty = (a: number): boolean => a >= 0 && n.queue.some(c => {
         const y = mv.get(c);
         return !!y && y[0] === a && y[1] === LEFT && (n.control !== 'light' || plan!.phases[n.phase].sig[a][LEFT] === 1) && starving(c);
@@ -594,12 +603,12 @@ export class RoadGraph {
         }
         if (n.control === 'yield') {
           // a side road goes into an empty box with no main-road car waiting
-          if (main.includes(c.lane.edge)) return !side && (x![1] === LEFT ? left(c, x![0]) : !lefty(oppositeOf(plan!, x![0])));
+          if (main.includes(c.lane.edge) || ambL.has(c.lane)) return !side && (x![1] === LEFT ? left(c, x![0]) : !lefty(oppositeOf(plan!, x![0])));
           return !n.occupants.size && (starving(c) || !n.queue.some(o => o !== c && main.includes(o.lane.edge)));
         }
         if (rv) return !this.ringNear(n, c) && this.exitRoom(n, c);
         // stop: only from a standstill at the line
-        if (n.control === 'stop') return c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3;
+        if (n.control === 'stop') return ambL.has(c.lane) || (c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3);
         // driveway: into a gap in the road's traffic; after MERGE_S the road keeps clear (held) and only cars that can't stop count
         if (dj) return !this.roadNear(n, c, o => c.wait < MERGE_S ? o.speed * MERGE_GAP + CAR_LEN : 0);
         // plain: never past an earlier car it crosses that only waits for the box (first come, first served)

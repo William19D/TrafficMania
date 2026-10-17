@@ -13,8 +13,8 @@ import type { Commuter, Parts } from '../entities/Building.ts';
 import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
-import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_POP, LEVELS, TIERS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
-import type { Feature, GameConfig, Purpose, Site, Tier, Zone } from './config.ts';
+import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_POP, LEVELS, SPECIALS, TIERS, TIER_DEFS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
+import type { Feature, GameConfig, Purpose, Site, Special, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 import { ICHG, ICHG_KEYS } from './Templates.ts';
 import { Metrics } from './Metrics.ts';
@@ -56,15 +56,17 @@ export const fmtMin = (secs: number): string => {
 export const jamAt = (n: Node | null): Control | 'road' => !n ? 'road' : onRing(n) ? 'roundabout' : n.control === 'none' && n.edges.length < 3 ? 'road' : n.control;
 export interface Snap { node: Node | null; edge: Edge | null; point: Vec }
 // Place tool ghost: road = where its driveway would join (null: no access road in reach); warn = what its residents will dislike
-export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null }
+export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null; label: string }
 export const ZONE_KEYS = (Object.keys(ZONES) as Site[]).filter((z): z is Zone => z !== 'gate');
 // Population to reach city level n (level 1 = the start)
 export const levelPop = (n: number): number =>
   n <= LEVELS.length ? LEVELS[Math.max(0, n - 1)].pop : LEVELS[LEVELS.length - 1].pop + (n - LEVELS.length) * ENDLESS_POP;
-// What city level n unlocks: tiers, then features
+// What city level n unlocks: road tiers, features, building tiers, specials
 export const levelUnlocks = (n: number): string[] => [
   ...(Object.keys(TIERS) as Tier[]).filter(t => TIERS[t].level === n).map(t => TIERS[t].label),
   ...Object.values(UNLOCKS).filter(u => u.level === n).map(u => u.label),
+  ...Object.values(TIER_DEFS).flat().filter(d => d.level === n && n > 1).map(d => `${d.name}s grow`),
+  ...Object.values(SPECIALS).filter(d => d.level === n).map(d => d.name),
 ];
 export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number; type: RoadType }
 // cost in $; net: bend and interchange plans, cost minus the full price of the replaced run (bend) or the refunds (interchange);
@@ -130,8 +132,8 @@ export class Game {
   zonePlan: ZonePlan | null = null;
   // Bank loan balance (soft fail outside Challenge)
   loan = 0;
-  // placing = the zone the place tool holds; placeAngle turns a free ghost (R)
-  placing: Zone | null = null;
+  // placing = the zone (a moved legacy building's) or special the place tool holds; placeAngle turns a free ghost (R)
+  placing: Zone | Special | null = null;
   placeAngle = Math.PI / 2;
   // Building the place tool is moving (placing = its kind, no tray needed); the occupied building a Demolish click armed (a second click
   // removes it)
@@ -292,6 +294,7 @@ export class Game {
         this.stats.arrived++;
         const t = car.trip, secs = this.time - t.departed;
         if (!t.back) this.business(t);
+        if (t.purpose === 'emergency' && !t.back && secs <= T.FAST_X * t.ideal) this.cheer(t.to);
         const o = this.outcome(t, secs);
         this.report(t, o, secs);
         if (car === this.follow) this.say(`Arrived: ${OUTCOME_LABEL[o]}, ${fmtMin(secs)}`);
@@ -307,9 +310,12 @@ export class Game {
 
   // Business income on arrival: a worker at a workplace, a customer at a shop (half when it has no goods), a truck of goods;
   // trade: an export reaching a highway exit, an import or a visitor from one (a commuter from outside pays as a worker)
+  // A terminal's export pays 1.5x, a fan FAN_PAY before kickoff, an ambulance nothing
   private business(t: Trip): void {
+    if (t.purpose === 'emergency') return;
     const out = t.to.kind === 'gate', trade = out || (t.from.kind === 'gate' && t.purpose !== 'commute');
-    const x = out ? T.TAX_EXPORT : trade ? (t.purpose === 'freight' ? T.TAX_IMPORT : T.TAX_VISIT)
+    const x = t.to.special === 'stadium' && t.purpose === 'visit' ? (this.hour < T.KICKOFF ? T.FAN_PAY : 0)
+      : out ? T.TAX_EXPORT * (t.from.special === 'terminal' ? 1.5 : 1) : trade ? (t.purpose === 'freight' ? T.TAX_IMPORT : T.TAX_VISIT)
       : t.purpose === 'commute' ? T.TAX_COMMUTE : t.purpose === 'freight' ? T.TAX_FREIGHT : T.TAX_SHOP * (t.to.stock > 0 ? 1 : 0.5);
     const pay = x * DIFFICULTY[this.cfg.difficulty].tax;
     this.money += pay;
@@ -390,28 +396,32 @@ export class Game {
     const reach = new Set(this.buildings.filter(b => b.kind === 'gate').map(b => comp.get(b.node)));
     // the exit a trip from or to b uses, gravity-picked (no roll without one, so a town with no linked exit keeps its stream)
     const exit = (b: Building): Building | null => reach.has(comp.get(b.node)) ? this.pick(b, comp, x => +(x.kind === 'gate')) : null;
+    // with a freight terminal in reach, a factory's exports and imports go through it instead (the terminal's own trucks run to the exit)
+    const port = (b: Building): Building | null =>
+      (this.buildings.some(x => x.special === 'terminal' && comp.get(x.node) === comp.get(b.node)) ? this.pick(b, comp, x => +(x.special === 'terminal')) : null) ?? exit(b);
     const span = T.COMMUTE_MAX - T.COMMUTE_MIN, morning = h >= T.COMMUTE_MIN && h < T.COMMUTE_MAX, held = new Map<Building, number>();
     if (morning) for (const c of this.commuters) if (c.work) held.set(c.work, (held.get(c.work) ?? 0) + 1);
     this.grow(comp);
     zoneHour(this, comp);
+    this.specialsHour(h, comp, exit);
     for (const b of this.buildings) {
       if (b.abandoned) continue;
       if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.purpose === 'commute').length * T.PEOPLE_PER_CAR / b.jobs);
       if (b.kind === 'home') {
         b.shopAcc += b.residents / T.PEOPLE_PER_CAR * T.SHOP_RATE * T.SHOP_CURVE[h] / SHOP_SUM * mult;
         for (; b.shopAcc >= 1; b.shopAcc--) {
-          const to = this.pick(b, comp, s => s.kind === 'shop' ? s.jobs : 0);
+          const to = this.pick(b, comp, s => s.kind === 'shop' ? s.jobs * s.def.draw : 0);
           if (to) this.queueTrip(b, to, 'shop');
         }
         continue;
       }
-      const linked = b.kind !== 'gate' && reach.has(comp.get(b.node));
-      if (b.kind === 'industry' && trucking) this.trucks(b, comp, mult, linked ? exit : null);
+      const linked = b.kind !== 'gate' && reach.has(comp.get(b.node)), factory = b.kind === 'industry' && !b.special;
+      if (b.def.trucks && trucking) this.trucks(b, comp, mult, linked ? (factory ? port : exit) : null);
       if (!linked) continue;
-      if (b.kind === 'industry' && trucking) b.importAcc += T.IMPORTS_PER_DAY * b.staffed * mult / (t1 - t0);
+      if (factory && trucking) b.importAcc += T.IMPORTS_PER_DAY * b.staffed * mult / (t1 - t0);
       if (b.kind === 'shop' && trucking && b.stock <= T.IMPORT_STOCK) b.importAcc += T.IMPORT_SHOP;
-      for (; b.importAcc >= 1; b.importAcc--) { const from = exit(b); if (from) this.queueTrip(from, b, 'freight'); }
-      if (b.kind === 'shop' || b.kind === 'office') b.visitAcc += T.VISITS[b.kind] * T.SHOP_CURVE[h] / SHOP_SUM * mult;
+      for (; b.importAcc >= 1; b.importAcc--) { const from = port(b); if (from) this.queueTrip(from, b, 'freight'); }
+      if (b.def.visits) b.visitAcc += b.def.visits * T.SHOP_CURVE[h] / SHOP_SUM * mult;
       for (; b.visitAcc >= 1; b.visitAcc--) { const from = exit(b); if (from) this.queueTrip(from, b, 'visit'); }
       // the i-th commuter from outside arrives in hour COMMUTE_MIN + i mod span
       const n = morning ? Math.floor((Math.floor(b.jobs / T.PEOPLE_PER_CAR) - (held.get(b) ?? 0)) * T.OUTSIDE_JOBS) : 0;
@@ -422,15 +432,36 @@ export class Game {
     }
   }
 
-  // A factory's trucks this hour (TRUCKS_PER_DAY x staffed): goods to a reachable shop, the emptier the likelier; with an exit
-  // linked, EXPORT_SHARE of them (all, with no shop to reach) leave the map through it
+  // A factory's (or a terminal's) trucks this hour (its tier's trucks a day x staffed): goods to a reachable shop, the emptier the
+  // likelier; with an exit (a factory: or a terminal) linked, its tier's export share of them (all, with no shop to reach) go there
   private trucks(b: Building, comp: Map<Node, number>, mult: number, exit: ((b: Building) => Building | null) | null): void {
     const [t0, t1] = T.TRUCK_HOURS;
-    b.truckAcc += T.TRUCKS_PER_DAY * b.staffed * mult / (t1 - t0);
+    b.truckAcc += b.def.trucks * b.staffed * mult / (t1 - t0);
     for (; b.truckAcc >= 1; b.truckAcc--) {
       const shop = this.pick(b, comp, s => s.kind === 'shop' && !s.abandoned ? 1 + Math.max(0, T.STOCK_START - s.stock) : 0), out = exit?.(b);
-      const to = out && (!shop || random() < T.EXPORT_SHARE) ? out : shop;
+      const to = out && (!shop || random() < b.def.export) ? out : shop;
       if (to) this.queueTrip(b, to, 'freight');
+    }
+  }
+
+  // Specials on the hour. Hospital: emergency calls (one per EMERGENCY_POP residents a day, shared among the hospitals), each an
+  // ambulance out to a home picked by residents. Stadium: on match days (every MATCH_DAYS) the feed warns at noon, then the fans set off
+  // the two hours before KICKOFF (FANS_OUT of them from linked exits, the rest from homes) and stay until MATCH_END plus up to an hour.
+  // ponytail: G5's match-day event adds the countdown ring and the on-time bonus
+  private specialsHour(h: number, comp: Map<Node, number>, exit: (b: Building) => Building | null): void {
+    const hosp = this.buildings.filter(b => b.special === 'hospital' && b.connected);
+    for (const b of hosp) {
+      b.visitAcc += this.population / T.EMERGENCY_POP / 24 / hosp.length;
+      for (; b.visitAcc >= 1; b.visitAcc--) { const to = this.pick(b, comp, x => x.kind === 'home' ? x.residents : 0); if (to) this.queueTrip(b, to, 'emergency'); }
+    }
+    const st = this.buildings.find(b => b.special === 'stadium' && b.connected);
+    if (!st || this.day % T.MATCH_DAYS) return;
+    const fans = Math.round(Math.min(T.FANS_MAX, T.FANS + this.population / T.FANS_POP));
+    if (h === 12) this.say(`Match day: ${fans} fans head to the Stadium from ${T.KICKOFF - 2}:00, kickoff ${T.KICKOFF}:00`);
+    if (h !== T.KICKOFF - 2 && h !== T.KICKOFF - 1) return;
+    for (let i = 0; i < fans / 2; i++) {
+      const from = (i % 5 < 5 * T.FANS_OUT ? exit(st) : null) ?? this.pick(st, comp, x => x.kind === 'home' ? x.residents : 0);
+      if (from) this.queueTrip(from, st, 'visit').leave = this.time + (T.MATCH_END - h + (i % 4) / 4) * HOUR;
     }
   }
 
@@ -461,7 +492,8 @@ export class Game {
   // job: share of its commuters with a workplace (0 with none); shop: share of its last 24h shopping trips that arrived (none made:
   // 1 when a shop is reachable); trips: mean SCORE of its last 24h trips (0.6 with none, 0 with no job and no shop to go to);
   // without a road job = shop = trips = 0, so the home empties;
-  // pollution: staffed factories, each fading out at POLLUTION_R; noise: the loudest road within NOISE_R by tier, louder with traffic.
+  // pollution: staffed factories, each fading out at its tier's reach; noise: the loudest road within NOISE_R by tier, louder with traffic,
+  // or a noisy workplace (a logistics park), x the home's tier noiseX; a fast ambulance's cheer adds CHEER points for a day.
   // ponytail: scans every commuter, factory and road per home each hour; a spatial grid if big cities stutter on the hour
   rateHome(b: Building, comp = this.components()): number {
     const cut = this.time - T.DAY_SECONDS;
@@ -471,8 +503,9 @@ export class Game {
     p.shop = !b.connected ? 0 : shops.length ? shops.filter(r => r.score > 0).length / shops.length
       : +this.buildings.some(s => s.kind === 'shop' && !s.abandoned && comp.get(s.node) === comp.get(b.node));
     p.trips = b.recent.length && b.connected ? b.recent.reduce((n, r) => n + r.score, 0) / b.recent.length : p.job || p.shop ? 0.6 : 0;
-    p.pollution = Math.min(1, this.buildings.reduce((n, o) => n + (o.kind === 'industry' ? o.staffed * Math.max(0, 1 - dist(o, b) / T.POLLUTION_R) : 0), 0));
+    p.pollution = Math.min(1, this.buildings.reduce((n, o) => n + (o.def.pollution ? o.staffed * Math.max(0, 1 - dist(o, b) / o.def.pollution) : 0), 0));
     p.noise = 0;
+    for (const o of this.buildings) if (o.def.noise) p.noise = Math.max(p.noise, o.def.noise * o.staffed * Math.max(0, 1 - dist(o, b) / T.NOISE_R));
     for (const e of this.graph.edges) {
       if (e.drive || e.tunnel) continue;
       const d = distToSegment(b, e.a, e.b).d;
@@ -480,7 +513,8 @@ export class Game {
       const density = e.lanes.reduce((n, l) => n + l.cars.length, 0) * (CAR_LEN + GAP) / (e.length * e.lanes.length);
       p.noise = Math.max(p.noise, TIERS[e.type.tier].noise * (1 - d / T.NOISE_R) * (0.5 + 0.5 * Math.min(1, 3 * density)));
     }
-    const q = T.W_JOB * p.job + T.W_SHOP * p.shop + T.W_TRIPS * p.trips - T.W_POLL * p.pollution - T.W_NOISE * p.noise;
+    p.noise = Math.min(1, p.noise * b.def.noiseX);
+    const q = T.W_JOB * p.job + T.W_SHOP * p.shop + T.W_TRIPS * p.trips - T.W_POLL * p.pollution - T.W_NOISE * p.noise + (b.cheer > this.time ? T.CHEER / 100 : 0);
     return 100 * Math.max(0, Math.min(1, q));
   }
 
@@ -583,10 +617,11 @@ export class Game {
   }
 
   // Arrived: a shopper (or a visitor) buys one item and stays SHOP_STAY hours, a truck unloads and turns back at once,
-  // a commuter stays for its shift (leave was set when it left home, or the exit)
+  // a commuter stays for its shift (leave was set when it left home, or the exit), a fan for the match, an ambulance CALL_STAY
   private park(t: Trip): void {
     const b = t.to;
-    if (t.purpose === 'shop' || t.purpose === 'visit') { if (b.kind === 'shop') b.stock = Math.max(0, b.stock - 1); t.leave = this.time + T.SHOP_STAY * HOUR; }
+    if ((t.purpose === 'shop' || t.purpose === 'visit') && b.special !== 'stadium') { if (b.kind === 'shop') b.stock = Math.max(0, b.stock - 1); t.leave = this.time + T.SHOP_STAY * HOUR; }
+    if (t.purpose === 'emergency') t.leave = this.time + T.CALL_STAY * HOUR;
     if (t.purpose === 'freight' && b.kind === 'shop') b.stock += T.STOCK_PER_TRUCK;
     if (t.who) t.who.at = 'away';
     b.parked.push(t);
@@ -638,7 +673,7 @@ export class Game {
     const one = b.node.edges.length === 1 ? b.node.edges[0] : null, min = Math.min(KINDS[rk].len, KINDS.truck.len);
     if (one && !this.graph.lanesFrom(one, b.node).some(l => { const f = l.cars[0]; return !f || f.s >= (f.len + min) / 2 + GAP * 2; })) return;
     for (let i = 0; i < b.pending.length; i++) {
-      const trip = b.pending[i], kind = trip.purpose === 'freight' ? 'truck' : rk, len = KINDS[kind].len;
+      const trip = b.pending[i], kind = trip.purpose === 'freight' ? 'truck' : trip.purpose === 'emergency' ? 'ambulance' : rk, len = KINDS[kind].len;
       const path = findPath(this.graph, b.node, trip.to.node);
       if (!path || path.length < 2) { this.fail(b.pending.splice(i--, 1)[0], 'noroute'); continue; }
       const e = this.graph.edgeBetween(b.node, path[1]);
@@ -913,6 +948,7 @@ export class Game {
     let sum = 0;
     for (const e of this.graph.edges) sum += this.edgePrice(e) * T.UPKEEP_RATE;
     for (const n of [...this.graph.nodes, ...this.graph.rings.map(r => r.hub)]) sum += CONTROL_UPKEEP[n.control] * (n.control === 'roundabout' ? RINGS[n.ring].cost : 1);
+    for (const b of this.buildings) if (b.special) sum += SPECIALS[b.special].upkeep;
     return sum * DIFFICULTY[this.cfg.difficulty].upkeep;
   }
 
@@ -1140,13 +1176,35 @@ export class Game {
   }
 
   // Demolish click on a building: an empty one goes at once, an occupied one arms on the first click and goes on the second. Free;
-  // its lots stay zoned, so the zone grows a new one there
+  // its lots stay zoned, so the zone grows a new one there. A special refunds SPECIAL_REFUND of its price.
   tryDemolish(b: Building): boolean {
     const who = this.occupants(b);
     if (who && this.armed !== b) { this.armed = b; this.say(`Click again to demolish: ${who}`); return false; }
     this.demolishBuilding(b);
-    this.say(`${b.label} demolished${b.lots.length ? ': the lot stays zoned' : ''}`);
+    const back = this.specialRefund(b);
+    if (back) this.spend(-back);
+    this.say(`${b.label} demolished${b.lots.length ? ': the lot stays zoned' : back ? ` · +${fmtMoney(back)}` : ''}`);
     return true;
+  }
+
+  specialRefund(b: Building): number {
+    return b.special && !this.creative ? SPECIALS[b.special].cost * T.SPECIAL_REFUND : 0;
+  }
+
+  // Moves b's footprint to (x, y, angle) at its current size: its door node and driveway follow, cars on their way to it find the new door
+  rehome(b: Building, x: number, y: number, angle: number): void {
+    this.unhook(b);
+    Object.assign(b, { x, y, angle });
+    const d = b.door();
+    this.graph.addNode(d.x, d.y, b);
+    this.connect();
+    for (const c of this.cars) if (c.trip.to === b) c.path = null;
+    this.changed();
+  }
+
+  // A fast ambulance at home h: homes within CHEER_R are CHEER points happier for a day
+  private cheer(h: Building): void {
+    for (const o of this.buildings) if (o.kind === 'home' && dist(o, h) <= T.CHEER_R) o.cheer = this.time + T.DAY_SECONDS;
   }
 
   // Lets go of b's door: its driveways go (their cars back to their origin's door), the door node stays as a plain joint
@@ -1192,7 +1250,7 @@ export class Game {
   startMove(b: Building): void {
     if (b.kind === 'gate') return;
     if (b.lots.length) { this.say('Buildings stay on their lots: demolish one and its lot grows a new one'); return; }
-    this.placing = b.kind;
+    this.placing = b.special ?? b.kind;
     this.setTool('place');
     this.moving = b;
   }
@@ -1227,7 +1285,7 @@ export class Game {
 
   // ---- Place tool (moves, and buildings set down by scripts) ----
 
-  startPlacing(kind: Zone = 'home'): void {
+  startPlacing(kind: Zone | Special = 'home'): void {
     this.moving = null;
     this.placing = kind;
     this.setTool('place');
@@ -1247,23 +1305,50 @@ export class Game {
       const d = e.width / 2 + T.DRIVE_GAP;
       b = buildingAt(kind, { x: q.x + nx * d, y: q.y + ny * d }, Math.atan2(-ny, -nx));
       road = q;
-    } else b = new Building(kind, p.x, p.y, this.placeAngle);
+    } else b = Object.assign(buildingAt(kind, p, this.placeAngle), { x: p.x, y: p.y });
     const pts = b.outline(), m = 4, mv = this.moving;
     // ponytail: overlap by sampled outline points both ways; fine for near-square footprints, SAT if long thin ones arrive
-    const reason = (mv ? this.afford(this.moveCost) : '')
+    const sp = b.special ? SPECIALS[b.special] : null;
+    const reason = (mv ? this.afford(this.moveCost) : sp ? this.specialWhy(b) || this.afford(sp.cost * +!this.creative) : '')
       || (pts.some(q => q.x < m || q.y < m || q.x > WORLD.w - m || q.y > WORLD.h - m) ? 'Outside the map'
       : pts.some(q => inWater(this.terrain, q, m) || inMountain(this.terrain, q, m)) ? 'Blocked by water or a mountain'
       : this.graph.edges.some(e => !(mv && e.drive && (e.a === mv.node || e.b === mv.node)) && this.hitsBuilding(e.a, e.b, e.type, e.width / 2 + m, [b])) ? 'Overlaps a road'
       : this.buildings.some(o => o !== mv && (pts.some(q => o.contains(q, m)) || o.outline().some(q => b.contains(q, m)))) ? 'Overlaps a building'
       : '');
-    const near = (z: Zone): number => this.buildings.filter(o => o.kind === z && dist(o, b) < T.POLLUTION_R).length;
+    const factories = this.buildings.filter(o => o.def.pollution && dist(o, b) < o.def.pollution).length;
+    const homes = b.def.pollution ? this.buildings.filter(o => o.kind === 'home' && dist(o, b) < b.def.pollution).length : 0;
     const noisy = () => this.graph.edges.some(e => !e.tunnel && TIERS[e.type.tier].noise >= T.NOISY && distToSegment(b, e.a, e.b).d < T.NOISE_R);
     const warn = !road ? 'No road yet: connect its door'
-      : kind === 'home' && near('industry') ? 'Factory nearby: residents will be less happy'
-      : kind === 'home' && noisy() ? 'Noisy road: residents will be less happy'
-      : kind === 'industry' && near('home') ? `Pollutes ${near('home')} home${near('home') > 1 ? 's' : ''} nearby`
+      : b.kind === 'home' && factories ? 'Factory nearby: residents will be less happy'
+      : b.kind === 'home' && noisy() ? 'Noisy road: residents will be less happy'
+      : homes ? `Pollutes ${homes} home${homes > 1 ? 's' : ''} nearby`
       : '';
-    return { b, ok: !reason, reason, warn, road };
+    const label = mv ? `Move here${this.moveCost ? ` · ${fmtMoney(this.moveCost)}` : ''}`
+      : sp ? `${sp.name} · +${this.tripsPerDay(b)} trips/day · ${fmtMoney(this.creative ? 0 : sp.cost)} · upkeep ${fmtMoney(sp.upkeep)}/day` : b.label;
+    return { b, ok: !reason, reason, warn, road, label };
+  }
+
+  // How many of special s may stand: plazas 2, a stadium 1, a hospital per HOSPITAL_POP residents (at least 1), a terminal per linked exit
+  specialLimit(s: Special): number {
+    return s === 'plaza' ? 2 : s === 'stadium' ? 1 : s === 'hospital' ? Math.max(1, Math.floor(this.population / T.HOSPITAL_POP)) : this.linkedExits().length;
+  }
+
+  // Why special b (the ghost, or the one being moved) cannot go where it stands: locked, at its limit, a terminal away from the exits
+  specialWhy(b: Building): string {
+    const s = b.special!, d = SPECIALS[s], n = this.buildings.filter(o => o.special === s && o !== this.moving).length;
+    if (!this.unlocked(d.level)) return `Unlocks at level ${d.level}: ${d.name}`;
+    if (n >= this.specialLimit(s)) return s === 'terminal' ? (n ? 'One terminal per linked highway exit' : 'Link a highway exit to the town first')
+      : s === 'hospital' ? `One hospital per ${T.HOSPITAL_POP.toLocaleString('en-US')} residents` : s === 'plaza' ? 'At most 2 mall plazas' : 'One stadium per city';
+    if (s === 'terminal' && !this.buildings.some(o => o.kind === 'gate' && dist(o, b) <= T.TERMINAL_R)) return `Build it within ${T.TERMINAL_R} px of a highway exit`;
+    return '';
+  }
+
+  // Rough car trips a day to and from b, both legs: its commuters, shoppers, visitors and trucks; a stadium's fans, a hospital's calls
+  tripsPerDay(b: Building): number {
+    const d = b.def, pop = this.population;
+    const n = d.residents * (T.EMPLOY_RATE + T.SHOP_RATE) / T.PEOPLE_PER_CAR + d.jobs / T.PEOPLE_PER_CAR + d.visits + d.trucks
+      + (b.special === 'stadium' ? Math.min(T.FANS_MAX, T.FANS + pop / T.FANS_POP) / T.MATCH_DAYS : b.special === 'hospital' ? pop / T.EMERGENCY_POP : 0);
+    return Math.round(2 * n);
   }
 
   get moveCost(): number { return this.creative ? 0 : T.MOVE_COST; }
@@ -1276,12 +1361,7 @@ export class Game {
     if (!plan.ok) { this.say(plan.reason); return false; }
     const mv = this.moving;
     if (mv) {
-      this.unhook(mv);
-      Object.assign(mv, { x: plan.b.x, y: plan.b.y, angle: plan.b.angle });
-      const d = mv.door();
-      this.graph.addNode(d.x, d.y, mv);
-      this.connect();
-      for (const c of this.cars) if (c.trip.to === mv) c.path = null;
+      this.rehome(mv, plan.b.x, plan.b.y, plan.b.angle);
       this.spend(this.moveCost);
       this.sfx.add('place');
       this.setTool('edit');
@@ -1294,6 +1374,13 @@ export class Game {
     this.addBuilding(b);
     this.connect();
     this.sfx.add('place');
+    // a special is paid for, and its card opens
+    if (b.special) {
+      this.spend(this.creative ? 0 : SPECIALS[b.special].cost);
+      this.setTool('edit');
+      this.picked = b;
+      this.say(`${b.label} built: ${SPECIALS[b.special].tip}`);
+    }
     return true;
   }
   typeOf(run: Edge[]): RoadType {

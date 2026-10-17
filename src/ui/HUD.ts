@@ -4,8 +4,9 @@ import { CONTROL_LABEL, HOUR, TOOL_LOCK, fmtMin, jamAt, fmtMoney, levelPop, leve
 import type { Sample } from '../core/Metrics.ts';
 import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
-import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
-import type { Purpose, Site, Tier, Zone } from '../core/config.ts';
+import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
+import { upgradeBlock } from '../core/Zones.ts';
+import type { Purpose, Site, Special, Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
 import type { TripReport } from '../entities/Trip.ts';
@@ -49,6 +50,15 @@ const zonePic = (z: Site): string => {
 const zoneBtn = (z: Zone | 'none'): string => z === 'none'
   ? `<button class="zone unzone" data-zone="none" aria-pressed="false" data-tip="Unzone: drag over lots to clear them. An empty lot refunds its price">${icon('demolish')}<span>Unzone</span></button>`
   : `<button class="zone" data-zone="${z}" aria-pressed="false" data-tip="${ZONE_NAME[z]}: drag along a road to zone it. ${ZONE_TIP[z]}">${zonePic(z)}<span>${ZONE_NAME[z]}</span><span class="dm" data-z="${z}"><i></i></span></button>`;
+// A special's button in the Build menu: its picture, name and price; locked ones stay clickable so the ghost says why
+const SPECIAL_PIC: Record<Special, string> = {
+  plaza: '<path d="M2 9h20v12H2z" fill="#DCDFE2"/><path d="M9 9h6v12H9z" fill="#BFD4EA"/><path d="M2 6h20v3H2z" fill="#E5484D"/><circle cx="12" cy="17" r="2" fill="#9CC9E8"/>',
+  terminal: '<path d="M3 13h5v8H3zM9 13h5v8H9zM15 13h6v8h-6z" fill="#3F7FBF"/><path d="M3 15h5M9 17h5" stroke="#D9534F"/><path d="M2 5h20v2H2zM4 7v14M20 7v14" stroke="#E0A21C" stroke-width="2"/>',
+  stadium: '<ellipse cx="12" cy="13" rx="10" ry="8" fill="#8E949B"/><ellipse cx="12" cy="13" rx="6.5" ry="4.5" fill="#6FB04F"/><path d="M12 8.5v9" stroke="#fff"/><path d="M3 3v4M21 3v4" stroke="#5B6168" stroke-width="2"/>',
+  hospital: '<path d="M3 6h18v15H3z" fill="#F2F4F5"/><path d="M10.5 9h3v9h-3z M7.5 12h9v3h-9z" fill="#E5484D"/>',
+};
+const specialBtn = (s: Special): string =>
+  `<button class="zone special" data-special="${s}" aria-pressed="false" data-tip="${SPECIALS[s].name}: ${SPECIALS[s].tip}"><svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#5B6168" stroke-width="1.2" stroke-linejoin="round">${SPECIAL_PIC[s]}</svg><span>${SPECIALS[s].name}</span><small class="num">${fmtMoney(SPECIALS[s].cost)}</small>${icon('lock', 'lock')}</button>`;
 const ZONE_TIP: Record<Zone, string> = {
   home: 'Homes grow when there are jobs to fill.',
   shop: 'Shops grow when residents and visitors need somewhere to shop.',
@@ -169,17 +179,17 @@ const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 // A trip or its report: where it goes (a commute out goes to work, a highway exit is out of town) and what it is called
 interface Leg { purpose: Purpose; back: boolean; from: Building; to: Building }
 const PLACE: Record<Site, string> = { home: 'home', shop: 'the shop', office: 'the office', industry: 'the factory', gate: 'the highway' };
-const destOf = (t: Leg): string => t.purpose === 'commute' && !t.back && t.to.kind !== 'gate' ? 'work' : PLACE[t.to.kind];
-const NAME: Record<Purpose, string> = { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery', visit: 'Visitor' };
+const destOf = (t: Leg): string => t.purpose === 'commute' && !t.back && t.to.kind !== 'gate' ? 'work' : t.to.special ? `the ${t.to.label.toLowerCase()}` : PLACE[t.to.kind];
+const NAME: Record<Purpose, string> = { commute: 'Commute', shop: 'Shopping trip', freight: 'Delivery', visit: 'Visitor', emergency: 'Emergency call' };
 const tripName = (t: Leg): string => {
   const out = t.to.kind === 'gate', inn = t.from.kind === 'gate';
-  if (t.back) return t.purpose === 'freight' ? 'Empty truck back' : out ? 'Leaving town' : 'Trip home';
+  if (t.back) return t.purpose === 'freight' ? 'Empty truck back' : t.purpose === 'emergency' ? 'Ambulance back' : out ? 'Leaving town' : 'Trip home';
   return out ? 'Export' : inn && t.purpose === 'freight' ? 'Import' : inn && t.purpose === 'commute' ? 'Commute from outside' : NAME[t.purpose];
 };
 const JAM_AT: Record<Control | 'road', string> = {
   light: 'at a traffic light', roundabout: 'at a roundabout', yield: 'at a yield sign', stop: 'at a stop sign', none: 'at a junction', road: 'in a queue',
 };
-const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike' };
+const KIND_LABEL: Record<Kind, string> = { car: 'Car', truck: 'Truck', moto: 'Motorbike', ambulance: 'Ambulance' };
 // A trip report in the resident's voice; a stop under a quarter hour is not worth naming
 function tripLine(r: TripReport): string {
   const to = destOf(r), x = (n: number) => `${n.toFixed(1)}x`;
@@ -395,6 +405,7 @@ export class HUD {
         <div class="bgrp"><h3>Roads</h3><div class="brow">${toolBtn('road')}${toolBtn('grid')}</div></div>
         <div class="bgrp"><h3>Junctions</h3><div class="brow">${toolBtn('light')}${toolBtn('roundabout')}${toolBtn('interchange')}</div></div>
         <div class="bgrp"><h3>Zones <kbd>Z</kbd></h3><div class="brow">${ZONE_KEYS.map(zoneBtn).join('')}${zoneBtn('none')}</div></div>
+        <div class="bgrp"><h3>Specials</h3><div class="brow">${SPECIAL_KEYS.map(specialBtn).join('')}</div></div>
       </div>
       <div class="leftcol">
         <div class="panel tray" role="group" aria-label="Zone brush" hidden>
@@ -415,6 +426,7 @@ export class HUD {
     for (const b of this.speedBtns) b.onclick = () => { game.speed = Number(b.dataset.speed) as 0 | 1 | 2 | 4; };
     for (const b of this.toolBtns) b.onclick = () => { game.setTool(b.dataset.tool as Tool); this.setBuild(false); };
     root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.setZone(b.dataset.zone === 'none' ? null : b.dataset.zone as Zone); this.setBuild(false); }; });
+    root.querySelectorAll<HTMLButtonElement>('[data-special]').forEach(b => { b.onclick = () => { game.startPlacing(b.dataset.special as Special); this.setBuild(false); }; });
     this.q('[data-action="repay"]').onclick = () => game.repay();
     this.q('[data-action="build"]').onclick = () => this.setBuild(!this.buildOpen);
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
@@ -898,7 +910,7 @@ export class HUD {
     const slow = t.ideal && el > T.SMOOTH_X * t.ideal;
     const jam = t.jamS >= HOUR / 4 ? `longest ${fmtMin(t.jamS)} ${JAM_AT[jamAt(t.jam)]}` : '';
     this.q('.cbody').innerHTML = `
-      <p class="jnote">${ZONES[t.from.kind].label} → ${ZONES[t.to.kind].label} · ${KIND_LABEL[c.kind]}</p>
+      <p class="jnote">${t.from.label} → ${t.to.label} · ${KIND_LABEL[c.kind]}</p>
       <div class="kv"><span>Driving</span><b class="num${slow ? ' bad' : ''}">${fmtMin(el)}</b><small>${fmtMin(t.ideal)} on empty roads</small></div>
       <div class="kv"><span>Speed</span><b class="num">${kmh} km/h</b><small>${tier.label}, ${tier.kmh} km/h</small></div>
       <div class="kv"><span>Stopped</span><b class="num">${fmtMin(t.stopped)}</b><small>${jam}</small></div>
@@ -918,12 +930,18 @@ export class HUD {
     const bar = (label: string, v: number, bad = false) =>
       `<div class="pbar2${bad ? ' bad' : ''}"><span>${label}</span><i><i style="width:${pc(Math.min(1, v))}"></i></i><b class="num">${pc(v)}</b></div>`;
     let body = '';
+    // tier and what its next one waits for (the upgrade countdown runs while nothing is in the way)
+    if (b.tier) {
+      const tiers = TIER_DEFS[b.kind as Zone], next = tiers[b.tier], why = upgradeBlock(g, b);
+      body += `<p class="jnote">Tier ${b.tier} of ${tiers.length}${next ? ` · next: ${next.name} (${next.lots} lots) ${why ? `· ${esc(why)}` : `in ${T.UPGRADE_H - b.upH} h if the lots beside it are free`}` : ''}</p>`;
+    }
+    if (b.special) body += `<p class="jnote">${esc(SPECIALS[b.special].tip)} Upkeep ${fmtMoney(SPECIALS[b.special].upkeep)}/day · about ${g.tripsPerDay(b)} trips a day</p>`;
     if (b.kind === 'home') {
       const mineC = g.commuters.filter(c => c.home === b), p = b.parts;
-      body = `<p class="jnote">${Math.round(b.residents)} / ${b.cap} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
+      body += `<p class="jnote">${Math.round(b.residents)} / ${b.cap} residents · ${Math.round(b.happy)}% happy · ${mineC.filter(c => c.work).length} of ${mineC.length} commuters have a job</p>`
         + bar('Jobs', p.job) + bar('Shops', p.shop) + bar('Trips', p.trips) + bar('Pollution', p.pollution, true) + bar('Noise', p.noise, true);
     } else {
-      body = `<p class="jnote">${b.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
+      body += `<p class="jnote">${b.jobs} jobs · ${pc(b.staffed)} staffed this hour${b.kind === 'shop' ? ` · ${b.stock} goods in stock` : ''}</p>`;
     }
     // traffic access drives growth; a countdown says how long until it is abandoned (or cleared) and why
     if (b.kind !== 'gate') body += bar('Traffic access', b.access, b.access < T.DOWN_A);
@@ -931,9 +949,10 @@ export class HUD {
     if (b.cause && b.downH) body += `<p class="jnote bad">${esc(b.cause.text)} · ${b.abandoned ? 'cleared' : 'abandoned'} in ${Math.ceil(T.DOWN_H - b.downH)} h</p>`;
     if (!b.connected) body += '<p class="jnote bad">No road: connect its door</p>';
     const who = g.occupants(b);
+    const back = g.specialRefund(b);
     body += `<div class="jpre">${b.lots.length ? '' : `<button class="btn" data-b="move" data-tip="Then click where it goes; Esc puts it back. Keeps its residents, jobs and trips">Move${g.moveCost ? ` · ${fmtMoney(g.moveCost)}` : ''}</button>`}`
-      + `<button class="btn" data-b="demolish" data-tip="Free${b.lots.length ? '; its lot stays zoned and grows a new building' : ''}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
-    this.q('.btitle').innerHTML = `${zonePic(b.kind)}${b.label}${b.lots.length && b.kind !== 'gate' ? ` <small>${ZONE_NAME[b.kind as Zone]}</small>` : ''}`;
+      + `<button class="btn" data-b="demolish" data-tip="${back ? `Refunds ${fmtMoney(back)}` : 'Free'}${b.lots.length ? '; its lot stays zoned and grows a new building' : ''}${who ? `. ${who}` : ''}">${g.armed === b ? 'Click again to demolish' : 'Demolish'}</button></div>`;
+    this.q('.btitle').innerHTML = `${b.special ? `<svg class="zpic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#5B6168" stroke-width="1.2">${SPECIAL_PIC[b.special]}</svg>` : zonePic(b.kind)}${b.label}${b.lots.length && b.kind !== 'gate' ? ` <small>${ZONE_NAME[b.kind as Zone]}</small>` : ''}`;
     this.q('.bbody').innerHTML = body + (mine.length ? `<small class="fsub">Last trips</small>${mine.map(tripBtn).join('')}` : '<p class="jnote">No trips yet</p>');
   }
 
@@ -1039,6 +1058,11 @@ export class HUD {
         const tip = TOOLS[b.dataset.tool as Tool].tip;
         b.dataset.tip = lock ? `${lock}. ${tip}` : tip;
       }
+      this.root.querySelectorAll<HTMLButtonElement>('[data-special]').forEach(b => {
+        const d = SPECIALS[b.dataset.special as Special], lock = !g.unlocked(d.level);
+        b.setAttribute('aria-disabled', String(lock));
+        b.dataset.tip = `${d.name}${lock ? ` (unlocks at level ${d.level})` : ''}: ${d.tip} Upkeep ${fmtMoney(d.upkeep)}/day.`;
+      });
       L.pick = undefined;
       L.level = undefined;
       if (up) flash(this.q('.lvl'), 'bump');

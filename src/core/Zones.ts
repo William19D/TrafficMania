@@ -6,7 +6,7 @@ import type { Game } from './Game.ts';
 import { fmtMoney } from './Game.ts';
 import type { Edge, Node } from '../network/RoadGraph.ts';
 import { NODE_R } from '../network/RoadGraph.ts';
-import { buildingAt } from '../entities/Building.ts';
+import { DOOR_D, buildingAt } from '../entities/Building.ts';
 import type { Building } from '../entities/Building.ts';
 import { DIFFICULTY, TIER_DEFS, ZONE_NAME, TUNING as T } from './config.ts';
 import type { Zone } from './config.ts';
@@ -60,11 +60,11 @@ const roadOf = (g: Game, b: Building, roads: Edge[]): Edge | null =>
 // Congestion along a street: the hottest of the road and the roads meeting it at either end
 const heatAt = (e: Edge | null): number => e ? Math.max(e.heat, ...[e.a, e.b].flatMap(n => n.edges.filter(x => !x.drive).map(x => x.heat))) : 0;
 
-// A road through the rect (driveways only where they cross it, not beside it), except the building's own driveway
-const roadOver = (g: Game, r: Rect, own: Building | null): boolean => {
+// A road through the rect (driveways only where they cross it, not beside it), except the driveways of the buildings in own
+const roadOver = (g: Game, r: Rect, own: Building[] = []): boolean => {
   const reach = Math.hypot(r.w, r.h) / 2;
   for (const e of g.graph.edges) {
-    if (own && e.drive && (e.a === own.node || e.b === own.node)) continue;
+    if (e.drive && own.some(b => e.a === b.node || e.b === b.node)) continue;
     const pad = e.drive ? 2 : e.width / 2;
     if (e.level || e.tunnel || distToSegment(r, e.a, e.b).d > reach + pad) continue;
     const n = Math.max(1, Math.ceil(e.length / 4));
@@ -81,13 +81,13 @@ function free(g: Game, l: Lot, lots: Lot[]): boolean {
   if (pts.some(p => inWater(g.terrain, p) || inMountain(g.terrain, p) || g.graph.nearRing(p))) return false;
   if (g.graph.nodes.some(n => !n.building && n.edges.filter(e => !e.drive).length !== 2 && inRect(r, n, NODE_R + 8))) return false;
   if (g.buildings.some(b => overlap(r, rectOf(b))) || lots.some(o => overlap(r, lotRect(o)))) return false;
-  return !roadOver(g, r, null);
+  return !roadOver(g, r);
 }
 
 // Lots whose road went (demolished, bent away) or that a new road runs through go; a lot with a building stays
 export function pruneLots(g: Game): void {
   const roads = g.accessEdges();
-  g.lots = g.lots.filter(l => l.building || (frontage(g, l, roads) && !roadOver(g, lotRect(l), null)));
+  g.lots = g.lots.filter(l => l.building || (frontage(g, l, roads) && !roadOver(g, lotRect(l))));
 }
 
 // Old saves and the starter town: each building gets one lot of its zone under it, as wide as it is (it stays legacy, tier 0, until cleared)
@@ -220,7 +220,7 @@ export function demandOf(g: Game, extra: Partial<Record<Zone, number>> = {}): Re
     jobs += b.jobs;
     if (b.kind === 'shop') shop += b.jobs;
     if (b.kind === 'industry') ind += b.jobs;
-    if (linked && (b.kind === 'shop' || b.kind === 'office')) visits += T.VISITS[b.kind];
+    if (linked) visits += b.def.visits;
   }
   const c = (x: number): number => Math.max(-1, Math.min(1, x));
   const workers = res * T.EMPLOY_RATE, unemp = workers - jobs, shopNeed = res / 12 + visits / 4, indNeed = shop * 0.6 + 10 * linked;
@@ -273,7 +273,7 @@ function causeOf(g: Game, b: Building, x: Access, road: Edge | null): Building['
 }
 
 // Grows a tier-1 building of the lot's zone on it (a home moves in PLACED_OCC full)
-function grow(g: Game, l: Lot): Building {
+export function grow(g: Game, l: Lot): Building {
   const b = buildingAt(l.zone, l, l.angle, 1);
   b.lots = [l];
   l.building = b;
@@ -281,9 +281,104 @@ function grow(g: Game, l: Lot): Building {
   return g.addBuilding(b);
 }
 
+// ---- Tiers (game-v3 3) ----
+
+// Along the frontage of a lot facing angle a
+const tangent = (a: number): Vec => ({ x: -Math.sin(a), y: Math.cos(a) });
+// b's lots in frontage order
+const chain = (b: Building): Lot[] => {
+  const t = tangent(b.lots[0].angle);
+  return [...b.lots].sort((p, q) => (p.x - q.x) * t.x + (p.y - q.y) * t.y);
+};
+// The lot right next to l along its frontage on side k (same angle, front edges in line, sides touching), else null
+function beside(g: Game, l: Lot, k: 1 | -1): Lot | null {
+  const t = tangent(l.angle);
+  return g.lots.find(o => {
+    if (o === l || Math.abs(Math.sin(o.angle - l.angle)) > 0.05 || Math.cos(o.angle - l.angle) < 0) return false;
+    const dx = o.x - l.x, dy = o.y - l.y;
+    return Math.abs(dx * Math.cos(l.angle) + dy * Math.sin(l.angle)) < 2 && Math.abs(dx * t.x + dy * t.y - k * (l.w + o.w) / 2) < 2;
+  }) ?? null;
+}
+// Door point and angle of a building standing on these lots (in frontage order): the middle of their front
+const front = (lots: Lot[]): { p: Vec; angle: number } => {
+  const a = lots[0], z = lots[lots.length - 1], t = tangent(a.angle);
+  return { p: { x: (a.x - t.x * a.w / 2 + z.x + t.x * z.w / 2) / 2, y: (a.y - t.y * a.w / 2 + z.y + t.y * z.w / 2) / 2 }, angle: a.angle };
+};
+
+// The lots b grows onto for its next tier (n lots in all): its own plus the next ones along the same frontage and side, each empty or
+// under a tier-1 building of its zone (which merges in), the far side first; the footprint must stay clear of other buildings and roads.
+// Null when they are not free.
+function nextLots(g: Game, b: Building, n: number): Lot[] | null {
+  const own = chain(b), need = n - own.length;
+  const ok = (l: Lot | null): l is Lot => !!l && l.zone === b.kind && (!l.building || (l.building.tier === 1 && !l.building.special));
+  const run = (k: 1 | -1): Lot[] => {
+    const out: Lot[] = [];
+    for (let l = k > 0 ? own[own.length - 1] : own[0], o = beside(g, l, k); out.length < need && ok(o); l = o, o = beside(g, l, k)) out.push(o);
+    return out;
+  };
+  const up = run(1), down = run(-1), test = buildingAt(b.kind, { x: 0, y: 0 }, 0, b.tier + 1);
+  for (let k = Math.min(need, up.length); k >= 0; k--) {
+    if (need - k > down.length) continue;
+    const lots = [...down.slice(0, need - k).reverse(), ...own, ...up.slice(0, k)], f = front(lots), d = test.h / 2 + DOOR_D;
+    const r: Rect = { x: f.p.x - Math.cos(f.angle) * d, y: f.p.y - Math.sin(f.angle) * d, angle: f.angle, w: test.w, h: test.h };
+    const merged = [b, ...lots.map(l => l.building).filter((x): x is Building => !!x)];
+    if (g.buildings.some(o => !merged.includes(o) && overlap(r, rectOf(o))) || roadOver(g, r, merged)) continue;
+    return lots;
+  }
+  return null;
+}
+
+// Puts b on these lots (frontage order) at its current tier's footprint, its door at the middle of their front
+function seat(g: Game, b: Building, lots: Lot[]): void {
+  for (const l of b.lots) if (!lots.includes(l)) l.building = null;
+  b.lots = lots;
+  for (const l of lots) l.building = b;
+  const f = front(lots), at = buildingAt(b.kind, f.p, f.angle, b.tier);
+  g.rehome(b, at.x, at.y, f.angle);
+}
+
+// Why b does not count toward its next tier this hour ('' = it does): the top tier, a locked one, low access, no demand, not full or
+// happy enough (homes), short-staffed (workplaces). Legacy buildings, specials and abandoned ones never upgrade.
+export function upgradeBlock(g: Game, b: Building): string {
+  if (!b.tier || !b.lots.length || b.special || b.abandoned || b.kind === 'gate') return 'Never';
+  const next = TIER_DEFS[b.kind][b.tier];
+  if (!next) return 'Top tier';
+  if (!g.unlocked(next.level)) return `${next.name} unlocks at level ${next.level}`;
+  if (b.access < T.UP_A) return `Traffic access under ${Math.round(T.UP_A * 100)}%`;
+  if (g.demand[b.kind] <= T.UP_D) return `Low ${ZONE_NAME[b.kind]} demand`;
+  if (b.kind === 'home') return b.residents < T.UP_FULL * b.cap ? `Under ${Math.round(T.UP_FULL * 100)}% full` : b.happy < T.UP_HAPPY ? `Under ${T.UP_HAPPY}% happy` : '';
+  return b.staffed < T.UP_STAFF ? `Under ${Math.round(T.UP_STAFF * 100)}% staffed` : '';
+}
+
+// One tier up onto lots (from nextLots): the tier-1 buildings on them go, their residents moving in
+function upgrade(g: Game, b: Building, lots: Lot[]): void {
+  let moved = 0;
+  for (const l of lots) if (l.building && l.building !== b) { moved += l.building.residents; g.demolishBuilding(l.building); }
+  g.sfx.delete('demolish');
+  b.tier++;
+  seat(g, b, lots);
+  b.residents = Math.min(b.cap, b.residents + moved);
+  b.upH = 0;
+  g.sfx.add('place');
+}
+
+// One tier down: it keeps the first lots of its frontage the lower tier needs (the rest go back to empty) and the residents that fit;
+// workers over its jobs lose them
+function downgrade(g: Game, b: Building): void {
+  const from = b.label;
+  b.tier--;
+  seat(g, b, chain(b).slice(0, TIER_DEFS[b.kind as Zone][b.tier - 1].lots));
+  b.residents = Math.min(b.residents, b.cap);
+  let slots = Math.floor(b.jobs / T.PEOPLE_PER_CAR);
+  for (const c of g.commuters) if (c.work === b && --slots < 0) c.work = null;
+  g.say(`${from} shrank to ${b.label}: ${b.cause?.text ?? 'bad traffic'}`);
+}
+
 // On the hour: each building's access, its abandon / clear / recover countdowns; then each zone's demand spawns buildings on the empty lots
 // with the best access (ties to the one nearest the town's centre). Lots off the town's roads, or under SPAWN_A, never spawn.
-// Unconnected buildings keep no countdown (their people move out by the happiness rule).
+// Unconnected buildings keep no countdown (their people move out by the happiness rule). Specials only get their access.
+// Upgrades: UPGRADE_H hours in a row with nothing in the way (upgradeBlock) grow a building a tier as soon as the next lots are free.
+// Downgrades: a building above tier 1 drops a tier after DOWN_H bad hours (and counts again) instead of being abandoned.
 export function zoneHour(g: Game, comp: Map<Node, number>): void {
   const cut = g.time - T.DAY_SECONDS, roads = g.accessEdges(), kinds = new Map<number, Set<string>>();
   for (const b of g.buildings) {
@@ -298,7 +393,7 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
     if (b.kind === 'gate') continue;
     const road = roadOf(g, b, roads), x = access(g, b.node, b.kind, b, road, kinds.get(comp.get(b.node)!));
     b.access = x.a;
-    if (!b.connected) { b.downH = b.upH = 0; b.cause = null; continue; }
+    if (!b.connected || b.special) { b.downH = b.upH = 0; b.cause = null; continue; }
     const bad = x.a < T.DOWN_A || (b.kind === 'home' && !b.abandoned && b.happy < T.GROW_LO);
     b.downH = bad ? b.downH + 1 : 0;
     b.cause = b.downH ? causeOf(g, b, x, road) : null;
@@ -310,6 +405,9 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
         if (b.kind === 'home') b.residents = b.cap * T.PLACED_OCC;
         g.changed();
       } else if (b.downH >= T.DOWN_H) g.demolishBuilding(b);
+    } else if (b.downH >= T.DOWN_H && b.tier > 1) {
+      downgrade(g, b);
+      b.downH = b.upH = 0;
     } else if (b.downH >= T.DOWN_H) {
       g.say(`${b.label} abandoned: ${b.cause!.text}`);
       b.abandoned = true;
@@ -321,6 +419,12 @@ export function zoneHour(g: Game, comp: Map<Node, number>): void {
   }
   g.demand = demandOf(g);
   if (g.frozen) return;
+  for (const b of [...g.buildings]) {
+    if (b.abandoned || !g.buildings.includes(b)) continue;
+    b.upH = upgradeBlock(g, b) ? 0 : Math.min(T.UPGRADE_H, b.upH + 1);
+    const lots = b.upH >= T.UPGRADE_H ? nextLots(g, b, TIER_DEFS[b.kind as Zone][b.tier].lots) : null;
+    if (lots) upgrade(g, b, lots);
+  }
   const town = g.buildings.filter(b => b.kind !== 'gate'), cx = town.reduce((n, b) => n + b.x, 0) / (town.length || 1), cy = town.reduce((n, b) => n + b.y, 0) / (town.length || 1);
   let grew = false;
   for (const z of ZONE_LIST) {

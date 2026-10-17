@@ -652,7 +652,7 @@ export class CanvasRenderer {
   // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
   // dashed red outline.
   private building(b: Building, time: number): void {
-    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.kind, v, h, w), alpha = ctx.globalAlpha;
+    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.art, v, h, w), alpha = ctx.globalAlpha;
     const c = Math.cos(b.angle), sn = Math.sin(b.angle), toWorld = (x: number, y: number): Vec => ({ x: b.x + x * c - y * sn, y: b.y + x * sn + y * c });
     // shadow: the body swept down-right by its height (the hull of the body and its offset copy)
     const [bx, by, bw, bh] = L.body, o = L.height;
@@ -665,7 +665,7 @@ export class CanvasRenderer {
     ctx.rotate(b.angle);
     // an empty home (everyone moved out) fades
     if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = alpha * 0.45;
-    const img = sprite(b.kind, v, this.artS, false, b.w, b.h, b.abandoned);
+    const img = sprite(b.art, v, this.artS, false, b.w, b.h, b.abandoned);
     ctx.drawImage(img, -h - PAD, -w - PAD, img.width / this.artS, img.height / this.artS);
     b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => {
       ctx.beginPath();
@@ -916,7 +916,7 @@ export class CanvasRenderer {
   }
 
   // Noise and pollution, under the roads: a purple band NOISE_R either side of each road by its tier's noise (one path per tier, so
-  // joints do not darken), and a brown haze fading out at POLLUTION_R round each factory while it has workers
+  // joints do not darken), and a brown haze fading out at its tier's pollution reach round each factory while it has workers
   private noiseMap(game: Game): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
@@ -931,12 +931,13 @@ export class CanvasRenderer {
     }
     ctx.globalAlpha = 1;
     for (const b of game.buildings) {
-      if (b.kind !== 'industry' || b.staffed <= 0) continue;
-      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, TUNING.POLLUTION_R);
+      const R = b.def.pollution;
+      if (!R || b.staffed <= 0) continue;
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
       g.addColorStop(0, SMOG + Math.round(0x66 * b.staffed).toString(16).padStart(2, '0'));
       g.addColorStop(1, SMOG + '00');
       ctx.beginPath();
-      ctx.arc(b.x, b.y, TUNING.POLLUTION_R, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
       ctx.fillStyle = g;
       ctx.fill();
     }
@@ -948,10 +949,10 @@ export class CanvasRenderer {
     const plan = game.planPlace(p);
     if (!plan) return;
     const ctx = this.ctx, b = plan.b, col = plan.ok ? GREEN : RED, door = b.door();
-    if (b.kind === 'industry') {
+    if (b.def.pollution) {
       ctx.setLineDash([6, 6]);
       ctx.globalAlpha = 0.6;
-      this.ring(b.x, b.y, TUNING.POLLUTION_R, ZONES.industry.out, 1.5);
+      this.ring(b.x, b.y, b.def.pollution, ZONES.industry.out, 1.5);
       ctx.setLineDash([]);
     }
     if (plan.road) {
@@ -981,7 +982,7 @@ export class CanvasRenderer {
     const y = b.y - Math.max(b.w, b.h) / 2 - 10;
     if (!plan.ok) this.text(plan.reason, b.x, y, 'bold 12px system-ui', RED);
     else if (plan.warn) this.text(plan.warn, b.x, y, 'bold 12px system-ui', '#A86A00');
-    else this.text(game.moving ? `Move here${game.moveCost ? ` · ${fmtMoney(game.moveCost)}` : ''}` : ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
+    else this.text(plan.label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
   }
 
   // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between
@@ -1277,7 +1278,7 @@ export class CanvasRenderer {
   }
 
   // A cached model (VehicleArt) on a soft shadow cast down-right, then the live lights: tail lights (bright while braking), the
-  // indicator blinking on game time (so pause freezes it)
+  // indicator blinking on game time (so pause freezes it) and an ambulance's red / blue bar
   private car(game: Game, car: Car): void {
     const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
     this.seen.push(car);
@@ -1298,6 +1299,13 @@ export class CanvasRenderer {
       ctx.fillStyle = AMBER;
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
+    }
+    if (k === 'ambulance') {
+      const on = (game.time * 4 | 0) % 2;
+      ctx.fillStyle = on ? RED : ACCENT;
+      ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
+      ctx.fillStyle = on ? ACCENT : RED;
+      ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
     }
     // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
     if (game.purposeDots || game.overlay === 'heat') {
@@ -1324,7 +1332,7 @@ export class CanvasRenderer {
     ctx.globalAlpha = d.night;
     for (const b of game.buildings) {
       if (b.kind === 'gate' || b.abandoned || (b.kind === 'home' && b.residents < 1)) continue;
-      const img = sprite(b.kind, variant(b.x, b.y), this.artS, true, b.w, b.h);
+      const img = sprite(b.art, variant(b.x, b.y), this.artS, true, b.w, b.h);
       ctx.save();
       ctx.translate(b.x, b.y);
       ctx.rotate(b.angle);
