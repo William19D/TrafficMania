@@ -89,11 +89,15 @@ type Crossing = { edge: Edge; point: Vec; t: number; node: Node | null };
 // A building's door, a node a driveway joins, or a driveway: a road without access may not touch it
 // (a highway exit's gate is no doorway: its own stub is a highway)
 const doorway = (n: Node | null, e?: Edge | null): boolean => !!n && (!!n.building && n.building.kind !== 'gate' || n.edges.some(x => x.drive)) || !!e?.drive;
+// Roads closer than this (centre to centre) overlap: their bodies cross by more than 2px
+const overlapTol = (a: RoadType, b: RoadType): number => (roadWidth(a) + roadWidth(b)) / 2 - 2;
+const PERMANENT = 'Challenge: roads and junction controls are permanent after the day they were built';
 // The highway stub of an outside connection: free, and it cannot be demolished. Every piece of a split stub keeps Edge.exit;
 // the gate test covers a bent stub's end and older saves
 export const exitEdge = (e: Edge): boolean => e.exit || e.a.building?.kind === 'gate' || e.b.building?.kind === 'gate';
 const EXIT_TYPE: RoadType = { tier: 'highway', lanes: 2, oneWay: false };
-interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean }
+// up: an existing stretch the path retypes (drawn over with another type)
+interface SegPlan extends PathSeg { sa: Snap; sb: Snap; crossings: Crossing[]; exists: boolean; up?: boolean }
 // A crossing road's arm from the junction to the cut point 'at' (edges[i] leaves nodes[i])
 interface Arm { edges: Edge[]; nodes: Node[]; at: Vec }
 // A template laid on a junction: local (u, v) -> world, the arms to cut, the rebuilt crossing road's type and the ramps' type
@@ -1071,7 +1075,7 @@ export class Game {
   // Challenge: roads and controls built before today stay (said when refused)
   permanent(day: number): boolean {
     if (!this.challenge || day >= this.today) return false;
-    this.say('Challenge: roads and junction controls are permanent after the day they were built');
+    this.say(PERMANENT);
     return true;
   }
 
@@ -1146,7 +1150,7 @@ export class Game {
       return n ? { node: n, edge: null, point: { x: n.x, y: n.y } } : { node: null, edge: null, point: { x: p.x, y: p.y } };
     };
     const lastIdx = points.length - 1;
-    const list: Snap[] = [];
+    let list: Snap[] = [];
     points.forEach((p, i) => {
       const s = i === 0 ? end(p, 0) : i === lastIdx ? end(p, 1) : mid(p);
       const prev = list[list.length - 1];
@@ -1167,13 +1171,16 @@ export class Game {
         list[list.length - 1] = end(list[list.length - 1].point, 1);
       }
     }
+    // a path drawn along a road follows it: its free ends there go onto the road and the road's joints it passes become anchors, so
+    // that stretch is the road itself (retyped if the type differs), never a second road on top of it
+    if (snapMid && la === level && lb === level) list = this.followRoads(list, level, type);
     plan.points = list.map(s => s.point);
     if (list.length < 2) return plan;
     if (this.badGround(list[0]) || this.badGround(list[list.length - 1])) { plan.reason = 'Invalid terrain'; return plan; }
     const n = list.length - 1;
     if (Math.abs(la - lb) > n - 1) { plan.reason = 'Too steep: make the ramp longer'; return plan; }
 
-    let total = 0, built = 0, blocked = false, hit = false, door = false;
+    let total = 0, built = 0, blocked = false, hit = false, door = false, over = false, fixed = false;
     const acc = TIERS[type.tier].access;
     let noAccess = !acc && list.some(s => doorway(s.node, s.edge));
     for (let i = 1; i <= n; i++) {
@@ -1183,7 +1190,19 @@ export class Game {
       plan.segs.push(seg);
       noAccess ||= !acc && r.crossings.some(c => doorway(c.node, c.edge));
       door ||= L > 0 && !!(a.node?.building || b.node?.building);
-      if (r.exists) continue;
+      if (r.exists) {
+        // drawn over with another type: that stretch is retyped, the price change paid or refunded as the Edit tool does
+        const e = a.node && b.node ? this.graph.edgeBetween(a.node, b.node) : a.edge ?? b.edge, len = dist(a.point, b.point);
+        if (!e || e.ring || e.level !== L || len < 1 || sameType(e.type, type)) continue;
+        const d = this.change((this.edgePrice(e, type) - this.edgePrice(e)) * len / dist(e.a, e.b), e.day);
+        seg.up = true;
+        plan.cost += d;
+        total += len;
+        built++;
+        fixed ||= d < 0 && this.challenge && e.day < this.today;
+        continue;
+      }
+      over ||= snapMid && this.alongside(a, b, L, type).length > 0;
       total += dist(a.point, b.point);
       plan.cost += this.price(a.point, b.point, r.flags);
       blocked ||= r.blocked;
@@ -1194,6 +1213,8 @@ export class Game {
     if (total < TILE / 2) return plan; // 'Too short'
     const ring = this.ringBlock(list, plan.segs as SegPlan[], type);
     if (ring) { plan.reason = ring; return plan; }
+    if (over) { plan.reason = 'Overlaps a road: start and end on it to change its type'; return plan; }
+    if (fixed) { plan.reason = PERMANENT; return plan; }
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
     const tunnel = (plan.segs as SegPlan[]).some(g => g.tunnel && !g.exists) ? this.lockOf('tunnel') : '';
     if (tunnel) { plan.reason = tunnel; return plan; }
@@ -1203,6 +1224,47 @@ export class Game {
     plan.reason = this.lockedMsg(type) || this.afford(plan.cost);
     plan.ok = !plan.reason;
     return plan;
+  }
+
+  // Same-level roads that run along a..b rather than cross or leave it: within 15 degrees, the two road bodies overlapping over NODE_R or
+  // more of it. A road a..b starts or ends on is left out when it runs on past both ends (a curve leaving a road's middle tangent to it).
+  // ponytail: scans every edge per segment; a spatial index if long freehand paths over big networks ever stutter
+  private alongside(a: Snap, b: Snap, level: number, type: RoadType): Edge[] {
+    const L = dist(a.point, b.point), o = a.point;
+    if (L < NODE_R) return [];
+    const ux = (b.point.x - o.x) / L, uy = (b.point.y - o.y) / L, t = (v: Vec): number => (v.x - o.x) * ux + (v.y - o.y) * uy;
+    return this.graph.edges.filter(e => {
+      const el = dist(e.a, e.b);
+      if (e.level !== level || this.graph.hidden.has(e) || el < 1 || Math.abs((e.b.x - e.a.x) * uy - (e.b.y - e.a.y) * ux) / el > 0.26) return false;
+      const tp = t(e.a), tq = t(e.b), t0 = Math.max(0, Math.min(tp, tq)), t1 = Math.min(L, Math.max(tp, tq)), tol = overlapTol(type, e.type);
+      if (t1 - t0 < NODE_R || [t0, t1].some(x => distToSegment({ x: o.x + ux * x, y: o.y + uy * x }, e.a, e.b).d >= tol)) return false;
+      const touch = a.edge === e || b.edge === e || [a.node, b.node].some(n => n && (n === e.a || n === e.b));
+      return !touch || [tp, tq].some(x => x > NODE_R && x < L - NODE_R);
+    });
+  }
+
+  // planPath's anchors along the roads they run over (alongside): a free anchor within a road's body goes onto that road, and the road's
+  // nodes between two anchors become anchors, so each stretch over a road is that road's own edge (planSeg's 'exists')
+  private followRoads(list: Snap[], level: number, type: RoadType): Snap[] {
+    const out = [list[0]];
+    for (let i = 1; i < list.length; i++) {
+      let a = out[out.length - 1], b = list[i];
+      const es = this.alongside(a, b, level, type);
+      if (es.length) {
+        const onto = (s: Snap): Snap => {
+          const e = !s.node && !s.edge && es.find(x => distToSegment(s.point, x.a, x.b).d < overlapTol(type, x.type));
+          return e ? this.snap(distToSegment(s.point, e.a, e.b).point, level) : s;
+        };
+        a = out[out.length - 1] = onto(a);
+        b = onto(b);
+        const L = dist(a.point, b.point), t = (v: Vec): number => ((v.x - a.point.x) * (b.point.x - a.point.x) + (v.y - a.point.y) * (b.point.y - a.point.y)) / (L || 1);
+        const mid = new Set(es.flatMap(e => [e.a, e.b]).filter(v => v !== a.node && v !== b.node && t(v) > 1 && t(v) < L - 1
+          && distToSegment(v, a.point, b.point).d < Math.min(...es.filter(e => e.a === v || e.b === v).map(e => overlapTol(type, e.type)))));
+        out.push(...[...mid].sort((p, q) => t(p) - t(q)).map(v => ({ node: v, edge: null, point: { x: v.x, y: v.y } })));
+      }
+      out.push(b);
+    }
+    return out;
   }
 
   // Why a path may not touch a roundabout ('' = fine): it joins a ring only at its ends, from outside, on a free spot, as one more arm
@@ -1240,10 +1302,17 @@ export class Game {
     let node: Node | null = null;
     for (const seg of plan.segs as SegPlan[]) {
       // the end snap's edge may have been split by an earlier segment; re-snap if so
-      const end = seg.sb.edge && !this.graph.edges.includes(seg.sb.edge) ? this.snap(seg.sb.point, seg.level) : seg.sb;
+      const reSnap = (s: Snap): Snap => s.edge && !this.graph.edges.includes(s.edge) ? this.snap(s.point, seg.level) : s;
       // resolve (split) an edge end too, so the next segment leaves the road from a real node
-      if (seg.exists) { node = this.resolve(end); continue; }
-      const start: Node = node ?? this.resolve(seg.sa);
+      if (seg.exists && !seg.up) { node = this.resolve(reSnap(seg.sb)); continue; }
+      const start: Node = node ?? this.resolve(reSnap(seg.sa)), end = reSnap(seg.sb);
+      if (seg.up) {
+        // a one-way result runs the way the path was drawn
+        node = this.resolve(end);
+        const e = this.graph.edgeBetween(start, node);
+        if (e) { e.drive = false; this.dropCars(this.graph.setEdgeType(e, seg.type, !seg.type.oneWay || e.a === start)); }
+        continue;
+      }
       // crossings are recomputed on the live graph, since earlier segments may have split edges
       const live = this.planSeg({ node: start, edge: null, point: { x: start.x, y: start.y } }, end, seg.level, seg.type).crossings;
       node = this.buildSeg(start, end, { bridge: seg.bridge, tunnel: seg.tunnel, level: seg.level, type: seg.type }, live);

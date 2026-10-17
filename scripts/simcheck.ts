@@ -467,6 +467,41 @@ for (const kind of ['car', 'ambulance'] as const) {
   if (!bend.ok || !w.commitBend(w.selected!, bend)) fail(`edit select: bend refused (${bend.reason})`);
   if (!wg.edges.some(e => e.type.lanes === 2) || wg.edges.some(e => e.type.lanes === 2 && Math.min(e.a.x, e.b.x) > 450)) fail('edit select: the bend retyped the 2-lane road');
 }
+// Overdraw: a road drawn over a same-level road never leaves two roads on top of each other. The same type is 'Already exists', a
+// longer one follows the road and builds only past its ends, another type retypes the stretch (cars kept, the Edit tool's price), a
+// viaduct passes over, and a ramp tile running over a short road is refused
+{
+  const w = blank(), wg = w.graph, one: RoadType = { tier: 'street', lanes: 1, oneWay: false }, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+  const A = wg.addNode(100, 500), M = wg.addNode(500, 500), B = wg.addNode(900, 500);
+  w.commitPath(w.planPath([A, M], 0, one));
+  w.commitPath(w.planPath([M, B], 0, one));
+  const stacked = (): boolean => wg.edges.some(e => wg.edges.some(f => f !== e && f.level === e.level && dist(e.a, e.b) > 1
+    && Math.abs((e.b.x - e.a.x) * (f.b.y - f.a.y) - (e.b.y - e.a.y) * (f.b.x - f.a.x)) / dist(e.a, e.b) / dist(f.a, f.b) < 0.1
+    && [0.25, 0.5, 0.75].some(k => { const p = { x: e.a.x + (e.b.x - e.a.x) * k, y: e.a.y + (e.b.y - e.a.y) * k }; return Math.hypot(p.x - f.a.x, p.y - f.a.y) + Math.hypot(p.x - f.b.x, p.y - f.b.y) - dist(f.a, f.b) < 0.5; })));
+  const same = w.planPath([A, B], 0, one).reason;
+  if (same !== 'Already exists') fail(`overdraw: the same road over two edges was '${same || 'ok'}'`);
+  const m0 = w.money, n0 = wg.edges.length;
+  w.commitPath(w.planPath([{ x: 40, y: 500 }, { x: 960, y: 500 }], 0, one));
+  if (stacked() || wg.edges.length !== n0 + 2 || Math.abs(m0 - w.money - w.price({ x: 0, y: 0 }, { x: 120, y: 0 }, { bridge: false, tunnel: false, level: 0, type: one })) > 1e-6) {
+    fail(`overdraw: a longer road over it left ${wg.edges.length} edges (stacked ${stacked()}), cost ${m0 - w.money}`);
+  }
+  const run = [wg.edgeBetween(A, M)!, wg.edgeBetween(M, B)!], l = run[0].lanes.find(x => x.from === A)!, c = new Car(l, trip(town(w, 100, 300), town(w, 900, 300)));
+  c.s = 200; l.cars.push(c); w.cars.push(c);
+  const d = w.retypeDelta(run, two), up = w.planPath([A, B], 0, two), m1 = w.money;
+  if (!up.ok || Math.abs(up.cost - d) > 1e-6) fail(`overdraw: upgrade plan ${up.reason || up.cost}, expected ${d}`);
+  w.commitPath(up);
+  if (stacked() || wg.edges.length !== n0 + 2 || run.some(e => !wg.edges.includes(e) || e.type.lanes !== 2) || Math.abs(m1 - w.money - d) > 1e-6) {
+    fail(`overdraw: upgrade left ${wg.edges.map(e => e.type.lanes)} (stacked ${stacked()}), cost ${m1 - w.money}, expected ${d}`);
+  }
+  if (!w.cars.includes(c) || c.lane.edge !== run[0]) fail('overdraw: the upgrade dropped the car on the road');
+  invariants(w);
+  const via = w.planPath([{ x: 300, y: 300 }, { x: 300, y: 700 }], 1, one), over = w.planPath([{ x: 20, y: 500 }, { x: 980, y: 500 }], 1, one);
+  if (!via.ok || !over.ok) fail(`overdraw: a viaduct over it was refused (${via.reason || over.reason})`);
+  const Z = wg.addNode(100, 900), Y = wg.addNode(120, 900);
+  wg.addEdge(Z, Y, { bridge: false, tunnel: false, level: 0, type: one }, w.today);
+  const ramp = w.planPath([Z, { x: 900, y: 900 }], 1, one).reason;
+  if (!ramp.startsWith('Overlaps a road')) fail(`overdraw: a ramp over a short road was '${ramp || 'ok'}'`);
+}
 // Edits: a day-old avenue downgraded to dirt refunds REFUND_LATER of the drop, like a demolish; bending an arm of a junction with a
 // turn ban keeps the ban when the arm still leaves at about the same angle, and charges the plan's net
 {
