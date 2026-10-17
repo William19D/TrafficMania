@@ -577,8 +577,9 @@ export class RoadGraph {
   // lane (lo: the one past its own). A car in those lanes (or moving out into one by n) reaching n before it could stop plus
   // MERGE_GAP s past m's own time to the node, or the rear of one just past it. An entering car never meets one leaving the ring at n
   // from the outer lane, but always one leaving from an inner lane. Past n: the rear of a car in those lanes still in the box, or one
-  // moving out into them at the next node (it would cut in just ahead). No courtesy merge: held ring traffic would gridlock the ring.
-  private ringNear(n: Node, m: Car, lo: number): boolean {
+  // moving out into them at the next node (it would cut in just ahead). No courtesy merge for entering cars: held ring traffic would
+  // gridlock the ring. A starved inner exit (starved) only meets cars that can't stop; the rest keep clear for it (ringHeld).
+  private ringNear(n: Node, m: Car, lo: number, starved = false): boolean {
     const out = this.ringEdge(n, false), L = out.lanes.length, enter = !m.lane.edge.ring;
     // the outermost ring lane c is in or heading for by n (its goal there: it only moves out)
     const k = (c: Car): number => {
@@ -589,7 +590,7 @@ export class RoadGraph {
     // m's time to the node; past the plain arc (Car.update) it slows to half the corner speed, ~22px/s
     const plain = !m.exit || (m.exit.offset === 0 && Math.abs(m.lane.offset) <= LANE_W / 2);
     const te = (m.lane.edge.length - m.s) / Math.max(plain ? m.speed : Math.min(m.speed, 22), 20);
-    const reach = (c: Car, d: number): boolean => d < NODE_R + c.speed * c.speed / (2 * BRAKE) + c.speed * (MERGE_GAP + te) + CAR_LEN;
+    const reach = (c: Car, d: number): boolean => d < (starved ? stopDist(n) : NODE_R + c.speed * (MERGE_GAP + te) + CAR_LEN) + c.speed * c.speed / (2 * BRAKE);
     const meets = (c: Car): boolean => {
       const p = c.path, i = p ? p.indexOf(n) : -1, leaves = i >= 0 && !!p![i + 1] && !this.edgeBetween(n, p![i + 1])?.ring;
       if (p && i < 0) return false;
@@ -603,6 +604,15 @@ export class RoadGraph {
       for (const o of e.a.occupants) if (o.granted === e.a && meets(o) && reach(o, d + o.lane.edge.length - o.s)) return true;
     }
     return false;
+  }
+
+  // Ring traffic in ring lane k keeps clear of ring node n (Car.update, where it still can stop) for a car leaving the ring there from a
+  // lane further in: granted, or queued at the front of its lane for STARVE_S with room to go (steady outer traffic never leaves it a
+  // gap). It leaves the ring, so holding the lanes it crosses can't gridlock it.
+  ringHeld(n: Node, k: number): boolean {
+    const inner = (m: Car): boolean => !!m.lane.edge.ring && m.lane.to === n && this.ringIdx(m.lane) < k;
+    for (const m of n.occupants) if (m.granted === n && inner(m)) return true;
+    return n.queue.some(m => inner(m) && m.wait > STARVE_S && m.lane.cars[m.lane.cars.length - 1] === m && this.fits(n, m));
   }
 
   // The ring edge into (or out of) ring node v
@@ -759,7 +769,7 @@ export class RoadGraph {
             && !n.queue.some(o => o !== c && rank(o, this.moveAt(n, o)) > r && starving(o, STARVE_S) && this.crosses(n, c, o));
         }
         if (rv) return [...n.occupants].every(o => this.beside(n, c, o))
-          && (c.lane.edge.ring ? !this.ringNear(n, c, this.ringIdx(c.lane) + 1) : !this.ringNear(n, c, this.ringIdx(c.exit!)) && this.exitRoom(n, c));
+          && (c.lane.edge.ring ? !this.ringNear(n, c, this.ringIdx(c.lane) + 1, starving(c, STARVE_S)) : !this.ringNear(n, c, this.ringIdx(c.exit!)) && this.exitRoom(n, c));
         // stop: only from a standstill at the line
         if (n.control === 'stop') return ambL.has(c.lane) || (c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3);
         // driveway: into a gap in the road's traffic; after MERGE_S the road keeps clear (held) and only cars that can't stop count

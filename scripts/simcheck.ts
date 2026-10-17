@@ -870,6 +870,28 @@ const bodies = (p: { x: number; y: number; angle: number }, lp: number, q: { x: 
     rate.push(w.score * 3600 / t);
   }
   if (!(rate[1]! > rate[0]!) || rate[2]! < rate[1]!) fail(`ring lanes: cars a minute by lanes ${rate}`);
+  // steady outer-lane traffic never starves a car leaving from an inner lane: past STARVE_S the outer lanes keep clear for it
+  for (const [size, k] of [[1, 2], [2, 3]] as const) {
+    const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+    const H = [[1000, 450], [1550, 1000], [1000, 1550], [450, 1000]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
+    for (const h of H) w.commitPath(w.planPath([h, J], 0, av));
+    Object.assign(w, { demandOff: true, ringSize: size, ringLanes: k });
+    w.placeControl(J, 'roundabout');
+    H.forEach((h, i) => {
+      for (let j = 0; j < 24; j++) {
+        const lane = wg.lanesFrom(h.edges[0]!, h)[j % 2]!, c = new Car(lane, trip(h, H[(i + 1 + j % 2) % 4]));
+        c.s = 420 - (j >> 1) * 24;
+        lane.cars.unshift(c);
+        w.cars.push(c);
+      }
+    });
+    let wait = 0;
+    for (let t = 0; t < 180 * 60 && w.cars.length; t++) {
+      w.update(DT);
+      for (const c of w.cars) if (c.lane.edge.ring) wait = Math.max(wait, c.wait);
+    }
+    if (wait > 8 || w.score !== 96) fail(`ring lanes: a car waited ${wait.toFixed(1)}s on a ${k}-lane ring (${w.score} of 96 through)`);
+  }
   const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000);
   for (const [x, y] of [[1000, 700], [1300, 1000], [1000, 1300]]) w.commitPath(w.planPath([J, { x, y }], 0, DEFAULT_TYPE));
   if (!w.setControl(J, 'roundabout', 1, 3) || wg.rings[0]!.lanes !== 2) fail('ring lanes: a medium ring took 3 lanes');

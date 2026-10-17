@@ -152,9 +152,11 @@ export class Car {
     }
 
     // Intersection control: request a turn and wait before the node. Road traffic only stops at a driveway junction to keep it
-    // clear for a merging car (RoadGraph.held), and only when it still can. A ring car leaving from an inner lane waits at the node.
+    // clear for a merging car (RoadGraph.held), and only when it still can. A ring car leaving from an inner lane waits at the node,
+    // and ring traffic further out (ring lane k) keeps clear of it once it starves (RoadGraph.ringHeld).
     const needs = !isDest && (graph.needsControl(node, lane.edge) || graph.innerExit(lane, this.path?.[1]));
-    const keep = (n: Node, d: number, via: Edge | null): boolean => !!via && !via.drive && graph.drivewayJunction(n) && graph.held(n, via)
+    const keep = (n: Node, d: number, via: Edge | null, k = -1): boolean => !!via && !via.drive
+      && (via.ring ? k >= 0 && graph.ringHeld(n, k) : graph.drivewayJunction(n) && graph.held(n, via))
       && d - stopDist(n) >= this.speed * this.speed / (2 * BRAKE);
     if (needs && this.granted !== node) {
       // farther out (RoadGraph.queueAt) only in lane order: never ahead of the car in front
@@ -164,7 +166,7 @@ export class Car {
       gap = Math.min(gap, remaining - (lane.edge.ring ? lane.edge.length / 2 - GAP : stopDist(node)));
     } else if (!isDest && !nextLane) {
       gap = Math.min(gap, remaining - NODE_R - 3);
-    } else if (!isDest && keep(node, remaining, lane.edge)) {
+    } else if (!isDest && keep(node, remaining, lane.edge, lane.edge.ring ? lane.edge.lanes.indexOf(lane) : -1)) {
       gap = Math.min(gap, remaining - stopDist(node));
     } else if (!isDest && this.path) {
       // Stop line of the next controlled node past this one, so a short edge after it (a bent road's) still leaves room to stop.
@@ -180,7 +182,7 @@ export class Car {
         if (graph.needsControl(n, x)) { gap = Math.min(gap, Math.max(line, roll)); break; }
         // ponytail: assumes the lane it takes past this node all the way; a car that moves out later slowed a little for nothing
         if (x?.ring && ring >= 0 && graph.innerExit(x.lanes[ring], this.path[j + 2])) { gap = Math.min(gap, Math.max(d - x.length / 2 + GAP, roll)); break; }
-        if (keep(n, d, x)) { gap = Math.min(gap, line); break; }
+        if (keep(n, d, x, ring)) { gap = Math.min(gap, line); break; }
       }
     }
 
