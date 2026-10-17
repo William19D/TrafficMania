@@ -421,6 +421,26 @@ Achievements are checked on game events and at hourly ticks; none fire in Creati
 | Special | a free token for one special the run has unlocked (upkeep still applies); with none unlocked, the pool falls back to Money |
 | Upgrade (permanent for this run) | **Road crew**: roads −20%<br>**Smart lights**: phases stretch with the queue (actuated, ±50%)<br>**Wide rings**: ring limits +20%<br>**Express lanes**: highway limit +15%<br>**Zoning office**: zoning free, spawning +25%<br>**Tow trucks**: accidents clear 2x faster<br>**Bank deal**: loan interest halved, cap +$25,000<br>**Sound walls**: road noise −50% |
 
+### G4 as built (where it differs from the above)
+Code: `src/core/Achievements.ts` (`ACHIEVEMENTS`, `checkAch`, `owned`), milestones in `Campaign.ts` (`milestonePop`, `offersFor`,
+`takeOffer`, `UPGRADES`), `Game.milestone/offers/spare/upgrades/tokens/feats`, the choice modal and achievement toast in `HUD.ts`, the
+profile page's achievements grid and cosmetics picker in `Menu.ts`, paint sets in `VehicleArt.ts`, island decor in `CanvasRenderer.island`.
+- **26 achievements:** Daily Driver is not in (no Daily mode); Pastel paint moved to Smooth Operator. Weather the Storm and Detour Master
+  are listed but only G5 sets their counters (`feats.rain`, `feats.detour`).
+- **Counters live in `Game.feats`** (saved with the city), not `profile.progress`: streak, paint, amb, clover, debtfree, loaned. So
+  Smooth Operator's 1,000 trips are per city. `Game.fv` bumps on each; main.ts checks on every hour and every bump.
+- **Simplified predicates:** Mall Rat = ≥ 50 of the last 200 trip reports to a Mall / plaza with mean stopped time under 20 in-game
+  minutes (`TripReport.stopped`, absent in older saves). Quiet Streets = city noise part < 0.1. Lane Wizard = 3 junctions with an edited
+  plan and mean junction `delay` < 5 s. Bridge Builder counts bridge runs by their ends.
+- **Bonus maps** Lakeside Loop (B1) and Canyon Gate (B2) are in `MAPS` with `bonus: <achievement id>`; `mapOpen` checks the achievement.
+- **Milestones:** Endless no longer pays level-up grants (city levels are counted only; the level-up modal is gone), the people bar
+  shows the next milestone. None while the tutorial runs. An old save's milestone count = milestones at its population.
+- **Upgrades: 4 of 8** — Road crew, Zoning office (erasing a lot refunds nothing with it), Bank deal, Sound walls. Smart lights,
+  Wide rings and Express lanes need the car or junction to read the game's upgrades: not done. Tow trucks waits for G5.
+- **Special tokens:** `Game.tokens`; the Build menu card shows Free. A token-built special still refunds on demolish (ponytail).
+- **Save:** `ms?: { n, offers, spare, upgrades, tokens }`, `feats?` (an old save with a loan gets `loaned`).
+- **Profile:** adds `cosmetics: { paint, island }` (defaults Classic / Grass); unknown values fall back.
+
 ---
 
 ## 8. Events (G5)
