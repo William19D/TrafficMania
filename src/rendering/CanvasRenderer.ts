@@ -1,14 +1,17 @@
+import { profile } from '../core/Profile.ts';
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
-import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
+import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, onRing, ringOut, roadWidth } from '../network/RoadGraph.ts';
 import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
 import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
-import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
+import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
+import type { Lot } from '../core/Zones.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
-import { CONTROL_LABEL, exitEdge, fmtMoney } from '../core/Game.ts';
+import { CONTROL_LABEL, FX_LIFE, HOUR, exitEdge, fmtMoney } from '../core/Game.ts';
+import { corners, lotAt, lotRect } from '../core/Zones.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
 import { birds, boats, cloudShadows, pedestrians } from './Ambience.ts';
@@ -38,13 +41,13 @@ const SMOG = '#9A6B2F';
 // Sidewalk paving and its outer kerb (street, avenue, boulevard); driveways in concrete; paint near junctions
 const WALK = '#EFECE5', KERB = '#CBC6BA', PAINT = '#B9B9B4', GRANITE = '#B3AEA2', JOINT = '#D9D4C9';
 // a busy junction gets zebras too: a light, or four roads or more
-const zebraAt = (n: Node): boolean => n.control === 'light' || (n.control !== 'roundabout' && n.edges.filter(e => !e.drive).length >= 4);
+const zebraAt = (n: Node): boolean => n.control === 'light' || (!onRing(n) && n.edges.filter(e => !e.drive).length >= 4);
 // stable 0..1 per world spot, for the scattered details
 const hash01 = (x: number, y: number): number => ((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1 + 1) % 1;
 const DRIVE = { out: '#BDB6A6', fill: '#E3DED3' };
 const walked = (e: Edge): boolean => !e.drive && !e.bridge && !e.tunnel && (e.type.tier === 'street' || e.type.tier === 'avenue' || e.type.tier === 'boulevard');
 // A junction that gets paint: 3+ roads, or a sign or light (a driveway junction is a bend for the road's traffic)
-const junction = (n: Node): boolean => !n.building && n.control !== 'roundabout' && (n.control !== 'none' || n.edges.filter(e => !e.drive).length >= 3);
+const junction = (n: Node): boolean => !n.building && (n.control !== 'none' || n.edges.filter(e => !e.drive).length >= 3);
 // Heat map: free flow -> slow -> jammed
 const HEAT: [number, number, number][] = [[0x4C, 0xC2, 0x6A], [0xE0, 0xA1, 0x00], [0xE5, 0x48, 0x4D]];
 export const heatColor = (h: number): string => {
@@ -61,7 +64,7 @@ export class CanvasRenderer {
   private land = BIOMES.temperate.land;
   private treeCol = BIOMES.temperate.tree;
   // Cached static ground roads (asphalt, kerbs, verges, markings, islands, stop lines) over a world rect at s px per world px
-  private roads: { key: number; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
+  private roads: { key: number; isl: string; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
   // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
   private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
   // Cached ground of the current map at s px per world px; building sprites' scale
@@ -88,6 +91,7 @@ export class CanvasRenderer {
   reset(): void {
     this.cam = { x: WORLD.w / 2, y: WORLD.h / 2, zoom: Math.min(innerWidth / WORLD.w, innerHeight / WORLD.h) * 0.95 };
     this.route = { car: null, nodes: [] };
+    this.glide = null;
     this.clamp();
   }
 
@@ -118,9 +122,10 @@ export class CanvasRenderer {
     this.cam.y = axis(this.cam.y, WORLD.h, hh);
   }
 
+  // Eases the camera there (render moves it a share of the way each frame); a pan or zoom takes over
+  private glide: Vec | null = null;
   centerOn(p: Vec): void {
-    this.cam.x = p.x;
-    this.cam.y = p.y;
+    this.glide = { x: p.x, y: p.y };
     this.cam.zoom = Math.max(this.cam.zoom, 1);
     this.clamp();
   }
@@ -136,6 +141,7 @@ export class CanvasRenderer {
   }
 
   pan(dxScreen: number, dyScreen: number): void {
+    this.glide = null;
     this.cam.x -= dxScreen / this.cam.zoom;
     this.cam.y -= dyScreen / this.cam.zoom;
     this.clamp();
@@ -143,6 +149,7 @@ export class CanvasRenderer {
 
   zoomAt(sx: number, sy: number, factor: number): void {
     // Keeps the world point under the cursor fixed
+    this.glide = null;
     const before = this.screenToWorld(sx, sy);
     this.cam.zoom = Math.max(this.minZoom, Math.min(3, this.cam.zoom * factor));
     const after = this.screenToWorld(sx, sy);
@@ -159,7 +166,15 @@ export class CanvasRenderer {
     // still 0x0: nothing to draw, and a 0 zoom would make a 0px ground canvas whose drawImage throws and stops the game loop
     if (!innerWidth || !innerHeight) return;
     // Follow camera: centred on the car, zoomed in to at least 1.2 when the follow starts
-    const fc = game.follow;
+    const fc = game.follow, gl = this.glide;
+    if (gl && !fc) {
+      const x = this.cam.x, y = this.cam.y;
+      this.cam.x += (gl.x - x) * 0.15;
+      this.cam.y += (gl.y - y) * 0.15;
+      this.clamp();
+      // arrived, or held at the map's edge
+      if (Math.hypot(gl.x - this.cam.x, gl.y - this.cam.y) < 1 || Math.hypot(x - this.cam.x, y - this.cam.y) < 0.05) this.glide = null;
+    }
     if (fc) {
       const p = game.graph.carPos(fc);
       if (this.route.car !== fc) { this.route = { car: fc, nodes: [] }; this.cam.zoom = Math.max(this.cam.zoom, 1.2); }
@@ -233,6 +248,7 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
     };
     halo(0);
+    this.lots(game);
 
     // Ground roads: the cached static layer, then the live lane arrows, heat, signals and signs over it
     const nodes0 = levelNodes(0);
@@ -276,12 +292,16 @@ export class CanvasRenderer {
       this.night(game, light, ground);
     }
 
+    // events over the tint, so their markers read at night
+    this.events(game);
+    this.rain(game, now);
     // Junction open in the Edit panel
-    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, hubR(game.inspect), ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
     if (game.armed) this.outlineB(game.armed, RED, 6);
+    if (game.zonePlan && game.tool === 'zone') this.zonePreview(game);
 
     // Followed car: its route ahead as a dashed accent line, and a ring around it
     if (fc) {
@@ -380,6 +400,7 @@ export class CanvasRenderer {
       ctx.stroke();
     }
 
+    this.juice(game);
     if (hover && (!preview || game.tool === 'interchange')) this.hoverFx(game, hover, preview);
 
     // No road access: red badge on the roof, and a label while the cursor is over the building
@@ -388,10 +409,11 @@ export class CanvasRenderer {
     for (const b of game.buildings) {
       const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
       if (b.connected) {
+        if (b.downH) { this.pin(b, top, over); continue; }
         // homes: a red dot while households are moving out (every home's happiness under an overlay), residents and happiness under the cursor
-        if (b.kind !== 'home') continue;
+        if (b.kind !== 'home' || b.abandoned) continue;
         if (b.happy < TUNING.GROW_LO || game.overlay !== 'none') { this.circle(b.x, b.y, 4.5, '#FFFFFF'); this.circle(b.x, b.y, 3, happyColor(b.happy)); }
-        if (over) this.text(b.residents < 1 ? `Abandoned · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${ZONES.home.residents} residents · ${Math.round(b.happy)}% happy`,
+        if (over) this.text(b.residents < 1 ? `Empty · ${Math.round(b.happy)}% happy` : `${Math.round(b.residents)} / ${b.cap} residents · ${Math.round(b.happy)}% happy`,
           b.x, top, 'bold 11px system-ui', b.happy < TUNING.GROW_LO ? RED : DARK);
         continue;
       }
@@ -403,6 +425,165 @@ export class CanvasRenderer {
     }
 
     this.offscreenMarkers(game, dpr);
+  }
+
+  // Downgrade pin (Mini Motorways): amber with a ring counting down to abandonment (grey and red for an abandoned building, toward
+  // clearing); under the cursor its cause, and a dashed line to where to fix it
+  private pin(b: Building, top: number, over: boolean): void {
+    const ctx = this.ctx, y = top - 4, k = Math.min(1, b.downH / TUNING.DOWN_H), col = b.abandoned ? RED : AMBER;
+    this.circle(b.x, y, 8, '#FFFFFF');
+    this.circle(b.x, y, 6, b.abandoned ? '#8A8A8A' : col);
+    ctx.beginPath();
+    ctx.arc(b.x, y, 8, -Math.PI / 2, -Math.PI / 2 + k * 2 * Math.PI);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = 'bold 9px system-ui';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('!', b.x, y + 0.5);
+    if (!over || !b.cause) return;
+    const at = b.cause.at;
+    if (at) {
+      ctx.setLineDash([4, 4]);
+      this.polyline([{ x: b.x, y }, at]);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      this.ring(at.x, at.y, 12, col, 2.5);
+    }
+    const left = Math.ceil(TUNING.DOWN_H - b.downH);
+    this.text(`${b.cause.text} · ${b.abandoned ? 'cleared' : 'abandoned'} in ${left} h`, b.x, y - 16, 'bold 11px system-ui', b.abandoned ? RED : DARK);
+  }
+
+  // Traffic events (Events.ts): each a badge with a ring counting down its warning (dashed) or what is left of it; roadworks cones along
+  // the road (a barrier at both ends once shut), a wreck on its road, a flag over the VIP target; on match day the stadium counts down
+  // to kickoff from noon
+  private events(game: Game): void {
+    const ctx = this.ctx, t = game.time;
+    const badge = (x: number, y: number, col: string, k: number, glyph: string, warn: boolean): void => {
+      this.circle(x, y, 10, '#FFFFFF');
+      this.circle(x, y, 7.5, col);
+      ctx.beginPath();
+      ctx.arc(x, y, 10, -Math.PI / 2, -Math.PI / 2 + Math.max(0, Math.min(1, k)) * 2 * Math.PI);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2.5;
+      if (warn) ctx.setLineDash([3, 2]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      this.text(glyph, x, y + 0.5, 'bold 10px system-ui', '#FFFFFF');
+    };
+    const cone = (x: number, y: number): void => { this.circle(x, y, 2.8, '#E8731C'); this.circle(x, y, 1.1, '#FFFFFF'); };
+    for (const ev of game.events) {
+      const warn = t < ev.at, k = warn ? (ev.at - t) / HOUR : (ev.end - t) / (ev.end - ev.at);
+      if (ev.edge) {
+        const e = ev.edge, dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, hw = e.width / 2;
+        const at = (f: number, o: number): [number, number] => [e.a.x + dx * f - uy * o, e.a.y + dy * f + ux * o];
+        if (ev.kind === 'roadworks') {
+          // warning: cones along the kerb; shut: a row across each end and a striped barrier in the middle
+          for (let f = 0.2; f <= 0.8; f += 0.15) cone(...at(f, hw + 2));
+          if (!warn) for (const f of [Math.min(0.45, 14 / L), Math.max(0.55, 1 - 14 / L)]) for (let o = -hw + 2; o <= hw - 2; o += 5) cone(...at(f, o));
+          if (!warn) { ctx.setLineDash([4, 4]); this.seg({ x: at(0.5, -hw)[0], y: at(0.5, -hw)[1] }, { x: at(0.5, hw)[0], y: at(0.5, hw)[1] }, '#E8731C', 3); ctx.setLineDash([]); }
+        } else {
+          // two cars askew and a flashing light
+          const [x, y] = at(0.5, 0), a = Math.atan2(dy, dx);
+          for (const [f, r, col] of [[-5, 0.5, '#C9CED6'], [5, -0.3, '#D9534F']] as const) {
+            ctx.save();
+            ctx.translate(x + ux * f, y + uy * f);
+            ctx.rotate(a + r);
+            ctx.fillStyle = col;
+            ctx.fillRect(-6, -3.5, 12, 7);
+            ctx.restore();
+          }
+          this.circle(x, y - 8, 2.5, (t * 4 | 0) % 2 ? RED : ACCENT);
+        }
+        const [bx, by] = at(0.5, -hw - 16);
+        badge(bx, by, ev.kind === 'roadworks' ? '#E8731C' : RED, k, '!', warn);
+      } else if (ev.to) {
+        const b = ev.to, top = b.y - Math.max(b.w, b.h) / 2 - 18;
+        badge(b.x, top, YELLOW, k, '★', warn);
+      }
+    }
+    const st = game.buildings.find(b => b.special === 'stadium' && b.connected), h = game.hour;
+    if (st && !(game.day % TUNING.MATCH_DAYS) && h >= 12 && h < TUNING.KICKOFF)
+      badge(st.x, st.y - Math.max(st.w, st.h) / 2 - 18, ACCENT, (TUNING.KICKOFF - h) / (TUNING.KICKOFF - 12), '⚽', true);
+  }
+
+  // Rain (Events.ts): clouds darken the screen through the warning hour, then streaks fall while it lasts
+  private rain(game: Game, now: number): void {
+    const ev = game.events.find(e => e.kind === 'rain');
+    if (!ev || game.overlay !== 'none') return;
+    const ctx = this.ctx, W = this.canvas.width, H = this.canvas.height, k = game.time < ev.at ? 1 - (ev.at - game.time) / HOUR : 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = `rgba(52,66,90,${0.16 * k})`;
+    ctx.fillRect(0, 0, W, H);
+    if (ev.base) {
+      ctx.strokeStyle = 'rgba(210,225,245,0.45)';
+      ctx.lineWidth = 1.2 * (devicePixelRatio || 1);
+      ctx.beginPath();
+      // ponytail: 160 streaks on a fixed lattice scrolled by time; no splashes
+      for (let i = 0; i < 160; i++) {
+        const x = ((i * 397.3 + now * 90) % (W + 60)) - 30, y = ((i * 211.7 + now * (520 + i % 7 * 40)) % (H + 60)) - 30;
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 6, y + 16);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Zoned lots: an empty one a dashed plot in its zone's colours, a built one a faint plot under its building
+  private lots(game: Game): void {
+    const ctx = this.ctx;
+    for (const l of game.lots) {
+      const z = ZONES[l.zone], r = lotRect(l);
+      this.polyline(corners({ ...r, w: r.w - 3, h: r.h - 3 }), true);
+      ctx.globalAlpha = l.building ? 0.2 : 0.4;
+      ctx.fillStyle = z.roof;
+      ctx.fill();
+      if (!l.building) {
+        ctx.globalAlpha = 0.9;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = z.out;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Zone brush drag: the path along the roads, the lots it adds (zone colours), re-zones (new colours, red where a building goes) or
+  // erases (red dashed), and the label: lots, price and the demand it answers, or why not
+  private zonePreview(game: Game): void {
+    const ctx = this.ctx, p = game.zonePlan!, z = p.zone ? ZONES[p.zone] : null;
+    ctx.globalAlpha = 0.35;
+    this.polyline(p.path);
+    ctx.strokeStyle = p.ok ? ACCENT : RED;
+    ctx.lineWidth = 10;
+    ctx.stroke();
+    const plot = (l: Lot, fill: string | null, out: string, dash: boolean): void => {
+      const r = lotRect(l);
+      this.polyline(corners({ ...r, w: r.w - 3, h: r.h - 3 }), true);
+      if (fill) { ctx.globalAlpha = 0.6; ctx.fillStyle = fill; ctx.fill(); }
+      ctx.globalAlpha = 1;
+      if (dash) ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = out;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    if (z) for (const l of p.add) plot(l, z.roof, z.out, false);
+    if (z) for (const l of p.rezone) plot(l, z.roof, l.building ? RED : z.out, false);
+    for (const l of p.erase) plot(l, null, RED, true);
+    ctx.globalAlpha = 1;
+    const end = p.path[p.path.length - 1];
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    this.text(p.ok ? p.label : '⚠ ' + p.reason, end.x + 14, end.y - 10, 'bold 12px system-ui', p.ok && !p.demolish ? '#2E8B4A' : RED);
   }
 
   // Screen-edge markers for buildings without a road outside the view: zone-coloured square, red arrow toward it
@@ -429,16 +610,33 @@ export class CanvasRenderer {
       ctx.strokeStyle = z.out;
       ctx.lineWidth = 1.5;
       ctx.stroke();
-      ctx.rotate(Math.atan2(s.y - y, s.x - x));
-      ctx.beginPath();
-      ctx.moveTo(R + 10, 0);
-      ctx.lineTo(R + 3, -5);
-      ctx.lineTo(R + 3, 5);
-      ctx.closePath();
-      ctx.fillStyle = RED;
-      ctx.fill();
+      this.edgeArrow(Math.atan2(s.y - y, s.x - x), R, RED);
       ctx.restore();
     }
+    // the tutorial's targets: an accent disc with an arrow toward each one off screen
+    for (const t of game.tutorialTargets) {
+      const s = this.worldToScreen(t);
+      if (s.x > X && s.x < innerWidth - X && s.y > T && s.y < innerHeight - B) continue;
+      const x = Math.max(X + R, Math.min(innerWidth - X - R, s.x)), y = Math.max(T + R, Math.min(innerHeight - B - R, s.y));
+      ctx.save();
+      ctx.translate(x, y);
+      this.circle(0, 0, R + 1, ACCENT);
+      this.circle(0, 0, 4, '#FFFFFF');
+      this.edgeArrow(Math.atan2(s.y - y, s.x - x), R, ACCENT);
+      ctx.restore();
+    }
+  }
+
+  private edgeArrow(a: number, r: number, color: string): void {
+    const ctx = this.ctx;
+    ctx.rotate(a);
+    ctx.beginPath();
+    ctx.moveTo(r + 10, 0);
+    ctx.lineTo(r + 3, -5);
+    ctx.lineTo(r + 3, 5);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
   }
 
   // The static ground roads, cached over the view and a quarter view of margin at a half-power-of-2 zoom bucket: redrawn when the
@@ -447,9 +645,9 @@ export class CanvasRenderer {
     const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 60, vw = innerWidth / z, vh = innerHeight / z;
     const x0 = Math.max(-P, this.cam.x - vw / 2), y0 = Math.max(-P, this.cam.y - vh / 2);
     const x1 = Math.min(WORLD.w + P, this.cam.x + vw / 2), y1 = Math.min(WORLD.h + P, this.cam.y + vh / 2);
-    const key = netKey(game.graph.edges, game.graph.nodes);
+    const key = netKey(game.graph.edges, game.graph.nodes), isl = profile().cosmetics.island;
     let r = this.roads;
-    if (!r || r.key !== key || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
+    if (!r || r.key !== key || r.isl !== isl || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
       // ponytail: no margin past ~20M px (a 4K screen close up), so a pan there redraws every frame; tile the layer if it shows
       const m = (x1 - x0) * (y1 - y0) * 2.25 * s * s > 2e7 ? 0 : 0.25;
       const x = Math.max(-P, x0 - vw * m), y = Math.max(-P, y0 - vh * m);
@@ -460,16 +658,16 @@ export class CanvasRenderer {
       const main = this.ctx;
       this.ctx = c.getContext('2d')!;
       this.ctx.setTransform(s, 0, 0, s, -x * s, -y * s);
-      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0);
+      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0, game.graph.rings);
       this.ctx = main;
-      r = this.roads = { key, t: game.terrain, s, x, y, w, h, c };
+      r = this.roads = { key, isl, t: game.terrain, s, x, y, w, h, c };
     }
     this.ctx.drawImage(r.c, r.x, r.y, r.c.width / r.s, r.c.height / r.s);
   }
 
   // Ground roads: bridge decks, kerbs, sidewalks with paving joints, boulevard verges, the asphalt (tier outline, fill, grain, tyre
   // wear, repairs, cracks), markings, details, then the static junction paint (islands, stop lines, zebras, signs)
-  private paintRoads(terrain: Game['terrain'], ground: Edge[], nodes: Node[], nodes0: Node[]): void {
+  private paintRoads(terrain: Game['terrain'], ground: Edge[], nodes: Node[], nodes0: Node[], rings: Ring[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -481,11 +679,7 @@ export class CanvasRenderer {
     const band = (col: (e: Edge) => string, extra: (e: Edge) => number, only: (e: Edge) => boolean, edgesOnly = false): void => {
       for (const e of ground) if (walked(e) && only(e)) this.line(e, col(e), e.width + extra(e));
       if (edgesOnly) return;
-      for (const [n, j] of walkJ) {
-        if (!only(j)) continue;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), col(j), ROAD_W + extra(j));
-        else this.circle(n.x, n.y, (j.width + extra(j)) / 2, col(j));
-      }
+      for (const [n, j] of walkJ) if (only(j)) this.circle(n.x, n.y, (j.width + extra(j)) / 2, col(j));
     };
     const all = (): boolean => true;
     band(e => e.type.tier === 'street' ? KERB : GRANITE, kerbX, all);
@@ -512,15 +706,14 @@ export class CanvasRenderer {
       for (const e of ground) if (!(extra && e.bridge)) this.line(e, col(e.drive ? DRIVE[key] : TIERS[e.type.tier][key]), e.width + extra - (e.drive ? 4 : 0));
       for (const n of joints) {
         const j = jointEdge(n, 0), color = col(j?.drive ? DRIVE[key] : TIERS[j?.type.tier ?? 'street'][key]);
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), color, ROAD_W + extra);
-        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
+        this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
       }
     };
     pass('out', 3);
     pass('fill', 0);
-    // markings stop outside a roundabout's ring, and at the edge of a junction's box
+    // markings stop at the edge of a junction's box
     const cut = (n: Node, o: Node): Vec => {
-      const d = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 : junction(n) ? Math.max(...n.edges.map(x => x.drive || x.a === o || x.b === o ? 0 : x.width / 2 + 1)) : 0;
+      const d = junction(n) ? Math.max(...n.edges.map(x => x.drive || x.a === o || x.b === o ? 0 : x.width / 2 + 1)) : 0;
       if (!d) return n;
       const k = Math.min(0.5, d / (Math.hypot(o.x - n.x, o.y - n.y) || 1));
       return { x: n.x + (o.x - n.x) * k, y: n.y + (o.y - n.y) * k };
@@ -528,7 +721,7 @@ export class CanvasRenderer {
     // wear: tyre tracks down each lane, now and then a repair patch or a crack
     ctx.lineCap = 'butt';
     for (const e of ground) {
-      if (e.drive || e.type.tier === 'dirt') continue;
+      if (e.drive || e.ring || e.type.tier === 'dirt') continue;
       const ux = (e.b.x - e.a.x) / e.length, uy = (e.b.y - e.a.y) / e.length, A = cut(e.a, e.b), B = cut(e.b, e.a);
       const at = (s: number, o: number): Vec => ({ x: e.a.x + ux * s - uy * o, y: e.a.y + uy * s + ux * o });
       const s0 = Math.hypot(A.x - e.a.x, A.y - e.a.y) + 4, s1 = e.length - Math.hypot(B.x - e.b.x, B.y - e.b.y) - 4;
@@ -561,9 +754,10 @@ export class CanvasRenderer {
     }
     ctx.lineCap = 'round';
 
-    for (const e of ground) if (!e.drive) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
-    this.details(ground);
+    for (const e of ground) if (!e.drive && !e.ring) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
+    this.details(ground.filter(e => !e.ring));
     this.controls(nodes0, 'static');
+    for (const r of rings) this.island(r);
   }
 
   // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
@@ -571,7 +765,7 @@ export class CanvasRenderer {
   // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
   // dashed red outline.
   private building(b: Building, time: number): void {
-    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.kind, v), alpha = ctx.globalAlpha;
+    const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.art, v, h, w), alpha = ctx.globalAlpha;
     const c = Math.cos(b.angle), sn = Math.sin(b.angle), toWorld = (x: number, y: number): Vec => ({ x: b.x + x * c - y * sn, y: b.y + x * sn + y * c });
     // shadow: the body swept down-right by its height (the hull of the body and its offset copy)
     const [bx, by, bw, bh] = L.body, o = L.height;
@@ -584,7 +778,7 @@ export class CanvasRenderer {
     ctx.rotate(b.angle);
     // an empty home (everyone moved out) fades
     if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = alpha * 0.45;
-    const img = sprite(b.kind, v, this.artS);
+    const img = sprite(b.art, v, this.artS, false, b.w, b.h, b.abandoned);
     ctx.drawImage(img, -h - PAD, -w - PAD, img.width / this.artS, img.height / this.artS);
     b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => {
       ctx.beginPath();
@@ -621,6 +815,27 @@ export class CanvasRenderer {
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
+  // Coin pops rise and fade over income; a cleared jam throws a ring of green sparkles
+  private juice(game: Game): void {
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const f of game.fx) {
+      const k = Math.min(1, Math.max(0, (game.time - f.at) / FX_LIFE));
+      ctx.globalAlpha = 1 - k * k;
+      if (f.kind === 'coin') {
+        const y = f.y - 14 - 22 * k;
+        this.circle(f.x - 9, y, 5, '#E8B23A');
+        this.circle(f.x - 9, y, 3, '#F7D774');
+        this.text(`+${fmtMoney(f.n)}`, f.x + 6, y, 'bold 10px system-ui', '#2E8B4A');
+      } else for (let i = 0; i < 10; i++) {
+        const a = i * Math.PI / 5 + f.x, r = 6 + 26 * Math.sqrt(k);
+        this.circle(f.x + Math.cos(a) * r, f.y + Math.sin(a) * r, 2.5 * (1 - k) + 0.5, i % 2 ? '#7FD88F' : '#FFFFFF');
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private hoverFx(game: Game, p: Vec, preview: PathPlan | null): void {
     const ctx = this.ctx, g = game.graph;
     const label = (s: string, x: number, y: number, color: string) => {
@@ -638,12 +853,12 @@ export class CanvasRenderer {
       if (b) {
         const who = game.occupants(b);
         this.outlineB(b, RED, 4);
-        below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ` · back to the tray · ${fmtMoney(game.moveCost)}`}`, b, RED);
+        below(game.armed === b ? `Click again: ${who}` : `Demolish ${b.label.toLowerCase()}${b.lots.length ? ' · the lot stays zoned' : ''}`, b, RED);
         return;
       }
-      const n = g.nearestNode(p, NODE_R + 4);
+      const n = g.ringAt(p, 4)?.hub ?? g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
-        this.ring(n.x, n.y, n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 6, RED, 3);
+        this.ring(n.x, n.y, n.control === 'roundabout' ? ringOut(n.ring) + 2 : NODE_R + 6, RED, 3);
         label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
@@ -658,15 +873,15 @@ export class CanvasRenderer {
       this.line(e, TIERS[e.type.tier].fill, e.width);
       label(`Demolish · +${fmtMoney(game.refundOf(e))}`, hit.point.x, hit.point.y, RED);
     } else if (game.tool === 'light' || game.tool === 'roundabout') {
-      const n = g.nearestNode(p, NODE_R + 6);
+      const r = g.ringAt(p, 4), n = r?.hub ?? g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
       const cost = game.controlPrice(kind) - game.controlRefund(n), ring = kind === 'roundabout';
       const here = n.control === kind && (!ring || n.ring === game.ringSize);
-      const reason = n.building || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
+      const reason = n.building || (!r && n.edges.length < 3) ? 'Needs an intersection (3+ roads)'
         : ring && !here && game.ringRoom(n, game.ringSize) || (!here && cost > game.money ? 'Not enough money' : null);
       // a roundabout previews the ring of the chosen size
-      this.ring(n.x, n.y, ring ? RINGS[game.ringSize].r + ROAD_W / 2 + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
+      this.ring(n.x, n.y, ring ? ringOut(game.ringSize) + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
       const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Resize to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()} roundabout`;
       const place = here ? 'Already here' : `${what} · ${cost < 0 ? '+' : ''}${fmtMoney(Math.abs(cost))}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
@@ -682,12 +897,19 @@ export class CanvasRenderer {
       // the picked junction (or the one under the cursor); its reason when no ghost can be drawn
       const n = game.ichg?.node ?? game.junctionAt(p);
       if (!n) { label('Click a junction of 3 or 4 roads', p.x, p.y, DARK); return; }
-      this.ring(n.x, n.y, NODE_R + 26, preview?.ok ? GREEN : RED, 2);
+      this.ring(n.x, n.y, hubR(n), preview?.ok ? GREEN : RED, 2);
       if (!preview) label('⚠ Needs a junction of 3 or 4 roads', n.x, n.y, RED);
       else if (!preview.segs.length) label('⚠ ' + preview.reason, n.x, n.y, RED);
       else if (!game.ichg) label('Click to pick an interchange', n.x, n.y + 18, ACCENT);
     } else if (game.tool === 'place') {
       this.ghost(game, p);
+    } else if (game.tool === 'zone') {
+      // where a drag would start, and whether it paints or erases
+      const hit = g.nearestEdge(p, TUNING.BRUSH_R, 0), on = lotAt(game, p), z = game.zone;
+      if (!hit || hit.edge.drive || hit.edge.ring || !TIERS[hit.edge.type.tier].access) { label('Drag along a road to zone its sides', p.x, p.y, DARK); return; }
+      this.ring(hit.point.x, hit.point.y, NODE_R, z ? ZONES[z].out : RED, 2.5);
+      label(!z ? 'Drag over lots to unzone them' : on?.zone === z ? `Drag to erase ${ZONE_NAME[z]} lots` : `Drag along the road to paint ${ZONE_NAME[z]} · Shift: one side`,
+        hit.point.x, hit.point.y, z ? DARK : RED);
     } else if (game.tool === 'edit') {
       // same order as Game.select: car, junction, building, road
       const c = game.carAt(p);
@@ -699,14 +921,14 @@ export class CanvasRenderer {
       }
       const j = game.junctionAt(p);
       if (j) {
-        this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
-        label('Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
+        this.ring(j.x, j.y, hubR(j), ACCENT, 1.5);
+        label(j.control === 'roundabout' ? 'Click to edit roundabout: size, control' : 'Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
         return;
       }
       const b = game.buildingUnder(p);
       if (b) {
         this.outlineB(b, ACCENT, 4);
-        below(`${ZONES[b.kind].label}: click for details · drag to move`, b, ACCENT);
+        below(`${b.label}: click for details${b.lots.length ? '' : ' · drag to move'}`, b, ACCENT);
         return;
       }
       const run = game.runAt(p);
@@ -828,7 +1050,7 @@ export class CanvasRenderer {
   }
 
   // Noise and pollution, under the roads: a purple band NOISE_R either side of each road by its tier's noise (one path per tier, so
-  // joints do not darken), and a brown haze fading out at POLLUTION_R round each factory while it has workers
+  // joints do not darken), and a brown haze fading out at its tier's pollution reach round each factory while it has workers
   private noiseMap(game: Game): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
@@ -843,12 +1065,13 @@ export class CanvasRenderer {
     }
     ctx.globalAlpha = 1;
     for (const b of game.buildings) {
-      if (b.kind !== 'industry' || b.staffed <= 0) continue;
-      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, TUNING.POLLUTION_R);
+      const R = b.def.pollution;
+      if (!R || b.staffed <= 0) continue;
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
       g.addColorStop(0, SMOG + Math.round(0x66 * b.staffed).toString(16).padStart(2, '0'));
       g.addColorStop(1, SMOG + '00');
       ctx.beginPath();
-      ctx.arc(b.x, b.y, TUNING.POLLUTION_R, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
       ctx.fillStyle = g;
       ctx.fill();
     }
@@ -860,10 +1083,10 @@ export class CanvasRenderer {
     const plan = game.planPlace(p);
     if (!plan) return;
     const ctx = this.ctx, b = plan.b, col = plan.ok ? GREEN : RED, door = b.door();
-    if (b.kind === 'industry') {
+    if (b.def.pollution) {
       ctx.setLineDash([6, 6]);
       ctx.globalAlpha = 0.6;
-      this.ring(b.x, b.y, TUNING.POLLUTION_R, ZONES.industry.out, 1.5);
+      this.ring(b.x, b.y, b.def.pollution, ZONES.industry.out, 1.5);
       ctx.setLineDash([]);
     }
     if (plan.road) {
@@ -893,7 +1116,7 @@ export class CanvasRenderer {
     const y = b.y - Math.max(b.w, b.h) / 2 - 10;
     if (!plan.ok) this.text(plan.reason, b.x, y, 'bold 12px system-ui', RED);
     else if (plan.warn) this.text(plan.warn, b.x, y, 'bold 12px system-ui', '#A86A00');
-    else this.text(game.moving ? `Move here${game.moveCost ? ` · ${fmtMoney(game.moveCost)}` : ''}` : ZONES[b.kind].label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
+    else this.text(plan.label, b.x, y, 'bold 12px system-ui', '#2E8B4A');
   }
 
   // Tier centre (two-way: yellow line, green median or double gray line; dirt has none), dashed separators between
@@ -1041,20 +1264,15 @@ export class CanvasRenderer {
     ctx.lineCap = 'round';
   }
 
-  // Intersection markings (stop lines), roundabout islands and traffic lights
-  // part: 'static' (islands, stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
+  // Intersection markings (stop lines) and traffic lights
+  // part: 'static' (stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
   private controls(nodes: Node[], part: 'static' | 'live' | 'all'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
-      if (part !== 'static' && (n.control === 'roundabout' || junction(n))) {
-        if (n.control === 'light') this.drawLights(n);
-      }
-      if (part === 'live') continue;
-      if (n.control === 'roundabout') this.island(n);
-      if (n.control !== 'roundabout' && !junction(n)) continue;
-      // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way or a plain junction. ponytail: on
-      // roundabouts it goes outside the ring (at NODE_R+4 it would fall inside it)
-      const d0 = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
+      if (part !== 'static' && n.control === 'light') this.drawLights(n);
+      if (part === 'live' || !junction(n)) continue;
+      // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way, a plain junction or a ring entry
+      const d0 = NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
       // a light's zebra starts past the widest road crossing the arm, its stop line just behind it. ponytail: cars still stop at
       // stopDist, so on a street meeting an avenue they halt a few px past the line
       const zb = zebraAt(n);
@@ -1066,7 +1284,7 @@ export class CanvasRenderer {
       ctx.lineCap = 'butt';
       ctx.beginPath();
       for (const e of n.edges) {
-        if (e.drive || (e.type.oneWay && e.a === n)) continue;
+        if (e.drive || e.ring || (e.type.oneWay && e.a === n)) continue;
         const [ux, uy] = this.dir(n, e), d = at(e);
         const x = n.x + ux * d, y = n.y + uy * d, h = e.width / 2 - 0.5, h0 = e.type.oneWay ? -h : TIERS[e.type.tier].median / 2;
         ctx.moveTo(x + uy * h0, y - ux * h0);
@@ -1094,22 +1312,16 @@ export class CanvasRenderer {
     }
   }
 
-  // Roundabout centre: a cobbled truck apron, a kerb, a planted island with a flower bed, shrubs round it and a tree in the middle
-  private island(n: Node): void {
-    const ctx = this.ctx, R = ringR(n) - ROAD_W / 2, g = shade(this.land, -0.12);
+  // Roundabout centre: a cobbled truck apron, a kerb, a planted island with shrubs round it and, by the profile's decor (Achievements.ts),
+  // a tree on grass, a flower bed, a fountain or a statue in the middle
+  private island(ring: Ring): void {
+    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r - RING_W / 2, g = shade(this.land, -0.12), decor = profile().cosmetics.island;
     this.circle(n.x, n.y, R, '#D9D3C5');
     ctx.setLineDash([1.2, 1.2]);
     this.ring(n.x, n.y, R - 1.3, '#C4BDAD', 1.4);
     ctx.setLineDash([]);
     this.circle(n.x, n.y, R - 2.6, GRANITE);
     this.circle(n.x, n.y, R - 3.4, g);
-    this.circle(n.x, n.y, R * 0.5, '#B89A74');
-    this.circle(n.x, n.y, R * 0.5 - 0.8, '#A6875F');
-    const k = Math.floor(R * 0.9);
-    for (let i = 0; i < k; i++) {
-      const a = (i / k) * Math.PI * 2, f = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2'][i % 4];
-      this.circle(n.x + Math.cos(a) * R * 0.34, n.y + Math.sin(a) * R * 0.34, 0.8, f);
-    }
     const m = Math.max(4, Math.floor(R / 2.6));
     for (let i = 0; i < m; i++) {
       const a = (i / m) * Math.PI * 2 + 0.3, p = { x: n.x + Math.cos(a) * R * 0.74, y: n.y + Math.sin(a) * R * 0.74 };
@@ -1117,6 +1329,35 @@ export class CanvasRenderer {
       tree(ctx, p, 1.6 + (i % 3) * 0.25, i % 4 === 3 ? 'blossom' : 'round', this.treeCol, (i % 3 - 1) * 0.06, a);
     }
     const r = Math.min(5.5, R * 0.3);
+    if (decor === 'fountain') {
+      this.circle(n.x, n.y, R * 0.5, '#CFC8B8');
+      this.circle(n.x, n.y, R * 0.5 - 1.2, '#5FA8D6');
+      this.ring(n.x, n.y, R * 0.3, '#9FD3F0', 0.8);
+      this.circle(n.x, n.y, r * 0.5, '#CFC8B8');
+      this.circle(n.x, n.y, r * 0.25, '#E8F6FF');
+      return;
+    }
+    if (decor === 'statue') {
+      this.circle(n.x, n.y, R * 0.42, '#C9C2B2');
+      ctx.fillStyle = '#A9A293';
+      ctx.fillRect(n.x - r * 0.6, n.y - r * 0.6, r * 1.2, r * 1.2);
+      this.circle(n.x + 0.8, n.y + 1.2, r * 0.45, 'rgba(30,40,40,.25)');
+      this.circle(n.x, n.y, r * 0.45, '#5E8C7E');
+      this.circle(n.x - r * 0.12, n.y - r * 0.12, r * 0.2, '#7FB0A0');
+      return;
+    }
+    if (decor === 'grass') {
+      this.circle(n.x + 1.6, n.y + 2.3, r + 0.4, 'rgba(30,50,30,.18)');
+      tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
+      return;
+    }
+    this.circle(n.x, n.y, R * 0.5, '#B89A74');
+    this.circle(n.x, n.y, R * 0.5 - 0.8, '#A6875F');
+    const k = Math.floor(R * 0.9);
+    for (let i = 0; i < k; i++) {
+      const a = (i / k) * Math.PI * 2, f = ['#F28DB2', '#FFD45C', '#FFFFFF', '#B79CF2'][i % 4];
+      this.circle(n.x + Math.cos(a) * R * 0.34, n.y + Math.sin(a) * R * 0.34, 0.8, f);
+    }
     this.circle(n.x + 1.6, n.y + 2.3, r + 0.4, 'rgba(30,50,30,.18)');
     tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
   }
@@ -1166,8 +1407,7 @@ export class CanvasRenderer {
     const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
         const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), c, ROAD_W + extra);
-        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
+        this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
     for (const e of edges) this.line(e, BRIDGE, e.width + 5);
@@ -1195,7 +1435,7 @@ export class CanvasRenderer {
   }
 
   // A cached model (VehicleArt) on a soft shadow cast down-right, then the live lights: tail lights (bright while braking), the
-  // indicator blinking on game time (so pause freezes it)
+  // indicator blinking on game time (so pause freezes it) and an ambulance's red / blue bar
   private car(game: Game, car: Car): void {
     const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
     this.seen.push(car);
@@ -1216,6 +1456,20 @@ export class CanvasRenderer {
       ctx.fillStyle = AMBER;
       ctx.fillRect(-h - 1, sy, 2, 2);
       ctx.fillRect(h - 1, sy, 2, 2);
+    }
+    // a VIP convoy car: a gold pennant on the roof
+    if (car.trip.vip) {
+      ctx.fillStyle = YELLOW;
+      ctx.fillRect(-2, -w + 1, 4, 2 * w - 2);
+      ctx.fillStyle = CAR_OUT;
+      ctx.fillRect(-0.5, -w + 1, 1, 2 * w - 2);
+    }
+    if (k === 'ambulance') {
+      const on = (game.time * 4 | 0) % 2;
+      ctx.fillStyle = on ? RED : ACCENT;
+      ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
+      ctx.fillStyle = on ? ACCENT : RED;
+      ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
     }
     // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
     if (game.purposeDots || game.overlay === 'heat') {
@@ -1241,8 +1495,8 @@ export class CanvasRenderer {
     this.lamps(ground, (x, y) => ctx.drawImage(gl, x - R, y - R, 2 * R, 2 * R));
     ctx.globalAlpha = d.night;
     for (const b of game.buildings) {
-      if (b.kind === 'gate' || (b.kind === 'home' && b.residents < 1)) continue;
-      const img = sprite(b.kind, variant(b.x, b.y), this.artS, true);
+      if (b.kind === 'gate' || b.abandoned || (b.kind === 'home' && b.residents < 1)) continue;
+      const img = sprite(b.art, variant(b.x, b.y), this.artS, true, b.w, b.h);
       ctx.save();
       ctx.translate(b.x, b.y);
       ctx.rotate(b.angle);
@@ -1403,11 +1657,15 @@ export class CanvasRenderer {
     ctx.stroke();
   }
 
+  // a ring road edge is drawn as its arc of the circle
   private line(e: Edge, color: string | CanvasPattern, width: number): void {
-    const ctx = this.ctx;
+    const ctx = this.ctx, r = e.ring?.hub;
     ctx.beginPath();
-    ctx.moveTo(e.a.x, e.a.y);
-    ctx.lineTo(e.b.x, e.b.y);
+    if (r) ctx.arc(r.x, r.y, RINGS[r.ring].r, Math.atan2(e.a.y - r.y, e.a.x - r.x), Math.atan2(e.b.y - r.y, e.b.x - r.x), true);
+    else {
+      ctx.moveTo(e.a.x, e.a.y);
+      ctx.lineTo(e.b.x, e.b.y);
+    }
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.stroke();
@@ -1524,7 +1782,7 @@ export class CanvasRenderer {
   private arrowsOf(n: Node, e: Edge): number[] | null {
     const p = n.plan, k = inLanes(n, e);
     if (p && (laneMasks(p, n, e) || p.ban[approachOf(p, n, e)].some(Boolean))) return links(p, n, e);
-    return k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null;
+    return k > 1 && !onRing(n) ? autoMasks(k) : null;
   }
   // Lane connection editor (LaneLinks) of the junction open in the panel: a soft pad, the target zones on the roads out, a curve per
   // connection in its approach's colour (thicker hovered), the lane handles, and the line being dragged snapping onto a zone
@@ -1592,6 +1850,9 @@ export class CanvasRenderer {
     }
   }
 }
+
+// Highlight radius round a junction, or round a roundabout (its hub)
+const hubR = (n: Node): number => n.control === 'roundabout' ? ringOut(n.ring) + 8 : NODE_R + 26;
 
 // Joint disc: the widest non-tunnel road of that level meeting at the node sets its width and tier colour
 function jointEdge(n: Node, level: number): Edge | null {

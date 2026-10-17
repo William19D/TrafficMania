@@ -3,14 +3,19 @@
 import { Game, HOUR, ledger0 } from './Game.ts';
 import type { Ledger } from './Game.ts';
 import { BIOMES, DIFFICULTY, SIZES, TUNING as T } from './config.ts';
-import type { GameConfig, Site, Zone } from './config.ts';
+import type { GameConfig, Site, Special, Zone } from './config.ts';
 import type { Metrics } from './Metrics.ts';
 import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
 import type { Trip, TripReport } from '../entities/Trip.ts';
-import { RoadGraph } from '../network/RoadGraph.ts';
-import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
+import { RoadGraph, clearR } from '../network/RoadGraph.ts';
+import { dist } from '../util/geom.ts';
+import type { Control, RingSize, RoadType, Spoke } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
+import { adoptLots, demandOf } from './Zones.ts';
+import { milestonesAt, run0 } from './Campaign.ts';
+import type { Offer, RunState, Upgrade } from './Campaign.ts';
+import type { ActiveEvent, EventKind } from './Events.ts';
 
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
@@ -18,15 +23,26 @@ interface BuildingData {
   kind: Site; x: number; y: number; angle: number; residents: number; stock: number; staffed: number; shopAcc: number; truckAcc: number;
   importAcc?: number; visitAcc?: number; // absent before outside connections
   happy: number; parts: Parts; recent: Building['recent']; pending: TripData[]; parked: TripData[];
+  tier?: number; abandoned?: boolean; access?: number; downH?: number; upH?: number; // absent before zones (a legacy building)
+  special?: Special | null; cheer?: number; // absent before tiers
 }
 export interface SaveData {
   v: 1; cfg: GameConfig; time: number; lastHour: number; assignAt: number; money: number; score: number; upkeepDay: number;
-  cityLevel: number; tray: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
+  // tray: before zones (ignored); lots, loan, spawnAcc: absent before them (each building then gets a lot of its own)
+  cityLevel: number; tray?: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
+  lots?: { x: number; y: number; angle: number; w: number; zone: Zone; b: Ref }[]; loan?: number; spawnAcc?: Record<Zone, number>;
+  run?: RunState; // absent before the campaign
+  // absent before milestone choices and achievements (milestones then count as reached at the saved population)
+  ms?: { n: number; offers: Offer[] | null; spare: Offer | null; upgrades: Upgrade[]; tokens: Special[] }; feats?: Record<string, number>;
+  // absent before traffic events: edge / buildings by index (-1 = none)
+  ev?: { list: (Omit<ActiveEvent, 'edge' | 'to' | 'from'> & { edge: Ref; to: Ref; from: Ref })[]; next: number; last: Partial<Record<EventKind, number>> };
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number; ring?: RingSize }[];
-  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number }[];
+  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number; ring?: Ref }[];
+  // absent before ring roundabouts (a 'roundabout' node is rebuilt as a ring on load)
+  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[]; spokes?: (Spoke | null)[] }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -37,18 +53,23 @@ const revive = (k: string, v: unknown): unknown => v === 'Infinity' && k !== 'se
 
 export function serialize(g: Game): string {
   const bi = new Map(g.buildings.map((b, i) => [b, i])), ci = new Map(g.commuters.map((c, i) => [c, i]));
-  const ni = new Map(g.graph.nodes.map((n, i) => [n, i]));
+  const ei = new Map(g.graph.edges.map((e, i) => [e, i]));
+  const ni = new Map(g.graph.nodes.map((n, i) => [n, i])), ri = new Map(g.graph.rings.map((r, i) => [r, i]));
   const trip = (t: Trip, queued = t.queued): TripData => {
     const { jam: _, ...rest } = t;
     return { ...rest, queued, from: bi.get(t.from)!, to: bi.get(t.to)!, who: t.who ? ci.get(t.who)! : -1 };
   };
   const data: SaveData = {
     v: 1, cfg: g.cfg, time: g.time, lastHour: g.lastHour, assignAt: g.assignAt, money: g.money, score: g.score, upkeepDay: g.upkeepDay,
-    cityLevel: g.cityLevel, tray: g.tray, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
-    stats: g.stats, ledger: g.ledger, roadType: g.roadType,
+    cityLevel: g.cityLevel, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
+    stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc, run: g.run,
+    ev: { list: g.events.map(e => ({ ...e, edge: e.edge ? ei.get(e.edge) ?? -1 : -1, to: e.to ? bi.get(e.to)! : -1, from: e.from ? bi.get(e.from)! : -1 })), next: g.nextEventAt, last: g.eventLast },
+    ms: { n: g.milestone, offers: g.offers, spare: g.spare, upgrades: g.upgrades, tokens: g.tokens }, feats: g.feats,
+    lots: g.lots.map(l => ({ x: l.x, y: l.y, angle: l.angle, w: l.w, zone: l.zone, b: l.building ? bi.get(l.building)! : -1 })),
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
       truckAcc: b.truckAcc, importAcc: b.importAcc, visitAcc: b.visitAcc, happy: b.happy, parts: b.parts, recent: b.recent, parked: b.parked.map(t => trip(t)),
+      tier: b.tier, abandoned: b.abandoned, access: b.access, downH: b.downH, upH: b.upH, special: b.special, cheer: b.cheer,
       // a car on the road waits at its origin's door again
       pending: [...b.pending.map(t => trip(t)), ...g.cars.filter(c => c.trip.from === b).map(c => trip(c.trip, g.time))],
     })),
@@ -59,7 +80,9 @@ export function serialize(g: Game): string {
     })),
     edges: g.graph.edges.map(e => ({
       a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
+      ring: e.ring ? ri.get(e.ring) : undefined,
     })),
+    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!), spokes: r.nodes.map(v => r.spokes.get(v) ?? null) })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,
   };
@@ -70,34 +93,81 @@ export function serialize(g: Game): string {
 export function deserialize(json: string): Game {
   const d = JSON.parse(json, revive) as SaveData;
   if (d?.v !== 1) throw new Error('Unknown save version');
+  // before the campaign the mode was 'career': free play, every tool its levels had
+  if ((d.cfg.mode as string) === 'career') d.cfg = { ...d.cfg, mode: 'endless' };
   const g = new Game(d.cfg), graph = g.graph = new RoadGraph();
   const B = g.buildings = d.buildings.map(x => {
     const b = new Building(x.kind, x.x, x.y, x.angle);
     Object.assign(b, { residents: x.residents, stock: x.stock, staffed: x.staffed, shopAcc: x.shopAcc, truckAcc: x.truckAcc, happy: x.happy, parts: x.parts, recent: x.recent });
     b.importAcc = x.importAcc ?? 0;
     b.visitAcc = x.visitAcc ?? 0;
+    Object.assign(b, { tier: x.tier ?? 0, abandoned: x.abandoned ?? false, access: x.access ?? 0.7, downH: x.downH ?? 0, upH: x.upH ?? 0, special: x.special ?? null, cheer: x.cheer ?? 0 });
     return b;
+  });
+  g.lots = (d.lots ?? []).map(({ b, ...l }) => {
+    const lot = { ...l, building: b < 0 ? null : B[b] };
+    lot.building?.lots.push(lot);
+    return lot;
   });
   const C = g.commuters = d.commuters.map(c => ({ ...c, home: B[c.home], work: c.work < 0 ? null : B[c.work] }));
   const trip = (t: TripData): Trip => ({ ...t, from: B[t.from], to: B[t.to], who: t.who < 0 ? null : C[t.who], jam: null });
   d.buildings.forEach((x, i) => { B[i].pending = x.pending.map(trip); B[i].parked = x.parked.map(trip); });
   const N = d.nodes.map(({ x, y, b, ...n }) => Object.assign(graph.addNode(x, y, b < 0 ? null : B[b]), n));
-  for (const e of d.edges) graph.addEdge(N[e.a], N[e.b], e, e.day).heat = e.heat;
+  const R = (d.rings ?? []).map(x => {
+    const hub = Object.assign(graph.node(x.x, x.y), { control: 'roundabout', ring: x.size, controlDay: x.day } as const), nodes = x.nodes.map(i => N[i]);
+    const r = { hub, nodes, spokes: new Map(nodes.flatMap((v, i) => x.spokes?.[i] ? [[v, x.spokes[i]!] as const] : [])) };
+    graph.rings.push(r);
+    return r;
+  });
+  for (const e of d.edges) graph.addEdge(N[e.a], N[e.b], { ...e, ring: e.ring === undefined ? null : R[e.ring] }, e.day).heat = e.heat;
+  const E = graph.edges.slice();
+  // an older save's roundabout is one node: rebuilt as setControl would, the largest ring from its size down that fits (else a plain
+  // junction), the driveways joining inside its clear radius laid again outside it
+  let relay = false;
+  for (const n of graph.nodes.filter(x => x.control === 'roundabout')) {
+    n.control = 'none';
+    n.plan = null;
+    for (const e of graph.edges.filter(e => e.drive && [e.a, e.b].some(v => !v.building && dist(v, n) < clearR(n.ring)))) { graph.removeEdge(e); relay = true; }
+    for (let s = n.ring; s >= 0 && (g.ringRoom(n, s as RingSize) || !graph.buildRing(n, s as RingSize, n.controlDay)); s--);
+  }
+  if (relay) g.connect();
+  if (d.ev) {
+    Object.assign(g, { nextEventAt: d.ev.next, eventLast: d.ev.last });
+    g.events = d.ev.list.map(e => ({ ...e, edge: E[e.edge] ?? null, to: B[e.to] ?? null, from: B[e.from] ?? null }));
+  } else g.nextEventAt = d.time + 4 * HOUR;
   g.reports = d.reports.map(r => ({ ...r, from: B[r.from], to: B[r.to] }));
   Object.assign(g.metrics, d.metrics);
-  const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
-  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, roadType });
+  const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
+  Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, roadType });
+  g.loan = d.loan ?? 0;
+  g.run = { ...run0(), ...d.run };
+  if (d.ms) Object.assign(g, { milestone: d.ms.n, offers: d.ms.offers, spare: d.ms.spare, upgrades: d.ms.upgrades, tokens: d.ms.tokens });
+  else g.milestone = milestonesAt(g, g.population);
+  g.feats = { ...d.feats, ...(d.loan && !d.feats ? { loaned: 1 } : {}) };
+  if (d.spawnAcc) g.spawnAcc = d.spawnAcc;
+  if (!d.lots) adoptLots(g);
+  g.demand = demandOf(g);
   g.ledger = { today: { ...ledger0(), ...ledger.today }, yesterday: { ...ledger0(), ...ledger.yesterday } };
   // ponytail: the exits of an older save go down over whatever the player built there
   if (d.buildings.some(x => x.importAcc === undefined)) g.addExits();
   return g;
 }
 
+// Undo / redo: the save loaded into the running game in place (the HUD, input and sound keep their reference). The player's tool
+// settings, the feed, the camera hooks and the terrain stay; picks and selections into the old objects go.
+// ponytail: a whole save per step (cars go back to their doors, the clock rewinds to the step); diff the graph if undo must keep the sim
+export function restore(g: Game, json: string): void {
+  const n = deserialize(json), { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version } = g;
+  Object.assign(g, n, { onGrade, speed, tool, zone, news, newsN, terrain, overlay, purposeDots, level, roadType, ringSize, gridSize, roadCurve, tutorialActive, tutorialTargets, edits, version: version + 1 });
+  if (tool === 'place') g.setTool('road');
+}
+
 // ---- localStorage: the autosave (every midnight and on quitting to the menu) and three slots ----
 export const AUTO = 'tm_save_auto';
 export const SLOTS = ['tm_save_1', 'tm_save_2', 'tm_save_3'];
-export interface SaveInfo { day: number; pop: number; level: number; cfg: GameConfig }
+export interface SaveInfo { day: number; pop: number; cfg: GameConfig }
 
+const MODES: string[] = ['campaign', 'endless', 'creative', 'challenge', 'career'];
 const read = (key: string): string | null => { try { return localStorage.getItem(key); } catch { return null; } };
 
 // false when storage is full or blocked
@@ -117,7 +187,7 @@ export function peek(key: string): SaveInfo | 'bad' | null {
   try {
     const d = JSON.parse(s, revive) as SaveData;
     const c = d.cfg;
-    if (d.v !== 1 || !(c.biome in BIOMES && c.difficulty in DIFFICULTY && c.size in SIZES && (c.mode === 'career' || c.mode === 'creative'))) return 'bad';
-    return { day: Math.floor((d.time / HOUR + T.START_HOUR) / 24) + 1, pop: d.buildings.reduce((n, b) => n + b.residents, 0), level: d.cityLevel, cfg: d.cfg };
+    if (d.v !== 1 || !(c.biome in BIOMES && c.difficulty in DIFFICULTY && c.size in SIZES && MODES.includes(c.mode))) return 'bad';
+    return { day: Math.floor((d.time / HOUR + T.START_HOUR) / 24) + 1, pop: d.buildings.reduce((n, b) => n + b.residents, 0), cfg: { ...c, mode: (c.mode as string) === 'career' ? 'endless' : c.mode } as GameConfig };
   } catch { return 'bad'; }
 }

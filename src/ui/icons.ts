@@ -26,6 +26,7 @@ const P: Record<string, string> = {
   neutral: '<circle cx="12" cy="12" r="9.5"/><path d="M8.5 15h7M9 9.5v.01M15 9.5v.01"/>',
   frown: '<circle cx="12" cy="12" r="9.5"/><path d="M8 16.5a5 5 0 0 1 8 0M9 9.5v.01M15 9.5v.01"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  zone: '<path d="M4 4h13v5H4z"/><path d="M17 6.5h3v5h-8v3"/><path d="M10.5 14.5h3v6h-3z"/>',
   place: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>',
   grid: '<rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
   interchange: '<path d="M12 2v20M2 12h20"/><path d="M12 7a5 5 0 1 0 5 5M12 17a5 5 0 1 0-5-5"/>',
@@ -35,6 +36,7 @@ const P: Record<string, string> = {
   mute: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/>',
   chart: '<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>',
   tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
+  bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   list: '<path d="M9 6h12M9 12h12M9 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
   build: '<path d="M10 3h4l5 16H5z"/><path d="M8.5 9h7M7 14h10M3 21h18"/>',
   chev: '<path d="M6 15l6-6 6 6"/>',
@@ -42,6 +44,7 @@ const P: Record<string, string> = {
   dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 8h.01M16 8h.01M12 12h.01M8 16h.01M16 16h.01"/>',
   save: '<path d="M5 3h11l3 3v15H5z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
   copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+  trophy: '<path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4M12 14v4M8 21h8M9 18h6"/>',
 };
 
 export const ICONS: Record<string, string> = Object.fromEntries(

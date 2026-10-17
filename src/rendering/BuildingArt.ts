@@ -1,10 +1,10 @@
 import type { Vec } from '../util/geom.ts';
-import { ZONES } from '../core/config.ts';
-import type { Site } from '../core/config.ts';
 import { mulberry32 } from '../util/rng.ts';
+import { EXTRA, extraLook, extraNight } from './TierArt.ts';
 
 // Building models, flat top-down. Local frame of a footprint: +x toward the door (depth, half H = h / 2), y across the front
-// (half W = w / 2). Each kind has VARIANTS looks picked by position, so a street is not copy-pasted.
+// (half W = w / 2). Each model (Building.art: a kind, a tier like 'home3', or a special) has VARIANTS looks picked by position, so a
+// street is not copy-pasted. The tiers and specials are drawn in TierArt.ts.
 export const VARIANTS = 32;
 
 // Shades a #RRGGBB (or rgb(r,g,b), so a shade can be shaded again) colour: k > 0 toward white, k < 0 toward black
@@ -25,9 +25,11 @@ type Rect = [number, number, number, number];
 // body: the part that stands up (casts the shadow, height px); chimney: where a factory's smoke leaves
 export interface Look { body: Rect; height: number; chimney: Vec | null }
 
-// The variant's bits set the shape (home: offset, hip roof, chimney, solar panels; office: floors; factory: teeth); its rng the colours
-export function look(kind: Site, v: number): Look {
-  const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2;
+// The variant's bits set the shape (home: offset, hip roof, chimney, solar panels; office: floors; factory: teeth); its rng the colours.
+// H, W: half the footprint's depth and width
+export function look(art: string, v: number, H: number, W: number): Look {
+  const kind = art === 'industry2' ? 'industry' : art;
+  if (art in EXTRA) return extraLook(art, v, H, W);
   if (kind === 'home') { const d = v & 1 ? 2 : 0; return { body: [-H + 2, -W + 3 + d, 2 * H - 10, 2 * W - 6 - d], height: 4, chimney: null }; }
   if (kind === 'shop') return { body: [-H + 1, -W + 1, 2 * H - 8, 2 * W - 2], height: 5, chimney: null };
   if (kind === 'office') return { body: [-H + 3, -W + 3, 2 * H - 6, 2 * W - 6], height: 3 + 2 * floors(v), chimney: null };
@@ -36,17 +38,17 @@ export function look(kind: Site, v: number): Look {
 }
 const floors = (v: number): number => 2 + (v % 4);
 
-// Cached models per kind, variant and pixel scale (sprites are drawn rotated, one drawImage each); night: the same frame with
-// only its lit windows, which the renderer adds over the night tint
+// Cached models per art, variant, footprint and pixel scale (sprites are drawn rotated, one drawImage each); night: the same frame
+// with only its lit windows, which the renderer adds over the night tint; grey: an abandoned building, washed out
 export const PAD = 1;
 const sprites = new Map<string, HTMLCanvasElement>();
-export function sprite(kind: Site, v: number, s: number, night = false): HTMLCanvasElement {
-  const key = `${kind}${v}${night ? 'n' : ''}@${s}`;
+export function sprite(art: string, v: number, s: number, night: boolean, w: number, h: number, grey = false): HTMLCanvasElement {
+  const key = `${art}${v}${night ? 'n' : ''}${grey ? 'g' : ''}${w}x${h}@${s}`;
   let c = sprites.get(key);
   if (c) return c;
   // ponytail: one scale bucket is in use at a time, so a full cache is from old zooms
-  if (sprites.size > 4 * VARIANTS * 4) sprites.clear();
-  const H = ZONES[kind].h / 2, W = ZONES[kind].w / 2;
+  if (sprites.size > 16 * VARIANTS * 4) sprites.clear();
+  const H = h / 2, W = w / 2;
   c = document.createElement('canvas');
   c.width = Math.ceil((2 * H + 2 * PAD) * s);
   c.height = Math.ceil((2 * W + 2 * PAD) * s);
@@ -54,8 +56,13 @@ export function sprite(kind: Site, v: number, s: number, night = false): HTMLCan
   ctx.scale(s, s);
   ctx.translate(H + PAD, W + PAD);
   ctx.lineCap = ctx.lineJoin = 'round';
-  if (night) paintNight(ctx, kind, v, H, W, s);
-  else paint(ctx, kind, v, H, W);
+  if (night) paintNight(ctx, art, v, H, W, s);
+  else paint(ctx, art, v, H, W);
+  if (grey) {
+    const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+    for (let i = 0; i < d.length; i += 4) { const y = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]; d[i] = d[i + 1] = d[i + 2] = 70 + y * 0.55; }
+    ctx.putImageData(img, 0, 0);
+  }
   sprites.set(key, c);
   return c;
 }
@@ -69,8 +76,20 @@ const OFFICES = ['#ABA3CF', '#9FA9D6', '#B6A6CC', '#9DB2CC'];
 const SHOPS = ['#8EC3EE', '#9BCBF0', '#86B9E3', '#A5D0EE'];
 const FACTORIES = ['#E2B866', '#D9A85A', '#E6C27A', '#D4B06E'];
 
-function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W: number): void {
-  const r = mulberry32(v * 7919 + ['home', 'shop', 'office', 'industry', 'gate'].indexOf(kind) * 104729);
+// Drawing kit a model paints with (TierArt shares it): rounded rects, dots, two-tone bushes, line batches, polygons, a seeded rng
+export interface Kit {
+  c: CanvasRenderingContext2D; r: () => number; pick: <T>(a: T[]) => T;
+  rect: (x: number, y: number, w: number, h: number, rad: number, fill: string | null, out?: string | null, lw?: number) => void;
+  dot: (x: number, y: number, rad: number, fill: string) => void;
+  bush: (x: number, y: number, rad: number, col: string) => void;
+  lines: (pts: number[][], col: string, lw: number) => void;
+  poly: (pts: number[][], fill: string) => void;
+}
+const ARTS = ['home', 'shop', 'office', 'industry', 'gate', ...Object.keys(EXTRA)];
+
+function paint(c: CanvasRenderingContext2D, art: string, v: number, H: number, W: number): void {
+  const kind = art === 'industry2' ? 'industry' : art;
+  const r = mulberry32(v * 7919 + ARTS.indexOf(art) * 104729);
   const pick = <T>(a: T[]): T => a[Math.floor(r() * a.length)];
   const rect = (x: number, y: number, w: number, h: number, rad: number, fill: string | null, out: string | null = null, lw = 1): void => {
     c.beginPath();
@@ -87,7 +106,15 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
     c.lineWidth = lw;
     c.stroke();
   };
-  const [bx, by, bw, bh] = look(kind, v).body, fx = bx + bw;
+  const poly = (pts: number[][], fill: string): void => {
+    c.beginPath();
+    pts.forEach(([x, y], k) => (k ? c.lineTo(x, y) : c.moveTo(x, y)));
+    c.closePath();
+    c.fillStyle = fill;
+    c.fill();
+  };
+  const [bx, by, bw, bh] = look(art, v, H, W).body, fx = bx + bw;
+  if (art in EXTRA) { EXTRA[art]({ c, r, pick, rect, dot, bush, lines, poly }, v, H, W, look(art, v, H, W)); return; }
 
   if (kind === 'home') {
     const roof = pick(ROOFS), lawn = pick(LAWNS);
@@ -107,13 +134,6 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
     rect(bx - 0.6, by - 0.6, bw + 1.2, bh + 1.2, 1.2, edge);
     if (v & 2) {
       const i = bw / 2, y0 = by, y1 = by + bh;
-      const poly = (pts: number[][], fill: string): void => {
-        c.beginPath();
-        pts.forEach(([x, y], k) => (k ? c.lineTo(x, y) : c.moveTo(x, y)));
-        c.closePath();
-        c.fillStyle = fill;
-        c.fill();
-      };
       poly([[bx, y0], [mx, y0 + i], [mx, y1 - i], [bx, y1]], dark);
       poly([[fx, y0], [mx, y0 + i], [mx, y1 - i], [fx, y1]], light);
       poly([[bx, y0], [mx, y0 + i], [fx, y0]], roof);
@@ -141,7 +161,7 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
     rect(bx, by, bw, bh, 2, shade(roof, -0.3));
     rect(bx + 1.5, by + 1.5, bw - 3, bh - 3, 1.5, roof);
     // rooftop: AC units and a skylight
-    const n = 1 + Math.floor(r() * 3);
+    const n = Math.min(1 + Math.floor(r() * 3), Math.floor((bh - 6) / 9));
     for (let i = 0; i < n; i++) {
       const ux = bx + 3 + r() * 6, uy = by + 3 + i * 9 + r() * 3;
       rect(ux, uy, 6, 5, 0.8, '#D3D7DC', '#9AA1A8', 0.5);
@@ -200,7 +220,7 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
       lines([[x + sw - 0.4, by + 0.5, x + sw - 0.4, by + bh - 0.5]], '#BFD8EE', 0.8);
     }
     // chimney
-    const ch = look(kind, v).chimney!;
+    const ch = look(art, v, H, W).chimney!;
     dot(ch.x, ch.y, 4, '#8F857D');
     dot(ch.x, ch.y, 3, '#A89E95');
     dot(ch.x, ch.y, 1.8, '#4A4541');
@@ -225,12 +245,14 @@ function paint(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W:
 
 // Lit windows at night, top-down: light spilling from a home's windows and its porch lamp, a shop's glowing front and sign, an
 // office's curtain wall lit in patches, a factory's skylights and yard lamps. Warm, with a soft halo.
-function paintNight(c: CanvasRenderingContext2D, kind: Site, v: number, H: number, W: number, s: number): void {
-  const r = mulberry32(v * 4973 + 17), [bx, by, bw, bh] = look(kind, v).body, fx = bx + bw;
+function paintNight(c: CanvasRenderingContext2D, art: string, v: number, H: number, W: number, s: number): void {
+  const kind = art === 'industry2' ? 'industry' : art;
+  const r = mulberry32(v * 4973 + 17), L = look(art, v, H, W), [bx, by, bw, bh] = L.body, fx = bx + bw;
   const warm = (x: number, y: number, w: number, h: number, a = 1): void => { c.globalAlpha = a; c.fillStyle = '#FFD27A'; c.fillRect(x, y, w, h); };
   c.shadowColor = '#FFB347';
   c.shadowBlur = 3 * s;
-  if (kind === 'home') {
+  if (art in EXTRA) extraNight(art, warm, r, H, W, L);
+  else if (kind === 'home') {
     for (const y of [by + bh * 0.25, by + bh * 0.62]) if (r() < 0.8) warm(fx - 0.2, y, 1.2, 2.6);
     for (const k of [by - 0.9, by + bh - 0.3]) if (r() < 0.6) warm(bx + bw * (0.2 + r() * 0.5), k, 2.6, 1.2);
     c.beginPath();
