@@ -455,6 +455,18 @@ for (const kind of ['car', 'ambulance'] as const) {
   const across = w.planPath([{ x: 150, y: 445 }, { x: 650, y: 445 }], 0, hw).reason;
   if (across !== 'Highways give no building access') fail(`buildings: a highway across the driveways was '${across || 'ok'}'`);
 }
+// Edit selection: a run stops where the type changes, so selecting the small road selects only it, and a bend of it keeps the big one
+{
+  const w = blank(), wg = w.graph, one: RoadType = { tier: 'street', lanes: 1, oneWay: false }, two: RoadType = { tier: 'street', lanes: 2, oneWay: false };
+  const A = wg.addNode(100, 500), M = wg.addNode(500, 500), B = wg.addNode(900, 500);
+  w.commitPath(w.planPath([A, M], 0, two));
+  w.commitPath(w.planPath([M, B], 0, one));
+  w.select({ x: 700, y: 500 });
+  if (!w.selected || w.selected.some(e => e.type.lanes !== 1)) fail(`edit select: run ${w.selected?.map(e => e.type.lanes)}`);
+  const bend = w.planBend(w.selected!, { x: 700, y: 520 });
+  if (!bend.ok || !w.commitBend(w.selected!, bend)) fail(`edit select: bend refused (${bend.reason})`);
+  if (!wg.edges.some(e => e.type.lanes === 2) || wg.edges.some(e => e.type.lanes === 2 && Math.min(e.a.x, e.b.x) > 450)) fail('edit select: the bend retyped the 2-lane road');
+}
 // Edits: a day-old avenue downgraded to dirt refunds REFUND_LATER of the drop, like a demolish; bending an arm of a junction with a
 // turn ban keeps the ban when the arm still leaves at about the same angle, and charges the plan's net
 {

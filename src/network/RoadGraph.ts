@@ -227,10 +227,11 @@ export class RoadGraph {
     return lost;
   }
 
-  // Maximal chain of edges through e between doors / junctions / controlled nodes / dead ends.
-  // edges[i] joins nodes[i] and nodes[i+1].
+  // Maximal chain of edges through e between doors / junctions / controlled nodes / dead ends / type changes
+  // (a run is one type, so a bend or retype of it never retypes the road next to it). edges[i] joins nodes[i] and nodes[i+1].
   runOf(e: Edge): { edges: Edge[]; nodes: Node[] } {
-    const inner = (n: Node) => !n.building && n.edges.length === 2 && n.control === 'none';
+    const inner = (n: Node) => !n.building && n.edges.length === 2 && n.control === 'none'
+      && sameType(n.edges[0].type, n.edges[1].type) && n.edges[0].drive === n.edges[1].drive;
     const other = (x: Edge, n: Node) => x.a === n ? x.b : x.a;
     const step = (x: Edge, n: Node) => n.edges[0] === x ? n.edges[1] : n.edges[0];
     let n = e.a, cur = e;
