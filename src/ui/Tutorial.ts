@@ -35,24 +35,30 @@ const grown = (g: Game, ...z: Zone[]): number => g.buildings.filter(b => b.lots.
 const reaches = (g: Game, h: Building, to?: Building): boolean => !!to && !!findPath(g.graph, h.node, to.node);
 const min = Math.min;
 
-// Built per start(): targets and baselines come from the live town
+// Built per start(): baselines come from the live town. The starter homes and office are found by position on each call, as an undo
+// replaces every Building (and a demolished one drops out)
 export function tutorialSteps(g: Game): Step[] {
-  const homes = g.buildings.filter(b => b.kind === 'home');
-  const office = g.buildings.find(b => b.kind === 'office');
-  const centre = homes.length ? [{ x: homes.reduce((n, b) => n + b.node.x, 0) / homes.length, y: homes.reduce((n, b) => n + b.node.y, 0) / homes.length }] : [];
+  const at = (bs: Building[]) => new Set(bs.map(b => `${b.x},${b.y}`)), H = at(g.buildings.filter(b => b.kind === 'home'));
+  const O = at(g.buildings.filter(b => b.kind === 'office').slice(0, 1));
+  const homes = (g: Game) => g.buildings.filter(b => b.kind === 'home' && H.has(`${b.x},${b.y}`));
+  const office = (g: Game) => g.buildings.find(b => b.kind === 'office' && O.has(`${b.x},${b.y}`));
+  const centre = (g: Game): Vec[] => {
+    const h = homes(g);
+    return h.length ? [{ x: h.reduce((n, b) => n + b.node.x, 0) / h.length, y: h.reduce((n, b) => n + b.node.y, 0) / h.length }] : [];
+  };
   const goal = g.map?.objectives[0];
   let homeLots = 0, houses = 0, shops = 0, offices = 0, jobs = 0;
   return [
     {
       goal: `Welcome to ${g.map?.name ?? 'your town'}`,
       text: 'People here need to get to work. You build the roads. Homes (white) send commuters to the office (purple) and shoppers to the shop (blue); the town grows where traffic flows. Time is paused while you read.',
-      targets: () => centre,
+      targets: centre,
     },
     {
       goal: 'Connect the homes to the office',
       text: 'Road tool (1): click a start point, click again for the end; hold the end and drag to bend. A road past a door gets a free driveway. The label shows the price, Esc cancels.',
-      enter: g => { g.setTool('road'); topUp(g); }, targets: () => [...centre, ...(office ? [office.node] : [])],
-      progress: g => [homes.filter(h => reaches(g, h, office)).length, homes.length],
+      enter: g => { g.setTool('road'); topUp(g); }, targets: g => { const o = office(g); return [...centre(g), ...(o ? [o.node] : [])]; },
+      progress: g => { const h = homes(g), o = office(g); return [h.filter(b => reaches(g, b, o)).length, h.length]; },
       hint: '.buildbtn, [data-tool="road"]',
     },
     {

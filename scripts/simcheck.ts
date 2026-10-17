@@ -943,6 +943,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   w.speed = 0;
   step(1, () => {
     road([{ x: 450, y: 435 }, { x: 1000, y: 435 }]);
+    restore(w, serialize(w)); // an undo mid-step: every Building and Node is replaced
     road([kind('office').node, { x: 450, y: 652 }, { x: 450, y: 435 }]);
     road([kind('shop').node, { x: 450, y: 691 }]);
     road([kind('industry').node, { x: 450, y: 1000 }, { x: 450, y: 691 }]);

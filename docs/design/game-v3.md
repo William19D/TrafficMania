@@ -379,6 +379,8 @@ Code: `src/ui/Tutorial.ts` (`tutorialSteps`, `stepDone`, the card), `src/ui/Tips
   traffic": the heat map on and every road's heat under 0.4 (no scripted 8:00 jam, no hour of calm: a forced jam can strand a newcomer).
   Step 4 has no dashed brush path, only the ring on the longest road. Steps with a goal move on 1.2 s after it is met; 1 and 8 take Next /
   Finish. Growth x4 (`TUT_GROWTH`) and the $20,000 top-ups run for the whole script, events, milestones and grading wait until it ends.
+  Step 2 finds the starter homes and office by position on each check, so an undo (which replaces every Building) or a demolished home
+  never strands it.
 - **Region O** shows the 8 steps as a checklist (done, current with its bar, to come) while the script runs; the card (region F) holds the
   explanation, the step's `n / of` and Skip. A save made mid-script loads without it.
 - **Seen once per profile:** `profile.tips` gets `'tutorial'` on Skip or Finish (`tm_tutorial_done` still counts). The help panel's button
