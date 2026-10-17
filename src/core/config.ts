@@ -1,10 +1,14 @@
 // New-game settings and the gameplay numbers per difficulty / biome / map size
-export type Mode = 'career' | 'creative';
+// campaign: a map's objectives and stars; challenge: the same map, hard fail; endless: free play with the profile's tools (an old 'career'
+// save loads as endless); creative: everything, no money
+export type Mode = 'campaign' | 'endless' | 'creative' | 'challenge';
 export type Difficulty = 'easy' | 'normal' | 'hard';
 export type Biome = 'temperate' | 'desert' | 'alpine' | 'archipelago';
 export type MapSize = 'small' | 'medium' | 'large';
-export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize }
-export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'career', difficulty: 'normal', biome: 'temperate', size: 'medium' };
+// map: a campaign map's id (Campaign.ts: its terrain, constraint and objectives); unlock: the tools an endless run has (a map number,
+// absent = all)
+export interface GameConfig { seed: string; mode: Mode; difficulty: Difficulty; biome: Biome; size: MapSize; map?: string; unlock?: number }
+export const DEFAULT_CONFIG: GameConfig = { seed: 'trafficmania', mode: 'endless', difficulty: 'normal', biome: 'temperate', size: 'medium' };
 
 export const SIZES: Record<MapSize, { w: number; h: number }> = {
   small: { w: 2000, h: 1200 }, medium: { w: 2600, h: 1560 }, large: { w: 3200, h: 1920 },
@@ -49,7 +53,7 @@ export const BIOMES: Record<Biome, {
 
 // Road hierarchy. limit: px/s (Car MAX_SPEED 110 = avenue), a driver's top speed scales by limit / MAX_SPEED; kmh: UI only;
 // lanes: allowed per direction; cost: $/tile at laneFactor 1 (upkeep = price x UPKEEP_RATE per day); noise 0..1 (home happiness);
-// access: buildings may connect (S4); level: city level that unlocks it (S6).
+// access: buildings may connect (S4); level: the campaign map that unlocks it (Game.unlocked).
 // Look: fill / outline, shoulder px per side, median px between the directions (two-way), centre line.
 export type Tier = 'dirt' | 'street' | 'avenue' | 'boulevard' | 'highway';
 export const TIERS: Record<Tier, {
@@ -59,7 +63,7 @@ export const TIERS: Record<Tier, {
   dirt: { label: 'Dirt road', limit: 60, kmh: 30, lanes: [1], oneWay: false, cost: 20, noise: 0.05, access: true, level: 1, fill: '#E3D6B8', out: '#C2B392', shoulder: 0, median: 0, line: 'none' },
   street: { label: 'Street', limit: 90, kmh: 40, lanes: [1], oneWay: true, cost: 60, noise: 0.15, access: true, level: 1, fill: '#FFFFFF', out: '#9E9E9A', shoulder: 0, median: 0, line: 'yellow' },
   avenue: { label: 'Avenue', limit: 110, kmh: 50, lanes: [1, 2], oneWay: true, cost: 90, noise: 0.35, access: true, level: 2, fill: '#FFFFFF', out: '#85857F', shoulder: 1.5, median: 0, line: 'yellow' },
-  boulevard: { label: 'Boulevard', limit: 125, kmh: 60, lanes: [2, 3], oneWay: true, cost: 140, noise: 0.5, access: true, level: 4, fill: '#FFFFFF', out: '#85857F', shoulder: 1.5, median: 5, line: 'median' },
+  boulevard: { label: 'Boulevard', limit: 125, kmh: 60, lanes: [2, 3], oneWay: true, cost: 140, noise: 0.5, access: true, level: 5, fill: '#FFFFFF', out: '#85857F', shoulder: 1.5, median: 5, line: 'median' },
   highway: { label: 'Highway', limit: 150, kmh: 90, lanes: [2, 3], oneWay: true, cost: 220, noise: 0.9, access: false, level: 6, fill: '#F7F7F5', out: '#8A99AD', shoulder: 3, median: 0, line: 'double' },
 };
 
@@ -88,19 +92,19 @@ export const PURPOSES: Record<Purpose, { label: string; color: string }> = {
   emergency: { label: 'Emergency', color: '#E5484D' },
 };
 
-// City levels (career): population to reach each one; a level-up unlocks tiers (TIERS[t].level) and features (UNLOCKS[f].level)
-// and pays a grant. Past the last level every ENDLESS_POP more residents is one more level. Creative has everything.
+// City levels (endless milestones): population to reach each one; a level-up pays a grant. Past the last level every ENDLESS_POP more
+// residents is one more level. Unlocks come from the campaign maps (UNLOCKS[f].level, TIERS[t].level: the map number).
 export const LEVELS: { pop: number }[] = [0, 220, 400, 580, 800, 1000, 1250, 1500, 1800, 2100].map(pop => ({ pop }));
 export const ENDLESS_POP = 300;
 export type Feature = 'roundabout' | 'oneway' | 'viaduct' | 'tunnel' | 'high' | 'junction' | 'grid' | 'interchange';
 export const UNLOCKS: Record<Feature, { level: number; label: string }> = {
-  roundabout: { level: 2, label: 'Roundabouts' },
-  oneway: { level: 2, label: 'One-way roads' },
-  junction: { level: 4, label: 'Light phases, protected lefts and lane connections' },
-  viaduct: { level: 3, label: 'Viaducts L1-L5 and ramps' },
-  tunnel: { level: 5, label: 'Tunnels' },
-  high: { level: 5, label: 'Viaducts L6-L10' },
-  grid: { level: 5, label: 'Grid tool' },
+  grid: { level: 2, label: 'Grid tool' },
+  roundabout: { level: 3, label: 'Roundabouts' },
+  oneway: { level: 3, label: 'One-way roads' },
+  viaduct: { level: 4, label: 'Viaducts L1-L5 and ramps' },
+  tunnel: { level: 4, label: 'Tunnels' },
+  high: { level: 4, label: 'Viaducts L6-L10' },
+  junction: { level: 5, label: 'Light phases, protected lefts and lane connections' },
   interchange: { level: 6, label: 'Interchanges' },
 };
 
@@ -168,8 +172,8 @@ export const TUNING = {
   MATCH_DAYS: 2, FANS: 60, FANS_POP: 15, FANS_MAX: 240, FANS_OUT: 0.4, KICKOFF: 19, MATCH_END: 22, FAN_PAY: 25,
 } as const;
 
-// Building tiers (game-v3 3): lots wide (footprint LOT_W x lots - 4 along the front, h deep), capacity, the city level that unlocks it
-// (G3's maps replace levels). draw: a shop's pull per job; visits: visitors a day from linked exits; trucks: freight a day x staffed;
+// Building tiers (game-v3 3): lots wide (footprint LOT_W x lots - 4 along the front, h deep), capacity, the campaign map that unlocks it
+// (tier 1's level unlocks the zone's brush). draw: a shop's pull per job; visits: visitors a day from linked exits; trucks: freight a day x staffed;
 // pollution: px reach (0 = none); export: share of its trucks leaving through an exit; noise: road-like noise at homes within NOISE_R;
 // noiseX: how much a home minds noise
 export interface TierDef {
@@ -187,9 +191,9 @@ export const TIER_DEFS: Record<Zone, TierDef[]> = {
     tier('Corner shop', 1, 28, 28, 0, 10, 1, { visits: 2 }), tier('Store', 2, 60, 32, 0, 25, 3, { visits: 4 }),
     tier('Mall', 4, 124, 44, 0, 80, 6, { draw: 1.5, visits: 12 }),
   ],
-  office: [tier('Office', 1, 28, 36, 0, 30, 1, { visits: 2 }), tier('Office tower', 2, 60, 42, 0, 120, 5, { visits: 6 })],
+  office: [tier('Office', 1, 28, 36, 0, 30, 2, { visits: 2 }), tier('Office tower', 2, 60, 42, 0, 120, 5, { visits: 6 })],
   industry: [
-    tier('Workshop', 1, 28, 36, 0, 12, 1, { trucks: 4, pollution: 160 }), tier('Factory', 2, 60, 40, 0, 30, 4, { trucks: 8, pollution: 260 }),
+    tier('Workshop', 1, 28, 36, 0, 12, 4, { trucks: 4, pollution: 160 }), tier('Factory', 2, 60, 40, 0, 30, 4, { trucks: 8, pollution: 260 }),
     tier('Logistics park', 4, 124, 44, 0, 60, 5, { trucks: 20, pollution: 200, export: 0.7, noise: 0.5 }),
   ],
 };
@@ -197,7 +201,7 @@ export const TIER_DEFS: Record<Zone, TierDef[]> = {
 export const LEGACY: Record<Site, TierDef> = Object.fromEntries((Object.keys(ZONES) as Site[]).map(k => [k, tier(ZONES[k].label, 1, ZONES[k].w, ZONES[k].h,
   ZONES[k].residents, ZONES[k].jobs, 1, k === 'industry' ? { trucks: TUNING.TRUCKS_PER_DAY, pollution: TUNING.POLLUTION_R } : k === 'shop' || k === 'office' ? { visits: TUNING.VISITS[k] } : {})])) as Record<Site, TierDef>;
 
-// Specials (game-v3 3): traffic attractors the player places (place tool) once the city level unlocks them. kind: the zone they work as
+// Specials (game-v3 3): traffic attractors the player places (place tool) once a campaign map unlocks them. kind: the zone they work as
 // (jobs, demand, shopping); cost / upkeep $; limit: how many may stand (Game.specialLimit)
 export type Special = 'plaza' | 'terminal' | 'stadium' | 'hospital';
 export interface SpecialDef extends TierDef { kind: Zone; cost: number; upkeep: number; tip: string }

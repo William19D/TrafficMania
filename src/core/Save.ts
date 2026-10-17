@@ -12,6 +12,8 @@ import { RoadGraph } from '../network/RoadGraph.ts';
 import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
+import { run0 } from './Campaign.ts';
+import type { RunState } from './Campaign.ts';
 
 type Ref = number;
 type TripData = Omit<Trip, 'from' | 'to' | 'who' | 'jam'> & { from: Ref; to: Ref; who: Ref };
@@ -27,6 +29,7 @@ export interface SaveData {
   // tray: before zones (ignored); lots, loan, spawnAcc: absent before them (each building then gets a lot of its own)
   cityLevel: number; tray?: Record<Zone, number>; happiness: number; cityParts: Parts; debtDays: number; sadDays: number;
   lots?: { x: number; y: number; angle: number; w: number; zone: Zone; b: Ref }[]; loan?: number; spawnAcc?: Record<Zone, number>;
+  run?: RunState; // absent before the campaign
   stats: Game['stats']; ledger: { today: Ledger; yesterday: Ledger }; roadType: RoadType;
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
@@ -52,7 +55,7 @@ export function serialize(g: Game): string {
   const data: SaveData = {
     v: 1, cfg: g.cfg, time: g.time, lastHour: g.lastHour, assignAt: g.assignAt, money: g.money, score: g.score, upkeepDay: g.upkeepDay,
     cityLevel: g.cityLevel, happiness: g.happiness, cityParts: g.cityParts, debtDays: g.debtDays, sadDays: g.sadDays,
-    stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc,
+    stats: g.stats, ledger: g.ledger, roadType: g.roadType, loan: g.loan, spawnAcc: g.spawnAcc, run: g.run,
     lots: g.lots.map(l => ({ x: l.x, y: l.y, angle: l.angle, w: l.w, zone: l.zone, b: l.building ? bi.get(l.building)! : -1 })),
     buildings: g.buildings.map(b => ({
       kind: b.kind, x: b.x, y: b.y, angle: b.angle, residents: b.residents, stock: b.stock, staffed: b.staffed, shopAcc: b.shopAcc,
@@ -81,6 +84,8 @@ export function serialize(g: Game): string {
 export function deserialize(json: string): Game {
   const d = JSON.parse(json, revive) as SaveData;
   if (d?.v !== 1) throw new Error('Unknown save version');
+  // before the campaign the mode was 'career': free play, every tool its levels had
+  if ((d.cfg.mode as string) === 'career') d.cfg = { ...d.cfg, mode: 'endless' };
   const g = new Game(d.cfg), graph = g.graph = new RoadGraph();
   const B = g.buildings = d.buildings.map(x => {
     const b = new Building(x.kind, x.x, x.y, x.angle);
@@ -116,6 +121,7 @@ export function deserialize(json: string): Game {
   const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;
   Object.assign(g, { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, happiness, cityParts, debtDays, sadDays, stats, roadType });
   g.loan = d.loan ?? 0;
+  g.run = { ...run0(), ...d.run };
   if (d.spawnAcc) g.spawnAcc = d.spawnAcc;
   if (!d.lots) adoptLots(g);
   g.demand = demandOf(g);
@@ -128,8 +134,9 @@ export function deserialize(json: string): Game {
 // ---- localStorage: the autosave (every midnight and on quitting to the menu) and three slots ----
 export const AUTO = 'tm_save_auto';
 export const SLOTS = ['tm_save_1', 'tm_save_2', 'tm_save_3'];
-export interface SaveInfo { day: number; pop: number; level: number; cfg: GameConfig }
+export interface SaveInfo { day: number; pop: number; cfg: GameConfig }
 
+const MODES: string[] = ['campaign', 'endless', 'creative', 'challenge', 'career'];
 const read = (key: string): string | null => { try { return localStorage.getItem(key); } catch { return null; } };
 
 // false when storage is full or blocked
@@ -149,7 +156,7 @@ export function peek(key: string): SaveInfo | 'bad' | null {
   try {
     const d = JSON.parse(s, revive) as SaveData;
     const c = d.cfg;
-    if (d.v !== 1 || !(c.biome in BIOMES && c.difficulty in DIFFICULTY && c.size in SIZES && (c.mode === 'career' || c.mode === 'creative'))) return 'bad';
-    return { day: Math.floor((d.time / HOUR + T.START_HOUR) / 24) + 1, pop: d.buildings.reduce((n, b) => n + b.residents, 0), level: d.cityLevel, cfg: d.cfg };
+    if (d.v !== 1 || !(c.biome in BIOMES && c.difficulty in DIFFICULTY && c.size in SIZES && MODES.includes(c.mode))) return 'bad';
+    return { day: Math.floor((d.time / HOUR + T.START_HOUR) / 24) + 1, pop: d.buildings.reduce((n, b) => n + b.residents, 0), cfg: { ...c, mode: (c.mode as string) === 'career' ? 'endless' : c.mode } as GameConfig };
   } catch { return 'bad'; }
 }

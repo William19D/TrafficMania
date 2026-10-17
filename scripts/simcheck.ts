@@ -12,13 +12,15 @@ import type { Trip } from '../src/entities/Trip.ts';
 import { Car, GIVE_UP_S, KINDS, MAX_SPEED, TURN_SPEED, sep } from '../src/entities/Car.ts';
 import { generateTerrain } from '../src/world/MapGenerator.ts';
 import { findPath } from '../src/network/Pathfinder.ts';
-import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, LEVELS, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, TUNING, ZONES } from '../src/core/config.ts';
+import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, TUNING, ZONES } from '../src/core/config.ts';
 import type { Biome, GameConfig, Special, Zone } from '../src/core/config.ts';
 import { setSeed } from '../src/util/rng.ts';
 import { dist, snapAngle } from '../src/util/geom.ts';
 import type { Vec } from '../src/util/geom.ts';
 import { deserialize, serialize } from '../src/core/Save.ts';
 import { commitZone, grow, lotAt, planZone, zoneHour } from '../src/core/Zones.ts';
+import { CHALLENGE_MONEY, MAPS, cfgFor, grade } from '../src/core/Campaign.ts';
+import { mapOpen, parseProfile, profile0, recordGrade, toolLevel, totalStars } from '../src/core/Profile.ts';
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
@@ -42,7 +44,6 @@ const blank = (): Game => {
   w.lots = [];
   w.tutorialActive = true;
   w.money = 1e6;
-  w.cityLevel = LEVELS.length;
   return w;
 };
 // A building with its door at (x, y); its footprint lies below the door, or above it (up) when a road leaves the door downward
@@ -486,12 +487,12 @@ for (const kind of ['car', 'ambulance'] as const) {
   w.startPlacing('home');
   if (!w.planPlace({ x: 1000, y: 150 })?.road) fail('road shape: no building snaps to the land part of a road over a river');
 }
-// Levels: at level 1 an avenue and a roundabout are locked; a home and an office placed beside a street face it,
-// get free driveways and a commute between them arrives; pushing the population past level 2's milestone unlocks the avenue and
-// pays the grant once
+// Levels: with map 1's tools an avenue and a roundabout are locked; a home and an office placed beside a street face it,
+// get free driveways and a commute between them arrives; pushing the population past level 2's milestone pays the grant once
+// (Endless milestones unlock nothing: map 2's tools do)
 {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
-  w.cityLevel = 1;
+  w.cfg = { ...w.cfg, unlock: 1 };
   w.demandOff = true;
   if (w.planPath([{ x: 100, y: 500 }, { x: 900, y: 500 }], 0, { tier: 'avenue', lanes: 1, oneWay: false }).ok) fail('levels: avenue built at level 1');
   w.setTool('roundabout');
@@ -512,7 +513,9 @@ for (const kind of ['car', 'ambulance'] as const) {
   w.update(DT);
   w.update(DT);
   if (w.cityLevel !== 2 || w.pendingLevel !== 2) fail(`levels: level ${w.cityLevel}`);
-  if (w.money !== m0 + w.levelGrant(2) || !w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+  if (w.money !== m0 + w.levelGrant(2) || w.tierUnlocked('avenue')) fail(`levels: grant ${w.money - m0}`);
+  w.cfg = { ...w.cfg, unlock: 2 };
+  if (!w.tierUnlocked('avenue')) fail('levels: map 2 tools did not unlock the avenue');
 }
 // Driveways: homes placed facing each other across a street, doors 13px apart along it, share one junction instead of leaving a
 // stretch of road shorter than a truck between two (which locked both), and both commutes arrive
@@ -543,8 +546,8 @@ for (const kind of ['car', 'ambulance'] as const) {
   if (hf - hn < 25) fail(`happiness: home by the factory ${hn.toFixed(0)}, far one ${hf.toFixed(0)}`);
   const midnight = (g: Game) => { g.time = ((g.today + 1) * 24 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
   const d = DIFFICULTY[SIM.difficulty];
-  const CH = 'challenge' as GameConfig['mode']; // ponytail: G3 adds the mode to GameConfig
-  for (const [mode, tut] of [[CH, false], ['career', false], ['creative', false], [CH, true]] as const) {
+  const CH = 'challenge';
+  for (const [mode, tut] of [[CH, false], ['endless', false], ['creative', false], [CH, true]] as const) {
     const g = blank();
     g.cfg = { ...SIM, mode };
     g.tutorialActive = tut;
@@ -553,7 +556,7 @@ for (const kind of ['car', 'ambulance'] as const) {
     if (!tut && mode === CH && (g.gameOver || g.alarm?.kind !== 'bankrupt' || g.alarm.days !== 1)) fail(`fail: alarm ${JSON.stringify(g.alarm)} before bankruptcy`);
     for (let i = 0; i < 3; i++) midnight(g);
     if (g.gameOver !== (mode === CH && !tut ? 'bankrupt' : '')) fail(`fail: ${mode}${tut ? ' tutorial' : ''} in debt gave '${g.gameOver}'`);
-    if ((g.loan > 0) !== (mode === 'career')) fail(`fail: ${mode} in debt took a loan of ${g.loan}`);
+    if ((g.loan > 0) !== (mode === 'endless')) fail(`fail: ${mode} in debt took a loan of ${g.loan}`);
   }
   const g = blank();
   g.cfg = { ...SIM, mode: CH };
@@ -862,7 +865,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
 // (the tutorial lifts the level-4 lock), the heat map
 {
   const w = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
-  w.cityLevel = 1;
+  w.cfg = { ...w.cfg, unlock: 1 };
   w.demandOff = true;
   const H = town(w, 300, 460).building!, O = town(w, 900, 380, 'office', true).building!, S = town(w, 600, 700, 'shop').building!;
   const steps = tutorialSteps(w);
@@ -1272,10 +1275,10 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
     w.spawnAcc.home = -1e9;
   };
   const hours = (n: number, each: () => void): void => { for (let i = 0; i < n; i++) { each(); zoneHour(w, w.components()); } };
-  w.cityLevel = 1;
+  w.cfg = { ...w.cfg, unlock: 1 };
   hours(T_UP + 2, good);
   if (H.tier !== 1 || H.upH) fail(`tiers: a locked tier counted (${H.upH} h, tier ${H.tier})`);
-  w.cityLevel = LEVELS.length;
+  w.cfg = { ...w.cfg, unlock: undefined };
   hours(T_UP - 1, good);
   if (H.tier !== 1 || H.upH !== T_UP - 1) fail(`tiers: upgraded early or did not count (${H.upH} h)`);
   const door0 = { ...H.node };
@@ -1390,6 +1393,135 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   c.money = -1;
   hour(c);
   if (c.loan) fail('bank: creative borrowed');
+}
+// Campaign (G3): every map builds on its own seed with a starter town, the same terrain in Challenge, its start money (x0.7 in
+// Challenge) and its map's tools; a scripted city grades ★ / ★★ / ★★★ by objectives, flow and spend; the first time the goals hold the
+// hour's check raises Map complete once and reports the grade, a better one at midnight reports again; profile stars open maps and
+// Endless tools, and the profile round-trips and survives junk; Challenge roads are permanent after their day, and a missed deadline
+// or a gridlocked day ends it; a v1 'career' save loads as Endless and the run state round-trips
+{
+  for (const [i, m] of MAPS.entries()) {
+    const c = new Game(cfgFor(m, 'campaign')), h = new Game(cfgFor(m, 'challenge'));
+    if (JSON.stringify(c.terrain) !== JSON.stringify(h.terrain)) fail(`campaign: ${m.name} Challenge terrain differs`);
+    if (c.buildings.filter(b => b.kind === 'home').length < 4) fail(`campaign: ${m.name} has no starter town`);
+    const exits = c.terrain.exits.length;
+    if (exits < m.terrain.exits[0] || exits > m.terrain.exits[1]) fail(`campaign: ${m.name} has ${exits} exits`);
+    if (c.money !== m.money || Math.abs(h.money - m.money * CHALLENGE_MONEY) > 1e-6 || c.unlockLevel !== i + 1 || h.cfg.difficulty !== 'hard') fail(`campaign: ${m.name} money ${c.money} tools ${c.unlockLevel}`);
+  }
+  const c1 = new Game(cfgFor(MAPS[0], 'campaign'));
+  if (!c1.lockOf('roundabout') || c1.tierUnlocked('avenue') || c1.unlocked(TIER_DEFS.office[0].level)) fail('campaign: map 1 has map 3 tools');
+  c1.setZone('office');
+  if (c1.zone === 'office') fail('campaign: map 1 zoned offices');
+  if (new Game(cfgFor(MAPS[2], 'campaign')).lockOf('roundabout')) fail('campaign: map 3 has no roundabouts');
+
+  const hour = (g: Game): void => { g.time = (Math.floor(g.clock) + 1 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
+  const m = MAPS[1], w = blank();
+  w.cfg = cfgFor(m, 'campaign');
+  w.tutorialActive = false;
+  w.demandOff = true;
+  const H = town(w, 300, 300).building!;
+  const slot = (Math.floor(w.hour) + 5) % 24;
+  const set = (pop: number, perHour: number, trips: number, smooth: number, spent: number): void => {
+    H.residents = pop;
+    w.run.h.arrived[(Math.floor(w.hour) + 23) % 24] = perHour;
+    w.run.h.trips[slot] = trips;
+    w.run.h.smooth[slot] = smooth;
+    w.run.spent = spent;
+  };
+  const stars = (): number => grade(w, m).stars;
+  set(600, 25, 100, 80, 15000);
+  if (stars() !== 3) fail(`grade: ${stars()} stars for a city meeting everything`);
+  set(600, 25, 100, 80, m.budget + 1);
+  if (stars() !== 2) fail(`grade: ${stars()} stars over budget`);
+  set(600, 25, 100, 60, 0);
+  if (stars() !== 1) fail(`grade: ${stars()} stars under the flow bar`);
+  set(599, 25, 100, 100, 0);
+  if (stars() !== 0) fail(`grade: ${stars()} stars short of population`);
+  set(600, 24, 100, 100, 0);
+  if (stars() !== 0 || grade(w, m).met.join() !== 'true,false') fail(`grade: ${stars()} stars short of trips/h`);
+  // the hourly check: Map complete once, the grade reported; spend is network only (zoning excluded)
+  const p = MAPS[0], v = blank(), got: number[] = [];
+  v.cfg = cfgFor(p, 'campaign');
+  v.tutorialActive = false;
+  v.demandOff = true;
+  v.onGrade = r => got.push(r.stars);
+  const V = town(v, 300, 300).building!;
+  v.run.spent = p.budget + 1;
+  v.spend(500, false);
+  if (v.run.spent !== p.budget + 1) fail('grade: zoning counted as network spend');
+  V.residents = p.objectives[0].target;
+  const fs = (Math.floor(v.hour) + 5) % 24;
+  v.run.h.trips[fs] = 100;
+  v.run.h.smooth[fs] = 90;
+  hour(v);
+  if (!v.pendingGrade || v.pendingGrade.stars !== 2 || got.join() !== '2' || !v.run.done || !v.modal) fail(`grade: Map complete ${JSON.stringify(v.pendingGrade)} reported ${got}`);
+  v.pendingGrade = null;
+  hour(v);
+  if (v.pendingGrade || got.length !== 1) fail('grade: Map complete raised twice');
+  v.run.spent = 0;
+  // the counters roll as the hours pass: refill them in a slot the midnight hour does not drop
+  while (v.hour < 23) hour(v);
+  v.run.h.trips[5] = 100;
+  v.run.h.smooth[5] = 90;
+  hour(v);
+  if (got.join() !== '2,3' || v.run.stars !== 3 || v.pendingGrade) fail(`grade: midnight regrade reported ${got}`);
+
+  // profile: stars open maps and Endless tools; best grades kept; junk and round-trip
+  const pr = profile0();
+  if (!mapOpen(pr, MAPS[0]) || mapOpen(pr, MAPS[1]) || toolLevel(pr) !== 1) fail('profile: a new profile opens more than map 1');
+  const g2 = (s: number, day = 5, efficiency = 100) => ({ stars: s, met: [], flow: 0.8, spend: 1000, efficiency, day });
+  if (!recordGrade(pr, MAPS[0], g2(1)) || recordGrade(pr, MAPS[0], g2(1, 3, 50)) || pr.best[MAPS[0].id].efficiency !== 100 || pr.best[MAPS[0].id].day !== 3) fail(`profile: best ${JSON.stringify(pr.best)}`);
+  if (!mapOpen(pr, MAPS[1]) || mapOpen(pr, MAPS[2]) || toolLevel(pr) !== 1) fail('profile: 1 star opened the wrong maps');
+  recordGrade(pr, MAPS[0], g2(3));
+  recordGrade(pr, MAPS[1], g2(2));
+  recordGrade(pr, MAPS[2], g2(0));
+  recordGrade(pr, MAPS[0], g2(1, 9), true);
+  recordGrade(pr, MAPS[0], g2(1, 8), true);
+  if (totalStars(pr) !== 5 || !mapOpen(pr, MAPS[3]) || mapOpen(pr, MAPS[4]) || toolLevel(pr) !== 2 || pr.stars[MAPS[2].id] !== undefined || pr.challenge[MAPS[0].id] !== 8) fail(`profile: ${JSON.stringify(pr)}`);
+  pr.tips.push('tutorial');
+  pr.stats.trips = 1234;
+  if (JSON.stringify(parseProfile(JSON.stringify(pr))) !== JSON.stringify(pr)) fail('profile: does not round-trip');
+  const blankP = JSON.stringify(profile0());
+  for (const junk of [null, '', '{', '[]', '{"v":2,"stars":{"meadowbrook":3}}', '"x"']) if (JSON.stringify(parseProfile(junk)) !== blankP) fail(`profile: junk ${junk} gave data`);
+  const odd = parseProfile('{"v":1,"stars":{"a":7,"b":"x"},"tips":[1,"t"],"stats":{"trips":"9"}}');
+  if (odd.stars.a !== 3 || 'b' in odd.stars || odd.tips.join() !== 't' || odd.stats.trips !== 0) fail(`profile: bad fields kept ${JSON.stringify(odd)}`);
+
+  // Challenge: permanent roads, the deadline, gridlock
+  const midnight = (g: Game) => { g.time = ((g.today + 1) * 24 - TUNING.START_HOUR) * HOUR - DT / 2; g.update(DT); };
+  const ch = blank(), street: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+  ch.cfg = cfgFor(MAPS[0], 'challenge');
+  ch.tutorialActive = false;
+  ch.demandOff = true;
+  ch.commitPath(ch.planPath([{ x: 100, y: 500 }, { x: 600, y: 500 }], 0, street));
+  ch.commitPath(ch.planPath([{ x: 100, y: 700 }, { x: 600, y: 700 }], 0, street));
+  ch.demolishAt({ x: 350, y: 700 });
+  if (ch.graph.edges.length !== 1) fail('challenge: a road built today could not be demolished');
+  midnight(ch);
+  ch.demolishAt({ x: 350, y: 500 });
+  if (ch.graph.edges.length !== 1 || !ch.message.startsWith('Challenge:')) fail('challenge: an older road was demolished');
+  while (!ch.gameOver && ch.day < 20) midnight(ch);
+  if (ch.gameOver !== 'deadline' || ch.day !== ch.deadline + 1) fail(`challenge: '${ch.gameOver}' on day ${ch.day}, deadline ${ch.deadline}`);
+  const gl = blank();
+  gl.cfg = cfgFor(MAPS[0], 'challenge');
+  gl.tutorialActive = false;
+  gl.stats.today.gaveup = 10;
+  gl.stats.today.smooth = 30;
+  midnight(gl);
+  if (gl.gameOver !== '') fail('challenge: a quarter of the trips given up ended it');
+  gl.stats.today.gaveup = 41;
+  gl.stats.today.smooth = 59;
+  midnight(gl);
+  if (gl.gameOver !== 'gridlock') fail(`challenge: '${gl.gameOver}' after a day of 41% given up`);
+
+  // saves: the run state round-trips; a v1 'career' save without it loads as Endless with every tool
+  const json = serialize(v), back = deserialize(json);
+  if (serialize(back) !== json || back.run.stars !== 3 || back.run.spent !== v.run.spent || back.cfg.map !== p.id) fail('save: the campaign run does not round-trip');
+  const d = JSON.parse(json) as { cfg: { mode: string; map?: string }; run?: unknown };
+  d.cfg = { ...d.cfg, mode: 'career' };
+  delete d.cfg.map;
+  delete d.run;
+  const old = deserialize(JSON.stringify(d));
+  if (old.cfg.mode !== 'endless' || old.goals || old.unlockLevel !== Infinity || old.run.spent !== 0) fail(`save: an old career save loaded as ${old.cfg.mode}`);
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `

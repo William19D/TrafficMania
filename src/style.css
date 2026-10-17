@@ -603,6 +603,33 @@ kbd {
 .lvl-grid p b { margin-left: auto; }
 .lvl-grid .ico { width: 1.1em; height: 1.1em; color: var(--success); }
 .lvl-grid .muted { color: var(--muted); }
+/* O: campaign objectives, a full-width row under the resource chips (folds to its header) */
+.obj { flex-basis: 100%; min-width: 16em; padding: .125em .25em .25em; border-top: 1px solid var(--line); font-size: var(--label); }
+#hud .ohead { display: flex; align-items: center; gap: .5em; width: 100%; min-height: 2em; padding: 0 .25em; border-radius: 6px; }
+.ohead .oname { font-size: 1.1em; }
+.ohead .chev { margin-left: auto; width: 1.2em; height: 1.2em; transition: transform .15s var(--ease); }
+.obj.min .chev { transform: rotate(180deg); }
+.obj.min .obody { display: none; }
+.orow { display: grid; grid-template-columns: 1fr auto; column-gap: .75em; padding: .125em .25em; }
+.orow span { display: flex; align-items: center; gap: .375em; }
+.orow .ico { width: 1.1em; height: 1.1em; color: var(--success); }
+.orow i[style] { grid-column: 1 / -1; display: block; height: 4px; margin-top: 2px; border-radius: 2px; background: #E6E3DC; box-shadow: var(--well); overflow: hidden; }
+.orow i[style]::after { content: ''; display: block; height: 100%; width: calc(var(--f) * 100%); background: var(--accent); }
+.orow.ok i[style]::after { background: var(--success); }
+.odot { display: inline-block; flex: none; width: .55em; height: .55em; margin: 0 .275em; border-radius: 50%; border: 2px solid var(--muted); }
+.onote { margin: .25em .25em 0; color: var(--danger); font-weight: 600; }
+.onote.new { color: var(--muted); font-weight: 500; }
+.ostars i, .stamp i, .mstars i { font-style: normal; color: #D8D6D0; }
+.ostars i.on, .stamp i.on, .mstars i.on { color: var(--warning); }
+/* Map complete: the stars stamp in one by one */
+.stamp { display: flex; justify-content: center; gap: .25em; margin: .5em 0 1em; font-size: 2.75em; line-height: 1; }
+.stamp i { animation: stamp .35s var(--spring) both; }
+.stamp i:nth-child(2) { animation-delay: .35s; }
+.stamp i:nth-child(3) { animation-delay: .7s; }
+@keyframes stamp { from { transform: scale(2.2); opacity: 0; } to { transform: none; opacity: 1; } }
+.lvl-grid.one { grid-template-columns: 1fr; }
+.lvl-grid p.miss { color: var(--muted); }
+.lvl-grid p.miss .ico { color: var(--danger); }
 .legend {
   display: flex;
   flex-direction: column;
@@ -870,6 +897,23 @@ kbd {
 #menu th, #menu td { padding: .45em 0; border-bottom: 1px solid var(--soft); vertical-align: top; text-align: left; }
 #menu th { font-weight: 600; padding-right: 1em; }
 #menu td { color: var(--muted); }
+#menu .box.wide { width: min(60em, 100%); }
+#menu .maps { display: grid; grid-template-columns: repeat(auto-fill, minmax(16em, 1fr)); gap: .75em; }
+#menu .mcard { display: flex; flex-direction: column; gap: .375em; padding: .875em 1em; background: var(--soft); border: 1px solid var(--line); border-radius: 10px; }
+#menu .mcard.locked { opacity: .6; }
+#menu .mcard p { margin: 0; font-size: max(14px, .875em); }
+#menu .mcard small { color: var(--muted); font-size: var(--label); }
+#menu .mhead { display: flex; align-items: center; gap: .5em; }
+#menu .mno { display: grid; place-items: center; flex: none; width: 1.75em; height: 1.75em; border-radius: 50%; background: var(--ink); color: #fff; font-size: .875em; }
+#menu .mname { font-weight: 700; font-family: var(--font-display); }
+#menu .mstars { margin-left: auto; letter-spacing: .05em; white-space: nowrap; }
+#menu .mbtns { display: flex; flex-wrap: wrap; gap: .375em; margin-top: auto; padding-top: .375em; }
+#menu .mbtns .btn { flex: 1 1 auto; min-height: 36px; padding-inline: .625em; }
+#menu .mbtns .btn small { margin-left: .375em; font-weight: 500; }
+#menu .mlock { display: flex; align-items: center; gap: .375em; margin-top: auto; color: var(--muted); font-weight: 600; }
+#menu .mlock .ico { width: 1.1em; height: 1.1em; }
+#menu .ptable { margin-top: 1.25em; }
+#menu .ptable td, #menu .ptable th { padding-right: .75em; }
 
 /* ---------- finish: depth, colour and motion (docs/hud-design.md, Visual language) ---------- */
 /* type: numbers, labels and headings in the display face */

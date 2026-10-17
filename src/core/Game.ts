@@ -13,7 +13,7 @@ import type { Commuter, Parts } from '../entities/Building.ts';
 import { makeTrip, OUTCOMES, SCORE } from '../entities/Trip.ts';
 import type { Outcome, Trip, TripReport } from '../entities/Trip.ts';
 import { Car, KINDS, randomKind } from '../entities/Car.ts';
-import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_POP, LEVELS, SPECIALS, TIERS, TIER_DEFS, UNLOCKS, ZONES, TUNING as T } from './config.ts';
+import { DEFAULT_CONFIG, DIFFICULTY, ENDLESS_POP, LEVELS, SPECIALS, TIERS, TIER_DEFS, UNLOCKS, ZONES, ZONE_NAME, TUNING as T } from './config.ts';
 import type { Feature, GameConfig, Purpose, Site, Special, Tier, Zone } from './config.ts';
 import { hashSeed, random, setSeed } from '../util/rng.ts';
 import { ICHG, ICHG_KEYS } from './Templates.ts';
@@ -21,12 +21,15 @@ import { Metrics } from './Metrics.ts';
 import type { Ichg } from './Templates.ts';
 import { adoptLots, demandOf, pruneLots, zoneHour } from './Zones.ts';
 import type { Lot, ZonePlan } from './Zones.ts';
+import { CHALLENGE_MONEY, DEADLINE, GRIDLOCK, GRIDLOCK_MIN, MAPS, closeHour, grade, mapById, run0, unlockAt } from './Campaign.ts';
+import type { Grade, MapDef, RunState } from './Campaign.ts';
 
 // zone: the zone brush; place: setting a building down (moving a legacy one)
 export type Tool = 'road' | 'light' | 'roundabout' | 'demolish' | 'edit' | 'place' | 'grid' | 'interchange' | 'zone';
-// Tools locked below a city level
+// Tools locked until a campaign map unlocks them
 export const TOOL_LOCK: Partial<Record<Tool, Feature>> = { roundabout: 'roundabout', grid: 'grid', interchange: 'interchange' };
-export type GameOver = '' | 'bankrupt' | 'unhappy';
+// Challenge fails: debt, unhappy residents, a day of gridlock, the deadline passed
+export type GameOver = '' | 'bankrupt' | 'unhappy' | 'gridlock' | 'deadline';
 // Map overlays: congestion heat map, or road noise and factory pollution with each home's happiness
 export type Overlay = 'none' | 'heat' | 'noise';
 // Sound cues the sim raises (a set: one per kind per frame); the audio drains it, headless nobody does and it stays this small
@@ -61,11 +64,11 @@ export const ZONE_KEYS = (Object.keys(ZONES) as Site[]).filter((z): z is Zone =>
 // Population to reach city level n (level 1 = the start)
 export const levelPop = (n: number): number =>
   n <= LEVELS.length ? LEVELS[Math.max(0, n - 1)].pop : LEVELS[LEVELS.length - 1].pop + (n - LEVELS.length) * ENDLESS_POP;
-// What city level n unlocks: road tiers, features, building tiers, specials
+// What campaign map n brings: road tiers, features, zones and building tiers, specials
 export const levelUnlocks = (n: number): string[] => [
   ...(Object.keys(TIERS) as Tier[]).filter(t => TIERS[t].level === n).map(t => TIERS[t].label),
   ...Object.values(UNLOCKS).filter(u => u.level === n).map(u => u.label),
-  ...Object.values(TIER_DEFS).flat().filter(d => d.level === n && n > 1).map(d => `${d.name}s grow`),
+  ...ZONE_KEYS.flatMap(z => TIER_DEFS[z].filter(d => d.level === n && (n > 1 || d === TIER_DEFS[z][0])).map(d => d === TIER_DEFS[z][0] ? `${ZONE_NAME[z]} zone` : d.name)),
   ...Object.values(SPECIALS).filter(d => d.level === n).map(d => d.name),
 ];
 export interface PathSeg { a: Vec; b: Vec; bridge: boolean; tunnel: boolean; level: number; type: RoadType }
@@ -132,6 +135,11 @@ export class Game {
   zonePlan: ZonePlan | null = null;
   // Bank loan balance (soft fail outside Challenge)
   loan = 0;
+  // Campaign / Challenge: counters, spend and the best grade (Campaign.ts); the grade the HUD has not shown yet; onGrade: a new best
+  // (main.ts writes it to the profile)
+  run: RunState = run0();
+  pendingGrade: Grade | null = null;
+  onGrade: ((g: Grade) => void) | null = null;
   // placing = the zone (a moved legacy building's) or special the place tool holds; placeAngle turns a free ghost (R)
   placing: Zone | Special | null = null;
   placeAngle = Math.PI / 2;
@@ -164,7 +172,7 @@ export class Game {
   // City happiness 0..100 (EMA of the residents-weighted home mean) and its weighted parts
   happiness = 60;
   cityParts: Parts = { job: 0, shop: 0, trips: 0.6, pollution: 0, noise: 0 };
-  // Midnights in a row in debt / unhappy (career fail counters)
+  // Midnights in a row in debt / unhappy (Challenge fail counters)
   debtDays = 0;
   sadDays = 0;
   message = '';
@@ -185,7 +193,8 @@ export class Game {
     // the trip/driver stream is seeded apart from the terrain's, so the two never mirror each other
     setSeed(hashSeed('sim:' + cfg.seed));
     this.terrain = generateTerrain(cfg);
-    this.money = cfg.mode === 'creative' ? Infinity : DIFFICULTY[cfg.difficulty].money;
+    const m = this.goals ? this.map! : null;
+    this.money = this.creative ? Infinity : m ? m.money * (this.challenge ? CHALLENGE_MONEY : 1) : DIFFICULTY[cfg.difficulty].money;
     const town = findStarterTown(this.terrain);
     for (const b of town?.buildings ?? []) this.addBuilding(b);
     adoptLots(this);
@@ -232,16 +241,25 @@ export class Game {
   get day(): number { return this.today + 1; }
   get running(): boolean { return !this.gameOver && this.speed > 0; }
   get creative(): boolean { return this.cfg.mode === 'creative'; }
-  // ponytail: G3 adds the mode; until then every run fails soft
-  get challenge(): boolean { return (this.cfg.mode as string) === 'challenge'; }
+  get challenge(): boolean { return this.cfg.mode === 'challenge'; }
+  // The campaign map this run is on (any mode), its number, and whether its objectives count (Campaign, Challenge)
+  get map(): MapDef | null { return mapById(this.cfg.map); }
+  get mapNo(): number { return MAPS.findIndex(m => m.id === this.cfg.map) + 1; }
+  get goals(): boolean { return (this.cfg.mode === 'campaign' || this.challenge) && !!this.map; }
+  // Tools by map number: Campaign and Challenge have their map's and every earlier one's, Endless the profile's (cfg.unlock), Creative all
+  get unlockLevel(): number { return this.creative ? Infinity : this.goals ? this.mapNo : this.cfg.unlock ?? Infinity; }
+  // Challenge: the objectives by this day
+  get deadline(): number { return DEADLINE + this.mapNo; }
+  // A modal is up: game over, a level-up or a map grade
+  get modal(): boolean { return !!this.gameOver || !!this.pendingLevel || !!this.pendingGrade; }
   get loanCap(): number { return T.LOAN_CAP * DIFFICULTY[this.cfg.difficulty].money / 40000; }
   // At the loan cap and still in debt: nothing grows and zoning is refused until money is back over $0
   get frozen(): boolean { return !this.creative && !this.challenge && this.money < 0 && this.loan >= this.loanCap; }
   get population(): number { return this.buildings.reduce((n, b) => n + b.residents, 0); }
 
-  // Each milestone passed: the next level (its unlocks) and the grant (career; creative only counts the level)
+  // Each milestone passed: the next level and its grant (Endless; creative only counts the level, maps with objectives have none)
   private checkLevel(): void {
-    while (this.population >= levelPop(this.cityLevel + 1)) {
+    while (!this.goals && this.population >= levelPop(this.cityLevel + 1)) {
       const n = ++this.cityLevel;
       if (this.creative) continue;
       const grant = this.levelGrant(n);
@@ -272,6 +290,7 @@ export class Game {
         waiting: this.cars.reduce((n, c) => n + +(c.speed < 1), 0) + this.buildings.reduce((n, b) => n + b.pending.length, 0),
       });
       this.hourly(h);
+      this.runHour(h);
       this.payHour();
       this.bank();
       if (!h) this.midnight();
@@ -295,6 +314,7 @@ export class Game {
         const t = car.trip, secs = this.time - t.departed;
         if (!t.back) this.business(t);
         if (t.purpose === 'emergency' && !t.back && secs <= T.FAST_X * t.ideal) this.cheer(t.to);
+        if (!t.back) this.count(t, secs);
         const o = this.outcome(t, secs);
         this.report(t, o, secs);
         if (car === this.follow) this.say(`Arrived: ${OUTCOME_LABEL[o]}, ${fmtMin(secs)}`);
@@ -312,7 +332,7 @@ export class Game {
   // trade: an export reaching a highway exit, an import or a visitor from one (a commuter from outside pays as a worker)
   // A terminal's export pays 1.5x, a fan FAN_PAY before kickoff, an ambulance nothing
   private business(t: Trip): void {
-    if (t.purpose === 'emergency') return;
+    if (t.purpose === 'emergency' || t.from.kind === 'gate' && t.to.kind === 'gate') return;
     const out = t.to.kind === 'gate', trade = out || (t.from.kind === 'gate' && t.purpose !== 'commute');
     const x = t.to.special === 'stadium' && t.purpose === 'visit' ? (this.hour < T.KICKOFF ? T.FAN_PAY : 0)
       : out ? T.TAX_EXPORT * (t.from.special === 'terminal' ? 1.5 : 1) : trade ? (t.purpose === 'freight' ? T.TAX_IMPORT : T.TAX_VISIT)
@@ -363,6 +383,11 @@ export class Game {
   // Rolls the ledger and the day's outcomes, then the Challenge fail checks (never elsewhere or during the tutorial):
   // in debt at debtDays midnights in a row = bankrupt; from day FAIL_FROM_DAY, unhappy at FAIL_DAYS midnights in a row = the residents left
   private midnight(): void {
+    const o = this.stats.today, ended = OUTCOMES.reduce((n, k) => n + o[k], 0);
+    if (this.challenge && !this.tutorialActive && !this.gameOver) {
+      if (ended >= GRIDLOCK_MIN && o.gaveup > GRIDLOCK * ended) this.gameOver = 'gridlock';
+      else if (!this.run.done && this.goals && this.lastHour / 24 + 1 > this.deadline) this.gameOver = 'deadline';
+    }
     this.upkeepDay = this.upkeepPerDay();
     this.ledger = { today: ledger0(), yesterday: this.ledger.today };
     this.stats.today = outcomes0();
@@ -370,8 +395,37 @@ export class Game {
     const d = DIFFICULTY[this.cfg.difficulty], day = this.lastHour / 24 + 1;
     this.debtDays = this.money < 0 ? this.debtDays + 1 : 0;
     this.sadDays = day >= T.FAIL_FROM_DAY && this.happiness < d.failHappy ? this.sadDays + 1 : 0;
+    if (this.gameOver) return;
     if (this.debtDays >= d.debtDays) this.gameOver = 'bankrupt';
     else if (this.sadDays >= T.FAIL_DAYS) this.gameOver = 'unhappy';
+  }
+
+  // A trip arrived (outbound leg): the campaign counters, the match's fans on time, the last ambulances
+  private count(t: Trip, secs: number): void {
+    const r = this.run, c = r.cur;
+    c.arrived++;
+    if (t.to.kind === 'gate' && t.purpose === 'freight') c.exports++;
+    if (t.from.kind === 'gate' && t.to.kind !== 'gate' && t.purpose === 'visit') c.visitors++;
+    if (t.to.special === 'stadium' && t.purpose === 'visit' && this.hour < T.KICKOFF) r.fans[1]++;
+    if (t.purpose === 'emergency') r.amb = [...r.amb, +(secs <= T.FAST_X * t.ideal)].slice(-10);
+  }
+
+  // Hour h began: the last one's counters roll, a match's share is kept at its end, and the objectives are checked. The first time they
+  // all hold the map is graded (the HUD's Map complete); every midnight after that grades again and keeps the best
+  private runHour(h: number): void {
+    const r = this.run;
+    closeHour(r, (h + 23) % 24);
+    if (h === T.MATCH_END && r.fans[0]) { r.match = Math.max(r.match, r.fans[1] / r.fans[0]); r.fans = [0, 0]; }
+    if (!this.goals || this.gameOver || this.tutorialActive) return;
+    const m = this.map!, g = grade(this, m);
+    if (r.done ? !h && g.stars > r.stars : g.stars > 0) {
+      if (!r.done) this.pendingGrade = g;
+      else this.say(`New best on ${m.name}: ${'★'.repeat(g.stars)}`);
+      r.done = true;
+      r.stars = Math.max(r.stars, g.stars);
+      r.efficiency = Math.max(r.efficiency, g.efficiency);
+      this.onGrade?.(g);
+    }
   }
 
   // The nearest Challenge fail: midnights left before it if nothing changes (1 = the next one), null when none looms
@@ -404,6 +458,13 @@ export class Game {
     this.grow(comp);
     zoneHour(this, comp);
     this.specialsHour(h, comp, exit);
+    // a map's through traffic: exit to exit (a linked one to another it reaches), spread over the day
+    const gates = this.buildings.filter(b => b.kind === 'gate' && reach.has(comp.get(b.node)));
+    for (this.run.thru += (this.map?.mods?.through ?? 0) / 24; this.run.thru >= 1 && gates.length > 1; this.run.thru--) {
+      const a = gates[Math.floor(random() * gates.length)], b = this.pick(a, comp, x => +(x.kind === 'gate'));
+      if (b) this.queueTrip(a, b, 'visit');
+    }
+    this.run.thru = Math.min(this.run.thru, 1);
     for (const b of this.buildings) {
       if (b.abandoned) continue;
       if (b.jobs) b.staffed = Math.min(1, b.parked.filter(t => t.purpose === 'commute').length * T.PEOPLE_PER_CAR / b.jobs);
@@ -421,7 +482,7 @@ export class Game {
       if (factory && trucking) b.importAcc += T.IMPORTS_PER_DAY * b.staffed * mult / (t1 - t0);
       if (b.kind === 'shop' && trucking && b.stock <= T.IMPORT_STOCK) b.importAcc += T.IMPORT_SHOP;
       for (; b.importAcc >= 1; b.importAcc--) { const from = port(b); if (from) this.queueTrip(from, b, 'freight'); }
-      if (b.def.visits) b.visitAcc += b.def.visits * T.SHOP_CURVE[h] / SHOP_SUM * mult;
+      if (b.def.visits) b.visitAcc += b.def.visits * (this.map?.mods?.visitX ?? 1) * T.SHOP_CURVE[h] / SHOP_SUM * mult;
       for (; b.visitAcc >= 1; b.visitAcc--) { const from = exit(b); if (from) this.queueTrip(from, b, 'visit'); }
       // the i-th commuter from outside arrives in hour COMMUTE_MIN + i mod span
       const n = morning ? Math.floor((Math.floor(b.jobs / T.PEOPLE_PER_CAR) - (held.get(b) ?? 0)) * T.OUTSIDE_JOBS) : 0;
@@ -461,7 +522,9 @@ export class Game {
     if (h !== T.KICKOFF - 2 && h !== T.KICKOFF - 1) return;
     for (let i = 0; i < fans / 2; i++) {
       const from = (i % 5 < 5 * T.FANS_OUT ? exit(st) : null) ?? this.pick(st, comp, x => x.kind === 'home' ? x.residents : 0);
-      if (from) this.queueTrip(from, st, 'visit').leave = this.time + (T.MATCH_END - h + (i % 4) / 4) * HOUR;
+      if (!from) continue;
+      this.queueTrip(from, st, 'visit').leave = this.time + (T.MATCH_END - h + (i % 4) / 4) * HOUR;
+      this.run.fans[0]++;
     }
   }
 
@@ -571,7 +634,7 @@ export class Game {
       if (n < 0) extra.set(h, -n);
       for (let i = 0; i < n; i++) {
         const z = Math.sqrt(-2 * Math.log(1 - random())) * Math.cos(2 * Math.PI * random());
-        const depart = Math.max(T.COMMUTE_MIN, Math.min(T.COMMUTE_MAX, T.COMMUTE_MEAN + T.COMMUTE_SD * z));
+        const depart = Math.max(T.COMMUTE_MIN, Math.min(T.COMMUTE_MAX, T.COMMUTE_MEAN + (this.map?.mods?.commuteSd ?? T.COMMUTE_SD) * z));
         this.commuters.push({ home: h, work: null, depart, next: this.time + ((depart - this.hour + 24) % 24) * HOUR, at: 'home' });
       }
     }
@@ -637,6 +700,8 @@ export class Game {
 
   private report(t: Trip, outcome: Outcome, seconds: number): void {
     this.stats.today[outcome]++;
+    this.run.cur.trips++;
+    if (outcome === 'smooth') this.run.cur.smooth++;
     if (outcome === 'smooth') this.stats.smooth++;
     const shop = t.purpose === 'shop' && !t.back;
     for (const b of new Set([t.from, t.to])) if (b.kind !== 'gate') b.recent.push({ at: this.time, score: SCORE[outcome], shop });
@@ -701,24 +766,29 @@ export class Game {
     }
   }
 
-  // Unlocks by city level (creative has everything)
+  // Unlocks by campaign map number (unlockLevel)
   unlocked(level: number): boolean {
-    return this.creative || this.cityLevel >= level;
+    return this.unlockLevel >= level;
+  }
+
+  // 'Unlocks on map 3, Cedar Crossing: Roundabouts'
+  lockText(level: number, label: string): string {
+    return `Unlocks on ${unlockAt(level)}: ${label}`;
   }
 
   tierUnlocked(t: Tier): boolean {
     return this.unlocked(TIERS[t].level);
   }
 
-  // '' when unlocked, else the toast: 'Unlocks at level 2: Roundabouts'
+  // '' when unlocked, else the toast (lockText)
   lockOf(f: Feature): string {
     const u = UNLOCKS[f];
-    // ponytail: the tutorial edits a light phase at level 1; the junction editor is the only lock it lifts
-    return this.unlocked(u.level) || (f === 'junction' && this.tutorialActive) ? '' : `Unlocks at level ${u.level}: ${u.label}`;
+    // ponytail: the tutorial edits a light phase on map 1; the junction editor is the only lock it lifts
+    return this.unlocked(u.level) || (f === 'junction' && this.tutorialActive) ? '' : this.lockText(u.level, u.label);
   }
 
   private lockedMsg(t: RoadType): string {
-    if (!this.tierUnlocked(t.tier)) return `Unlocks at level ${TIERS[t.tier].level}: ${TIERS[t.tier].label}`;
+    if (!this.tierUnlocked(t.tier)) return this.lockText(TIERS[t.tier].level, TIERS[t.tier].label);
     return t.oneWay ? this.lockOf('oneway') : '';
   }
 
@@ -833,9 +903,11 @@ export class Game {
     return cost > this.money ? 'Not enough money' : '';
   }
 
-  // Pays (negative: gets back) construction money and refreshes the daily upkeep; lots whose road went go too; toasts a newly linked exit
-  spend(cost: number): void {
+  // Pays (negative: gets back) construction money and refreshes the daily upkeep; lots whose road went go too; toasts a newly linked exit.
+  // net: counts toward the campaign's network spend (zoning does not)
+  spend(cost: number, net = true): void {
     this.money -= cost;
+    if (net) this.run.spent += cost;
     if (cost) this.sfx.add(cost > 0 ? 'build' : 'demolish');
     this.ledger.today.build += cost;
     this.upkeepDay = this.upkeepPerDay();
@@ -930,6 +1002,13 @@ export class Game {
 
   private refundX(day: number): number {
     return day === this.today ? T.REFUND_SAME_DAY : T.REFUND_LATER;
+  }
+
+  // Challenge: roads and controls built before today stay (said when refused)
+  permanent(day: number): boolean {
+    if (!this.challenge || day >= this.today) return false;
+    this.say('Challenge: roads and junction controls are permanent after the day they were built');
+    return true;
   }
 
   refundOf(e: Edge): number {
@@ -1113,13 +1192,14 @@ export class Game {
     if (b) { this.tryDemolish(b); return; }
     this.armed = null;
     const r = this.graph.ringAt(p, 4);
-    if (r) { this.setControl(r.hub, 'none'); return; }
+    if (r) { if (!this.permanent(r.hub.controlDay)) this.setControl(r.hub, 'none'); return; }
     const n = this.graph.nearestNode(p, NODE_R + 4);
-    if (n && n.control !== 'none') { this.setControl(n, 'none'); return; }
+    if (n && n.control !== 'none') { if (!this.permanent(n.controlDay)) this.setControl(n, 'none'); return; }
     // prefer a road on the current level where several are stacked
     const hit = this.graph.nearestEdge(p, ROAD_W, this.level) ?? this.graph.nearestEdge(p, ROAD_W);
     if (!hit) return;
     if (exitEdge(hit.edge)) { this.say('The highway to the outside stays: build onto it instead'); return; }
+    if (this.permanent(hit.edge.day)) return;
     const e = hit.edge, back = this.refundOf(e);
     this.dropCars(this.graph.removeEdge(e));
     this.spend(-back);
@@ -1245,7 +1325,7 @@ export class Game {
     this.spend(0);
   }
 
-  // Picks b up with the place tool: the ghost follows the cursor and a click sets it down (MOVE_COST in career); Esc puts it back.
+  // Picks b up with the place tool: the ghost follows the cursor and a click sets it down (MOVE_COST outside creative); Esc puts it back.
   // A building on lots stays on them
   startMove(b: Building): void {
     if (b.kind === 'gate') return;
@@ -1279,6 +1359,8 @@ export class Game {
 
   // The zone brush holding z (null = Unzone)
   setZone(z: Zone | null): void {
+    const lv = z ? TIER_DEFS[z][0].level : 1;
+    if (!this.unlocked(lv)) { this.say(this.lockText(lv, `${ZONE_NAME[z!]} zone`)); return; }
     this.zone = z;
     this.setTool('zone');
   }
@@ -1293,7 +1375,7 @@ export class Game {
 
   // Ghost of the held building at p. Near an access road (SNAP_R) it faces the road with its door DRIVE_GAP past the road's edge;
   // elsewhere it stands free, turned by placeAngle. It must lie inside the map on dry land, clear of roads (by a 4px margin) and
-  // of other buildings. Moving one: MOVE_COST in career, and its own footprint and driveways are out of the way.
+  // of other buildings. Moving one: MOVE_COST outside creative, and its own footprint and driveways are out of the way.
   planPlace(p: Vec, kind = this.placing): PlacePlan | null {
     if (!kind) return null;
     const hit = this.accessEdges().map(e => ({ e, ...distToSegment(p, e.a, e.b) })).filter(h => h.d <= T.SNAP_R).sort((x, y) => x.d - y.d)[0];
@@ -1336,7 +1418,7 @@ export class Game {
   // Why special b (the ghost, or the one being moved) cannot go where it stands: locked, at its limit, a terminal away from the exits
   specialWhy(b: Building): string {
     const s = b.special!, d = SPECIALS[s], n = this.buildings.filter(o => o.special === s && o !== this.moving).length;
-    if (!this.unlocked(d.level)) return `Unlocks at level ${d.level}: ${d.name}`;
+    if (!this.unlocked(d.level)) return this.lockText(d.level, d.name);
     if (n >= this.specialLimit(s)) return s === 'terminal' ? (n ? 'One terminal per linked highway exit' : 'Link a highway exit to the town first')
       : s === 'hospital' ? `One hospital per ${T.HOSPITAL_POP.toLocaleString('en-US')} residents` : s === 'plaza' ? 'At most 2 mall plazas' : 'One stadium per city';
     if (s === 'terminal' && !this.buildings.some(o => o.kind === 'gate' && dist(o, b) <= T.TERMINAL_R)) return `Build it within ${T.TERMINAL_R} px of a highway exit`;
@@ -1421,6 +1503,7 @@ export class Game {
     if (why) { this.say(why); return false; }
     const d = this.retypeDelta(run, type);
     if (d > this.money) { this.say('Not enough money'); return false; }
+    if (d < 0 && this.permanent(Math.min(...edges.map(e => e.day)))) return false;
     const dir = this.runForward(run) !== reverse;
     edges.forEach((e, i) => {
       // a retyped driveway becomes a road you paid for

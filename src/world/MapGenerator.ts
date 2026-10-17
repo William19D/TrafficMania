@@ -5,6 +5,7 @@ import { mulberry32, hashSeed, random } from '../util/rng.ts';
 import { BIOMES, DIFFICULTY, SIZES, TUNING } from '../core/config.ts';
 import type { Biome, GameConfig, Zone } from '../core/config.ts';
 import { Building, buildingAt } from '../entities/Building.ts';
+import { mapById } from '../core/Campaign.ts';
 
 // Sized from SIZES by generateTerrain
 export const WORLD = { w: 2000, h: 1200 };
@@ -84,10 +85,11 @@ export function generateTerrain(cfg: GameConfig): Terrain {
 }
 
 function terrain(cfg: GameConfig): Terrain {
-  const b = BIOMES[cfg.biome], d = DIFFICULTY[cfg.difficulty];
+  // a campaign map fixes its counts, so its Challenge (Hard) has the same terrain
+  const b = BIOMES[cfg.biome], d = DIFFICULTY[cfg.difficulty], o = mapById(cfg.map)?.terrain;
   const t: Terrain = { rivers: [], mountains: [], lakes: [], patches: [], trees: [], exits: [], biome: cfg.biome };
-  for (let i = int(b.rivers ?? d.rivers); i > 0; i--) t.rivers.push(makeRiver());
-  const count = Math.max(0, int(d.mountains) + b.mountains);
+  for (let i = int(o?.rivers ?? b.rivers ?? d.rivers); i > 0; i--) t.rivers.push(makeRiver());
+  const count = o ? int(o.mountains) : Math.max(0, int(d.mountains) + b.mountains);
   for (let tries = 0; tries < 300 && t.mountains.length < count; tries++) {
     const r = rand(60, 120);
     const x = rand(r + 60, WORLD.w - r - 60), y = rand(r + 60, WORLD.h - r - 60);
@@ -97,7 +99,7 @@ function terrain(cfg: GameConfig): Terrain {
   }
 
   // Lakes: blobs kept 60px away from rivers, mountains and other lakes
-  const lakes = int(b.lakes);
+  const lakes = int(o?.lakes ?? b.lakes);
   for (let tries = 0; tries < 200 && t.lakes.length < lakes; tries++) {
     const r = rand(...b.lakeR);
     const c = { x: rand(r + 80, WORLD.w - r - 80), y: rand(r + 80, WORLD.h - r - 80) };
@@ -132,7 +134,7 @@ function terrain(cfg: GameConfig): Terrain {
   // 2-4 exits: an EXIT_STUB highway square to an edge from its middle 60%, over dry land, a third of the map's span apart.
   // Rolled last, so the rest of a seed's map is what it was before exits existed.
   // ponytail: a map with too much water at its edges (archipelago) can end up with fewer than 2
-  const exits = int([2, 4]), apart = (WORLD.w + WORLD.h) / 6;
+  const exits = int(o?.exits ?? [2, 4]), apart = (WORLD.w + WORLD.h) / 6;
   for (let tries = 0; tries < 200 && t.exits.length < exits; tries++) {
     const side = Math.floor(rng() * 4), f = rand(0.2, 0.8), x = side < 2 ? side * WORLD.w : f * WORLD.w, y = side < 2 ? f * WORLD.h : (side - 2) * WORLD.h;
     const angle = [0, Math.PI, Math.PI / 2, -Math.PI / 2][side], door = { x, y };

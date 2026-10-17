@@ -10,6 +10,7 @@ import { DOOR_D, buildingAt } from '../entities/Building.ts';
 import type { Building } from '../entities/Building.ts';
 import { DIFFICULTY, TIER_DEFS, ZONE_NAME, TUNING as T } from './config.ts';
 import type { Zone } from './config.ts';
+import { unlockAt } from './Campaign.ts';
 import { WORLD, inMountain, inWater } from '../world/MapGenerator.ts';
 
 export const ZONE_LIST: Zone[] = ['home', 'shop', 'office', 'industry'];
@@ -203,7 +204,7 @@ export function commitZone(g: Game, plan: ZonePlan): boolean {
   for (const l of plan.rezone) l.zone = plan.zone!;
   const gone = new Set(plan.erase);
   g.lots = [...g.lots.filter(l => !gone.has(l)), ...plan.add];
-  g.spend(plan.cost);
+  g.spend(plan.cost, false);
   return true;
 }
 
@@ -343,7 +344,7 @@ export function upgradeBlock(g: Game, b: Building): string {
   if (!b.tier || !b.lots.length || b.special || b.abandoned || b.kind === 'gate') return 'Never';
   const next = TIER_DEFS[b.kind][b.tier];
   if (!next) return 'Top tier';
-  if (!g.unlocked(next.level)) return `${next.name} unlocks at level ${next.level}`;
+  if (!g.unlocked(next.level)) return `${next.name} unlocks on ${unlockAt(next.level)}`;
   if (b.access < T.UP_A) return `Traffic access under ${Math.round(T.UP_A * 100)}%`;
   if (g.demand[b.kind] <= T.UP_D) return `Low ${ZONE_NAME[b.kind]} demand`;
   if (b.kind === 'home') return b.residents < T.UP_FULL * b.cap ? `Under ${Math.round(T.UP_FULL * 100)}% full` : b.happy < T.UP_HAPPY ? `Under ${T.UP_HAPPY}% happy` : '';

@@ -6,6 +6,7 @@ import { ICHG, ICHG_KEYS } from '../core/Templates.ts';
 import type { Ichg } from '../core/Templates.ts';
 import { DIFFICULTY, ENDLESS_POP, LEVELS, PURPOSES, SPECIALS, SPECIAL_KEYS, TIERS, TIER_DEFS, ZONES, ZONE_NAME, TUNING as T } from '../core/config.ts';
 import { upgradeBlock } from '../core/Zones.ts';
+import { grade, objLabel, objText, objValue, unlockAt } from '../core/Campaign.ts';
 import type { Purpose, Site, Special, Tier, Zone } from '../core/config.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car, Kind } from '../entities/Car.ts';
@@ -116,7 +117,7 @@ const FRIENDLY: Record<string, string> = {
   'Buildings need a ground road': 'Buildings need a ground road: come down to the ground before the door',
   'Nearby roads are in the way': 'Nearby roads are in the way: an interchange needs clear land around the junction',
 };
-const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks at|Blocked|Overlaps|Outside|No room|The bank froze|Repaying takes|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
+const ERROR_RE = /^(Not enough|Too low|Too steep|Invalid|Already|Place on|Highways give|Unlocks on|Challenge:|Blocked|Overlaps|Outside|No room|The bank froze|Repaying takes|Buildings need|Nearby|Needs|Interchanges|Upgrade|The roads|A cloverleaf|\w+ needs a junction)/;
 
 const kbd = (t: Tool): string => `<kbd>${keyOf(t)}</kbd>`;
 export const CONTROLS: [string, string][] = [
@@ -276,7 +277,7 @@ export class HUD {
   private last: {
     money?: number; net?: number; arrived?: number; trips?: string; speed?: number; tool?: Tool; level?: number;
     clock?: number; msg: string; said?: number; junction?: string; ichg?: string; gsz?: string; danger?: number; pick?: string; happy?: string; alarm?: string; pop?: string; popN?: number; city?: number; zones?: string; loan?: string; modal?: string;
-    views?: string; car?: string; bld?: string; feed?: string; metrics?: string;
+    views?: string; car?: string; bld?: string; feed?: string; metrics?: string; obj?: string;
   } = { msg: '' };
   // Analysis panels open (M, T); the car the car card shows; when the trip feed was last drawn (real ms, it redraws at most twice a second)
   private show = { metrics: false, feed: false };
@@ -290,6 +291,8 @@ export class HUD {
   onRestart: (() => void) | null = null;
   onMenu: (() => void) | null = null;
   onPause: (() => void) | null = null;
+  // Map complete: to the campaign's map select
+  onMaps: (() => void) | null = null;
   // Moves the camera there: the next building without a road (warning chip), a trip report's spot
   onJump: ((p: Vec) => void) | null = null;
   private dangerIdx = 0;
@@ -309,6 +312,10 @@ export class HUD {
         <div class="chip lvl" tabindex="0" data-tip="">${icon('star')}<b>Lv <span class="lvn num"></span></b></div>
         <div class="chip danger" hidden tabindex="0" role="button" data-tip="Their people cannot travel until a road reaches the door. Click to jump to the next one.">${icon('warning')}<b><span class="cnt num"></span><span class="long"> without a road</span></b></div>
         <div class="chip danger alarm" hidden tabindex="0" data-tip="">${icon('warning')}<b class="atxt"></b></div>
+        <div class="obj" hidden role="group" aria-label="Objectives">
+          <button class="ohead" data-action="obj" aria-expanded="true" data-tip="Objectives: meet them all for a star. Click to fold"><b class="oname"></b><span class="ostars"></span>${icon('chev', 'chev')}</button>
+          <div class="obody"></div>
+        </div>
       </div>
       <div class="panel status">
         <div class="seg" role="group" aria-label="Game speed">
@@ -428,6 +435,10 @@ export class HUD {
     root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => { b.onclick = () => { game.setZone(b.dataset.zone === 'none' ? null : b.dataset.zone as Zone); this.setBuild(false); }; });
     root.querySelectorAll<HTMLButtonElement>('[data-special]').forEach(b => { b.onclick = () => { game.startPlacing(b.dataset.special as Special); this.setBuild(false); }; });
     this.q('[data-action="repay"]').onclick = () => game.repay();
+    this.q('[data-action="obj"]').onclick = e => {
+      const o = this.q('.obj'), min = o.classList.toggle('min');
+      (e.currentTarget as HTMLElement).setAttribute('aria-expanded', String(!min));
+    };
     this.q('[data-action="build"]').onclick = () => this.setBuild(!this.buildOpen);
     // Lane picker: edits the selected run (Edit tool) or sets the type of new roads
     const cur = (): RoadType => (game.selected ? game.typeOf(game.selected) : game.roadType);
@@ -509,9 +520,9 @@ export class HUD {
   // ---------- keyboard ----------
   private onKey(e: KeyboardEvent): void {
     const g = this.game;
-    if (g.gameOver || g.pendingLevel) {
+    if (g.modal) {
       e.stopPropagation(); // no key reaches Input while a modal is open (tools, level, Esc)
-      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else this.closeLevel(); }
+      if (e.key === 'Enter') { e.preventDefault(); if (g.gameOver) this.onRestart?.(); else if (g.pendingGrade) this.closeGrade(); else this.closeLevel(); }
       return;
     }
     if (e.key === 'Escape' && this.buildOpen) {
@@ -659,23 +670,35 @@ export class HUD {
     this.game.speed = this.resume || 1;
   }
 
+  // Map complete closed: the map plays on (Endless on it), the grade re-runs every midnight
+  private closeGrade(): void {
+    this.game.pendingGrade = null;
+    this.game.speed = this.resume || 1;
+  }
+
   private renderModal(): void {
     const g = this.game, modal = this.q('.modal');
-    const open = !!g.gameOver || !!g.pendingLevel;
+    const open = g.modal;
     this.hideTip();
     this.setHelp(false, false);
     // keep Tab inside the modal
     for (const el of Array.from(this.root.children)) if (el !== modal) el.toggleAttribute('inert', open);
     modal.hidden = !open;
     if (g.gameOver) {
-      const d = DIFFICULTY[g.cfg.difficulty], broke = g.gameOver === 'bankrupt';
+      const d = DIFFICULTY[g.cfg.difficulty];
+      const [title, why] = {
+        bankrupt: ['Bankrupt', `The city was in debt at ${d.debtDays} midnights in a row.`],
+        unhappy: ['The residents left', `City happiness stayed under ${d.failHappy}% for ${T.FAIL_DAYS} midnights in a row.`],
+        gridlock: ['Gridlock', 'Over 40% of the day\'s trips gave up waiting.'],
+        deadline: ['Out of time', `The objectives were not met by the end of day ${g.goals ? g.deadline : g.day}.`],
+      }[g.gameOver];
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h2 id="m-title" class="bad">${icon('warning')} ${broke ? 'Bankrupt' : 'The residents left'}</h2>
-          <p class="sub">${broke ? `The city was in debt at ${d.debtDays} midnights in a row.` : `City happiness stayed under ${d.failHappy}% for ${T.FAIL_DAYS} midnights in a row.`}</p>
+          <h2 id="m-title" class="bad">${icon('warning')} ${g.challenge ? 'Challenge failed: ' : ''}${title}</h2>
+          <p class="sub">${why}</p>
           <div class="stats">
             <div>${icon('calendar', 'big')}<span>Days</span><b class="num">${g.day}</b></div>
-            <div>${icon('star', 'big')}<span>Level</span><b class="num">${g.cityLevel}</b></div>
+            <div>${icon('star', 'big')}<span>Network spend</span><b class="num">${fmtMoney(g.run.spent)}</b></div>
             <div>${icon('people', 'big')}<span>Population</span><b class="num">${Math.round(g.population).toLocaleString('en-US')}</b></div>
             <div>${icon('car', 'big')}<span>Trips</span><b class="num">${g.stats.arrived.toLocaleString('en-US')}</b></div>
             <div>${icon('smile', 'big')}<span>Smooth trips</span><b class="num">${g.stats.arrived ? Math.round(100 * g.stats.smooth / g.stats.arrived) : 0}%</b></div>
@@ -687,21 +710,41 @@ export class HUD {
       b.onclick = () => this.onRestart?.();
       this.q('[data-action="to-menu"]').onclick = () => this.onMenu?.();
       b.focus();
+    } else if (g.pendingGrade) {
+      if (g.speed) this.resume = g.speed;
+      g.speed = 0;
+      sound.play('level');
+      const r = g.pendingGrade, m = g.map!, row = (ok: boolean, label: string, val: string) => `<p class="${ok ? '' : 'miss'}">${icon(ok ? 'check' : 'close')}${esc(label)}<b class="num">${val}</b></p>`;
+      modal.innerHTML = `
+        <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
+          <h2 id="m-title">${icon('star')} ${g.challenge ? `Challenge cleared on day ${r.day}` : 'Map complete'}: ${esc(m.name)}</h2>
+          <div class="stamp" aria-label="${r.stars} of 3 stars">${[1, 2, 3].map(i => `<i class="${i <= r.stars ? 'on' : ''}">★</i>`).join('')}</div>
+          <div class="lvl-grid one">
+            <div>${m.objectives.map((o, i) => row(r.met[i], objLabel(o), '')).join('')}
+              ${row(r.flow >= m.flow, `★★ Smooth trips ${Math.round(m.flow * 100)}%+`, `${Math.round(r.flow * 100)}%`)}
+              ${row(r.stars > 1 && r.spend <= m.budget, `★★★ Network spend within ${fmtMoney(m.budget)}`, fmtMoney(r.spend))}
+              <p>${icon('chart')}Efficiency<b class="num">${r.efficiency.toLocaleString('en-US')}</b></p></div>
+          </div>
+          <p class="sub">${r.stars < 3 ? 'Keep playing: the grade runs again every midnight and the best one counts.' : 'Perfect. Keep playing as long as you like.'}</p>
+          <div class="actions"><button class="btn" data-action="maps">Map select</button><button class="btn primary" data-action="continue">Keep playing <kbd>Enter</kbd></button></div>
+        </div>`;
+      const b = this.q<HTMLButtonElement>('[data-action="continue"]');
+      b.onclick = () => this.closeGrade();
+      this.q('[data-action="maps"]').onclick = () => { this.closeGrade(); this.onMaps?.(); };
+      b.focus();
     } else if (g.pendingLevel) {
       // every level reached since the last modal (several at once merge): unlocks, the batch and the grants
       if (g.speed) this.resume = g.speed;
       g.speed = 0;
       const lv: number[] = [];
       for (let n = this.seenLevel + 1; n <= g.pendingLevel; n++) lv.push(n);
-      const unlocks = lv.flatMap(levelUnlocks);
       const grant = lv.reduce((n, l) => n + g.levelGrant(l), 0), won = lv.includes(LEVELS.length);
       modal.innerHTML = `
         <div class="box" role="dialog" aria-modal="true" aria-labelledby="m-title">
           <h2 id="m-title">${icon('star')} ${won ? 'City complete!' : `Level ${g.pendingLevel}!`}</h2>
           <p class="sub">${Math.round(g.population).toLocaleString('en-US')} residents${won ? ` on day ${g.day}, ${g.stats.arrived.toLocaleString('en-US')} trips. You reached level ${LEVELS.length}: keep going, every ${ENDLESS_POP} more residents is another level.` : '. Zone more lots where the demand bars are high: the city grows where traffic flows.'}</p>
           <div class="lvl-grid">
-            <div><h3>Unlocked</h3>${unlocks.length ? unlocks.map(u => `<p>${icon('check')}${esc(u)}</p>`).join('') : '<p class="muted">Nothing new this time</p>'}
-              <p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
+            <div><p>${icon('money')}Grant <b class="num">${fmtMoney(grant)}</b></p></div>
           </div>
           <div class="actions"><button class="btn primary" data-action="continue">Continue <kbd>Enter</kbd></button></div>
         </div>`;
@@ -737,9 +780,9 @@ export class HUD {
       const k = b.dataset.tier as Tier, locked = !g.tierUnlocked(k);
       b.disabled = off;
       b.setAttribute('aria-pressed', String(t.tier === k));
-      // locked tiers stay clickable so Game toasts 'Unlocks at level N'
+      // locked tiers stay clickable so Game toasts 'Unlocks on map N'
       b.setAttribute('aria-disabled', String(locked));
-      b.dataset.tip = tierTip(k) + (locked ? ` · unlocks at level ${TIERS[k].level}` : delta({ ...t, tier: k }));
+      b.dataset.tip = tierTip(k) + (locked ? ` · unlocks on ${unlockAt(TIERS[k].level)}` : delta({ ...t, tier: k }));
     });
     box.querySelectorAll<HTMLButtonElement>('[data-lanes]').forEach(b => {
       const n = Number(b.dataset.lanes) as RoadType['lanes'];
@@ -1035,23 +1078,23 @@ export class HUD {
       this.setBuild(false);
     }
 
-    // Population toward the next milestone, and the city level; a level-up re-locks / unlocks the dock
-    const pop = Math.round(g.population), next = levelPop(g.cityLevel + 1), prev = levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
+    // Population toward the next milestone (a map's population objective), and the city level; a level-up re-locks / unlocks the dock
+    const goal = g.goals ? g.map!.objectives.find(o => o.kind === 'pop')?.target : undefined;
+    const pop = Math.round(g.population), next = goal ?? levelPop(g.cityLevel + 1), prev = goal ? 0 : levelPop(g.cityLevel), pk = `${pop}|${g.cityLevel}`;
     if (pk !== L.pop) {
       countTo(this.q('.pv'), L.popN, pop, n => n.toLocaleString('en-US'));
       L.pop = pk;
       L.popN = pop;
       this.q('.pn').textContent = ` / ${next.toLocaleString('en-US')}`;
       this.q<HTMLElement>('.pbar i').style.width = `${Math.max(0, Math.min(1, (pop - prev) / (next - prev))) * 100}%`;
-      this.q('.people').dataset.tip = `Population ${pop}. Level ${g.cityLevel + 1} at ${next} residents. Happy homes fill up; unhappy ones empty out.`;
+      this.q('.people').dataset.tip = `Population ${pop}. ${goal ? `The map's goal: ${next}` : `Level ${g.cityLevel + 1} at ${next}`} residents. Happy homes fill up; unhappy ones empty out.`;
     }
     if (g.cityLevel !== L.city) {
       const up = L.city !== undefined;
       L.city = g.cityLevel;
       this.q('.lvn').textContent = String(g.cityLevel);
-      const soon = [g.cityLevel + 1, g.cityLevel + 2].map(n => [n, levelUnlocks(n)] as const).filter(([, u]) => u.length);
-      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : ''}.`
-        + (g.creative ? '' : soon.map(([n, u]) => ` Level ${n}: ${u.join(', ')}.`).join(''));
+      this.q('.lvl').hidden = g.goals;
+      this.q('.lvl').dataset.tip = `City level ${g.cityLevel}${g.creative ? ' (creative: everything unlocked)' : `: level ${g.cityLevel + 1} at ${levelPop(g.cityLevel + 1).toLocaleString('en-US')} residents pays a grant`}.`;
       for (const b of this.toolBtns) {
         const f = TOOL_LOCK[b.dataset.tool as Tool], lock = f ? g.lockOf(f) : '';
         b.setAttribute('aria-disabled', String(!!lock));
@@ -1061,7 +1104,12 @@ export class HUD {
       this.root.querySelectorAll<HTMLButtonElement>('[data-special]').forEach(b => {
         const d = SPECIALS[b.dataset.special as Special], lock = !g.unlocked(d.level);
         b.setAttribute('aria-disabled', String(lock));
-        b.dataset.tip = `${d.name}${lock ? ` (unlocks at level ${d.level})` : ''}: ${d.tip} Upkeep ${fmtMoney(d.upkeep)}/day.`;
+        b.dataset.tip = `${d.name}${lock ? ` (unlocks on ${unlockAt(d.level)})` : ''}: ${d.tip} Upkeep ${fmtMoney(d.upkeep)}/day.`;
+      });
+      this.root.querySelectorAll<HTMLButtonElement>('[data-zone]').forEach(b => {
+        const z = b.dataset.zone as Zone | 'none', lv = z === 'none' ? 1 : TIER_DEFS[z][0].level, lock = !g.unlocked(lv);
+        b.setAttribute('aria-disabled', String(lock));
+        if (lock) b.dataset.tip = `${ZONE_NAME[z as Zone]} zone unlocks on ${unlockAt(lv)}`;
       });
       L.pick = undefined;
       L.level = undefined;
@@ -1103,7 +1151,7 @@ export class HUD {
       st.classList.toggle('off', off);
       st.dataset.tip = off ? 'Elevation applies to the Road tool' : ROAD_TIP;
       this.q<HTMLButtonElement>('[data-action="level-down"]').disabled = off || lv <= 0;
-      // ponytail: a locked next level stays clickable so Game toasts 'Unlocks at level N'
+      // ponytail: a locked next level stays clickable so Game toasts 'Unlocks on map N'
       this.q('[data-action="level-up"]').setAttribute('aria-disabled', String(!!g.lockOf(lv + 1 >= 6 ? 'high' : 'viaduct')));
       this.q<HTMLButtonElement>('[data-action="level-up"]').disabled = off || lv >= 10;
       this.q('.lv').textContent = lv === 0 ? 'Ground' : `L${lv}`;
@@ -1221,10 +1269,33 @@ export class HUD {
       L.said = g.said;
     }
 
-    const mk = `${g.gameOver}|${g.pendingLevel}`;
+    this.updateObjectives();
+
+    const mk = `${g.gameOver}|${g.pendingLevel}|${!!g.pendingGrade}`;
     if (mk !== L.modal) {
       L.modal = mk;
       this.renderModal();
     }
+  }
+
+  // Region O: the map's objectives with bars, the ★★ flow and ★★★ spend bars, what the map brings, a Challenge's deadline
+  private updateObjectives(): void {
+    const g = this.game, box = this.q('.obj');
+    box.hidden = !g.goals;
+    if (!g.goals) return;
+    const m = g.map!, r = grade(g, m), best = Math.max(g.run.stars, r.stars);
+    const bar = (ok: boolean, label: string, val: string, f: number) =>
+      `<div class="orow${ok ? ' ok' : ''}"><span>${ok ? icon('check') : '<i class="odot"></i>'}${esc(label)}</span><b class="num">${val}</b><i style="--f:${Math.max(0, Math.min(1, f))}"></i></div>`;
+    const rows = m.objectives.map((o, i) => { const v = objValue(g, o); return bar(r.met[i], objLabel(o), objText(o, v), v / o.target); }).join('')
+      + bar(r.flow >= m.flow, `★★ Smooth trips ${Math.round(m.flow * 100)}%+`, `${Math.round(r.flow * 100)}%`, r.flow / m.flow)
+      + bar(r.spend <= m.budget, `★★★ Spend within ${fmtMoney(m.budget)}`, fmtMoney(r.spend), 1 - r.spend / m.budget)
+      + (levelUnlocks(g.mapNo).length ? `<p class="onote new">New here: ${esc(levelUnlocks(g.mapNo).join(', '))}</p>` : '')
+      + (g.challenge ? `<p class="onote">Deadline: end of day ${g.deadline}${g.run.done ? ' · cleared' : ` · ${g.deadline - g.day + 1} day${g.deadline - g.day ? 's' : ''} left`}</p>` : '');
+    const key = `${rows}|${best}`;
+    if (key === this.last.obj) return;
+    this.last.obj = key;
+    this.q('.oname').textContent = m.name;
+    this.q('.ostars').innerHTML = [1, 2, 3].map(i => `<i class="${i <= best ? 'on' : ''}">★</i>`).join('');
+    this.q('.obody').innerHTML = rows;
   }
 }

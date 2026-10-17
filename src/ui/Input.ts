@@ -38,7 +38,7 @@ export function attachInput(canvas: HTMLCanvasElement, game: Game, renderer: Can
   let brush: Vec | null = null; // Zone tool: where the drag started
   let shift = false, snap = false; // Shift: straight this road; Ctrl / Alt: its end turns in 15° steps around the anchor
 
-  const blocked = () => game.gameOver || game.pendingLevel > 0;
+  const blocked = () => game.modal;
 
   const cancel = () => {
     mode = 'idle';
