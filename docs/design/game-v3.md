@@ -553,7 +553,7 @@ Building: tier: 1..4; lots: Lot[]; special: Special | null; access: number; upH:
 Game: objectives state; best grade; milestone: number; offers: Offer[] | null; upgrades: Upgrade[]
 // Events.ts [G5]
 Game: events: ActiveEvent[]; nextEventAt: number; requests
-// G7: Game.history: Action[] (not saved)
+// G7: Game.edits, Game.fx (not saved); the undo stacks live in main.ts
 ```
 
 **SaveData stays `v: 1`.** New fields are optional, and `deserialize` fills defaults:
@@ -629,6 +629,13 @@ interface Profile {
   - soft percussion, during the rush hours 7-10 and 16-20
 - While the worst junction delay is above 10 s, the pad shifts to Am7 (tension). It resolves on the next jam-cleared cue.
 - Layers fade in and out over 2 bars.
+
+### G7 as built (where it differs from the above)
+- **Undo is a snapshot, not an inverse.** Every press (pointerdown) serializes the game; if a spend follows (`Game.edits`), that save becomes an undo step. Undo loads it back into the same `Game` object (`Save.restore`), keeping tool settings, the feed and the terrain. So it also rewinds the clock to that press, and cars go back to their doors, as on a load. Money comes back exactly because it is part of the save.
+- **Limits:** 30 steps. A step older than 6 game hours is dropped instead of the midnight clear. Undo is off in Challenge, rather than limited to today. Lane-link edits and other changes without a spend are not undo steps.
+- **No dock buttons:** keys only (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`), listed in the controls panel and README.
+- **Cues built:** jam cleared (heat > 0.7, then < 0.35, checked once a game second; 10 sparkles in a ring, a three-note bell at most every 2 s), coin pop (`+$n` over the building, at most one per quarter game second), a stars fanfare when the grade modal opens (one phrase, not per star), and an achievement chime. Grow, upgrade, downgrade, paint ticks, milestone and event cues are left out.
+- **Music:** two layers over the loop, following the share of on-screen cars that are moving. A shaker comes in above 40% moving, and an arpeggio when it is busy and above 65% moving. They fade over 3–4 s, so a jam thins the music. No bass threshold, rush-hour percussion or Am7 tension.
 
 ---
 
