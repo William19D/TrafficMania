@@ -146,7 +146,7 @@ The dock holds only what is used all the time; building lives in a menu that unf
 
 ## 3. Visual language
 
-The HUD is a rich game UI, not a flat one (Q8, the visual direction changed from minimal to detailed): panels have depth, icons have colour, numbers and panels move. The palette stays the same.
+The HUD is a rich game UI with flat fills (game-v3 F2): solid colours and hard offset shadows, no gradients, sheens, textures or vignettes. Icons have colour, numbers and panels move. The palette stays the same. Only the heat legend scale and the day bar's rush-hour bands use gradients, because they encode data.
 
 Tokens (`:root`):
 ```
@@ -155,21 +155,19 @@ Tokens (`:root`):
 --accent #2F6FED  --accent-soft #E6EEFD
 --success #2E9E5B --danger #E5484D --danger-soft #FDECEC --warning #E0A100
 --radius 12px  --ease cubic-bezier(.2,.7,.3,1)  --spring cubic-bezier(.3,1.4,.5,1)
---shadow / --shadow-hi   two-layer warm shadows (contact + ambient); -hi for the dock, menus, side panels, dialogs
---sheen        inset top highlight + inset bottom line on every raised surface
---panel-bg     white to warm off-white vertical gradient    --grain  a 96px SVG fractal-noise tile at 7% (paper texture)
---well         inset shadow for sunken things: segmented groups, progress tracks, the day bar
---accent-grad  lit blue cap for pressed toggles and primary buttons
+--shadow / --shadow-hi   flat warm offset shadows, no blur (2px / 4px down); -hi for the dock, menus, side panels, toasts
+--well         1px inset hairline for sunken things: segmented groups, progress tracks, the day bar, stat cells
+--accent-dk #2459C8   bottom edge of accent caps (pressed toggles, primary buttons)
 --font-ui / --font-display   see Type
 ```
 - **Colour roles.**
   - The accent marks selection, primary buttons and tutorial hints.
   - Danger marks Demolish, errors, debt and game over.
   - Warning marks the level star and long-wait reports.
-- **Icon colour.** Each tool owns a hue (`--hue` on `.tool[data-tool]` and on the Build button's `.bico[data-t]`): Road slate `#56627A`, Grid violet `#7C5CE6`, Light amber `#E08A00`, Roundabout teal `#0F9C9C`, Interchange indigo `#4F5BD5`, Buildings green `#2E9E5B`, Edit accent, Demolish danger, Build (nothing picked) orange `#EA6F1A`. The icon sits white on a glossy rounded tile of that hue; locked tools go grayscale. Resource chips carry round glossy coins: money green, people blue, happiness amber / green / red by mood, level gold, warnings red.
+- **Icon colour.** Each tool owns a hue (`--hue` on `.tool[data-tool]` and on the Build button's `.bico[data-t]`): Road slate `#56627A`, Grid violet `#7C5CE6`, Light amber `#E08A00`, Roundabout teal `#0F9C9C`, Interchange indigo `#4F5BD5`, Buildings green `#2E9E5B`, Edit accent, Demolish danger, Build (nothing picked) orange `#EA6F1A`. The icon sits white on a solid rounded tile of that hue with a darker 2px bottom edge; locked tools go grayscale. Resource chips carry round solid coins: money green, people blue, happiness amber / green / red by mood, level gold, warnings red.
 - **Contrast.** Text on white is at least 4.5:1, so positive and negative numbers use darker greens and reds (`#1B6E3D`, `#B42F34`). `--warning` is never used as text. Glyphs on hue tiles are decorative; the label under each tool carries the meaning.
 - **Type.** Body: `--font-ui` (Segoe UI Variable / system-ui). Numbers, tool labels, headings and group captions: `--font-display` (Bahnschrift on Windows, DIN on Apple, rounded system faces or Trebuchet MS elsewhere), no font files. 13px minimum, weights 500 to 800, `tabular-nums` on every number. The only text under 13px is the hint lines that repeat a pictogram.
-- **Shape and depth.** Panels: grain over the panel gradient, 1px line border (a shade darker at the bottom), 12px radius, sheen and shadow. Buttons are raised caps (light gradient + sheen); pressed toggles are lit accent caps with a soft blue glow (Demolish: a danger-soft cap with a red glow; tier swatches keep their accent ring). Hover lifts tools 2px onto a light cap and brightens the tile. Anything over the map sits on a panel.
+- **Shape and depth.** Panels: solid white, 1px line border (a shade darker at the bottom), 12px radius, flat offset shadow. Buttons are white caps with a hard 2px bottom edge; pressed toggles are solid accent caps with an `--accent-dk` edge (Demolish: a danger-soft cap with a red edge; tier swatches keep their accent ring). Hover lifts tools 2px onto a warm off-white cap and brightens the tile. Dialog and menu backdrops are a flat translucent dim. Anything over the map sits on a panel.
 - **Second cues.** No state relies on colour alone: there is always an icon, a lock, `aria-pressed`, a dashed outline or label text as well.
 - **Focus.** `:focus-visible` gets a 3px accent outline (ink on accent caps).
 - **Motion.** Every button sinks 1px and squeezes to 96% while pressed (spring back). Money and population count to their new value over 400ms (`countTo` in `HUD.ts`) and the money figure bumps. Side panels drop in, the tutorial card rises, dialogs and menus pop in with a spring, toasts spring up, the Build menu's groups rise in a 30ms stagger, tooltips fade. Transitions stay 300ms or less. `prefers-reduced-motion` removes pulses, slides, lifts, squeezes and counting (numbers snap) and keeps opacity fades.
