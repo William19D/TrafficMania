@@ -10,21 +10,8 @@ import { ANY, LEFT, approachOf, edgeAngle, laneMasks, mainEdges, moveOf, opposit
 export { LIGHT_PERIOD, lightGroup } from './Junction.ts';
 
 export const TILE = 40, ROAD_W = 18, LANE_OFFSET = 4.5, NODE_R = 12, CAR_LEN = 15, CAR_W = 8, GAP = 5;
-// Roundabout sizes: ring centre line radius, cars admitted at once, cost / upkeep multiplier
-export type RingSize = 0 | 1 | 2;
-export const RINGS: readonly { label: string; r: number; cap: number; cost: number }[] = [
-  { label: 'Small', r: NODE_R + 5, cap: 3, cost: 1 },
-  { label: 'Medium', r: NODE_R + 14, cap: 5, cost: 1.6 },
-  { label: 'Large', r: NODE_R + 24, cap: 8, cost: 2.4 },
-];
-export const ringR = (n: Node): number => RINGS[n.ring].r;
-// where an approach lane meets the ring
-export const ringIn = (n: Node): number => Math.sqrt(ringR(n) ** 2 - LANE_OFFSET * LANE_OFFSET);
-// Where a car stops before a junction (distance from the node): outside the ring on roundabouts
-export const ringStop = (r: RingSize): number => RINGS[r].r + ROAD_W / 2 + 4;
-export const stopDist = (n: Node): number => n.control === 'roundabout' ? ringStop(n.ring) : NODE_R + 3;
-// How far from n a car is out of its box: off the ring on roundabouts
-export const boxR = (n: Node): number => n.control === 'roundabout' ? ringIn(n) : NODE_R;
+// Where a car stops before a junction (distance from the node)
+export const stopDist = (_n: Node): number => NODE_R + 3;
 // Mid-edge lane change: slide seconds, and how far from both nodes it may start (past the node blends, the slide done
 // before the end, room left for cars granted into the lane)
 export const LC_S = 0.6, LC_M = 110;
@@ -49,6 +36,22 @@ export const fitType = (t: RoadType): RoadType => {
   return { tier: t.tier, lanes, oneWay: t.oneWay && T.oneWay };
 };
 
+// Roundabout sizes (docs/design/game-v3.md 1): ring lane radius, chords round it, ring speed limit px/s, most arms, most lanes per
+// direction on an arm, cost / upkeep multiplier
+export type RingSize = 0 | 1 | 2;
+export const RINGS: readonly { label: string; r: number; n: number; v: number; arms: number; lanes: number; cost: number }[] = [
+  { label: 'Small', r: 22, n: 7, v: 45, arms: 4, lanes: 1, cost: 1 },
+  { label: 'Medium', r: 34, n: 11, v: 58, arms: 5, lanes: 2, cost: 1.6 },
+  { label: 'Large', r: 50, n: 16, v: 70, arms: 6, lanes: 3, cost: 2.4 },
+];
+// The ring road: one lane and a shoulder each side (12px)
+const RING_TYPE: RoadType = { tier: 'avenue', lanes: 1, oneWay: true };
+export const RING_W = roadWidth(RING_TYPE);
+// Outer edge of the ring road; no other junction, split or driveway join within clearR
+export const ringOut = (s: RingSize): number => RINGS[s].r + RING_W / 2;
+export const clearR = (s: RingSize): number => ringOut(s) + 2 * NODE_R;
+export const onRing = (n: Node): boolean => n.edges.some(e => !!e.ring);
+
 // none: one car at a time in arrival order; yield: the main road (mainEdges) goes, side roads give way; stop: all-way stop
 export type Control = 'none' | 'yield' | 'stop' | 'light' | 'roundabout';
 
@@ -57,7 +60,7 @@ export interface Node {
   occupants: Set<Car>; queue: Car[]; phase: number; phaseTimer: number;
   controlDay: number; // day the control was built (refund rule)
   plan: JunctionPlan | null; // edited phases / lane connections; null = the default plan (Junction.planOf)
-  ring: RingSize; // roundabout size (kept when the control changes)
+  ring: RingSize; // a ring's hub: its size (old saves: a 'roundabout' node's)
   delay: number; // EMA of the mean stopped seconds of the cars queued at it (heat map)
 }
 
@@ -72,19 +75,31 @@ export interface Edge {
   drive: boolean; // auto driveway to a building: free, no upkeep, no refund
   exit: boolean; // a piece of a highway exit's stub (a split keeps it): free, no upkeep, no refund, never demolished
   heat: number; // congestion EMA 0..1: the larger of density and slowness (1 - speed / top speed) of its cars
+  ring: Ring | null; // a roundabout's ring road: free, part of the control
 }
 
-export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean; exit?: boolean }
+// A roundabout: one-way ring edges joining its nodes counter-clockwise on screen (nodes[i] -> nodes[i + 1]); the cars entering from an
+// arm merge into gaps in the ring traffic. Its hub stands in for it off the graph (the junction panel, the control price): control
+// 'roundabout', ring = its size, controlDay, at the centre.
+export interface Ring { hub: Node; nodes: Node[] }
+
+export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean; exit?: boolean; ring?: Ring | null }
 
 export class RoadGraph {
   nodes: Node[] = [];
   edges: Edge[] = [];
   // Edges ignored by snapping / crossings / edgeBetween; only set while planning a bend
   hidden: Set<Edge> = new Set();
+  rings: Ring[] = [];
   private nextId = 1;
 
+  // A node off the graph (a ring's hub)
+  node(x: number, y: number, building: Building | null = null): Node {
+    return { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0, plan: null, ring: 0, delay: 0 };
+  }
+
   addNode(x: number, y: number, building: Building | null = null): Node {
-    const n: Node = { id: this.nextId++, x, y, edges: [], building, control: 'none', occupants: new Set(), queue: [], phase: 0, phaseTimer: 0, controlDay: 0, plan: null, ring: 0, delay: 0 };
+    const n = this.node(x, y, building);
     if (building) building.node = n;
     this.nodes.push(n);
     return n;
@@ -93,7 +108,7 @@ export class RoadGraph {
   addEdge(a: Node, b: Node, flags: EdgeFlags, day = 0): Edge {
     const e = {
       id: this.nextId++, a, b, length: dist(a, b),
-      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive, exit: !!flags.exit, heat: 0,
+      bridge: flags.bridge, tunnel: flags.tunnel, level: flags.level, day, drive: !!flags.drive, exit: !!flags.exit, heat: 0, ring: flags.ring ?? null,
     } as Edge;
     this.buildLanes(e, flags.type);
     a.edges.push(e);
@@ -135,12 +150,13 @@ export class RoadGraph {
 
   splitEdge(e: Edge, p: Vec): Node {
     const { a, b } = e;
-    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type, drive: e.drive, exit: e.exit };
+    const flags: EdgeFlags = { bridge: e.bridge, tunnel: e.tunnel, level: e.level, type: e.type, drive: e.drive, exit: e.exit, ring: e.ring };
     const n = this.addNode(p.x, p.y);
     this.unlink(e);
     const e1 = this.addEdge(a, n, flags, e.day);
     const e2 = this.addEdge(n, b, flags, e.day);
     e1.heat = e2.heat = e.heat;
+    if (e.ring) e.ring.nodes.splice(e.ring.nodes.indexOf(a) + 1, 0, n);
     // Distributes the cars keeping ascending order (iterated from lowest to highest s)
     const move = (old: Lane) => {
       const k = this.lanesFrom(e, old.from).indexOf(old);
@@ -183,6 +199,22 @@ export class RoadGraph {
     }
     for (const l of e.lanes) l.cars.sort((p, q) => p.s - q.s);
     for (const c of lost) this.detachCar(c);
+    // merged lanes: no car overlaps the one ahead
+    for (const l of e.lanes) lost.push(...this.respace(l));
+    return lost;
+  }
+
+  // Pushes l's cars back so none overlaps the one ahead (s sorted already); detaches and returns the ones pushed off its start
+  respace(l: Lane): Car[] {
+    const lost: Car[] = [];
+    let ahead: Car | null = null;
+    for (let k = l.cars.length - 1; k >= 0; k--) {
+      const c = l.cars[k];
+      c.s = Math.min(c.s, l.edge.length, ahead ? ahead.s - (c.len + ahead.len) / 2 : Infinity);
+      if (c.s < 0) lost.push(c);
+      else ahead = c;
+    }
+    for (const c of lost) this.detachCar(c);
     return lost;
   }
 
@@ -219,7 +251,8 @@ export class RoadGraph {
     for (; j < path.length - 1; j++) {
       const n = path[j]!;
       const p = path[j - 1] ?? from!, q = path[j + 1]!;
-      if (!n.building && n.edges.length === 2 && n.control === 'none') continue;
+      // a ring's nodes: the turn that counts is the one past the roundabout
+      if ((!n.building && n.edges.length === 2 && n.control === 'none') || onRing(n)) continue;
       if (this.drivewayJunction(n) && !this.edgeBetween(p, n)?.drive && !this.edgeBetween(n, q)?.drive) continue;
       return turnAt(p, n, q);
     }
@@ -263,34 +296,27 @@ export class RoadGraph {
     };
   }
 
-  // Render position of a car: on the roundabout ring while crossing one, else along its lane.
-  // At plain nodes the lateral offset blends halfway toward the next / from the previous lane.
+  // Render position of a car along its lane. At plain nodes the lateral offset blends halfway toward the next / from the previous lane.
   carPos(c: Car): { x: number; y: number; angle: number } {
     const lane = c.lane, remaining = lane.edge.length - c.s;
     const next = c.path?.[1];
-    const ti = lane.to.control === 'roundabout' ? ringIn(lane.to) : 0, fi = lane.from.control === 'roundabout' ? ringIn(lane.from) : 0;
-    if (remaining < ti && next) return this.ringPos(lane.to, lane.from, next, ti - remaining);
-    if (c.s < fi && c.prev) return this.ringPos(lane.from, c.prev, lane.to, fi + c.s);
     // U-turn back down the same edge (dead end / one-way ahead): half circle in the last and first NODE_R
-    if (next === lane.from && c.exit?.edge === lane.edge && remaining < NODE_R && lane.to.control !== 'roundabout') return this.uturnPos(lane, c.exit.offset, NODE_R - remaining);
-    if (c.prev === lane.to && c.s < NODE_R && lane.from.control !== 'roundabout') return this.uturnPos({ ...lane, from: lane.to, to: lane.from, offset: c.prevOffset }, lane.offset, NODE_R + c.s);
-    // Plain junction: a Bezier arc over the last / first NODE_R or so of the two lanes (exit is stale for a tick after a hand-off)
+    if (next === lane.from && c.exit?.edge === lane.edge && remaining < NODE_R) return this.uturnPos(lane, c.exit.offset, NODE_R - remaining);
+    if (c.prev === lane.to && c.s < NODE_R) return this.uturnPos({ ...lane, from: lane.to, to: lane.from, offset: c.prevOffset }, lane.offset, NODE_R + c.s);
+    // Junction or bend: a Bezier arc over the last / first NODE_R or so of the two lanes (exit is stale for a tick after a hand-off)
     const nl = c.exit;
-    if (nl && next === nl.to && next !== lane.from && lane.to.control !== 'roundabout') {
+    if (nl && next === nl.to && next !== lane.from) {
       const q = this.arcPos(lane.from, lane.to, nl.to, lane.offset, nl.offset, -remaining);
       if (q) return q;
     }
-    if (c.prev && c.prev !== lane.to && lane.from.control !== 'roundabout') {
+    if (c.prev && c.prev !== lane.to) {
       const q = this.arcPos(c.prev, lane.from, lane.to, c.prevOffset, lane.offset, c.s);
       if (q) return q;
     }
     const B = 2 * NODE_R;
     let off = lane.offset;
-    if (nl && next === nl.to && remaining < B && lane.to.control !== 'roundabout') off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
-    if (c.prev && c.s < B && lane.from.control !== 'roundabout') off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
-    // roundabouts: the ring is a single lane at LANE_OFFSET, so outer lanes slide inward before entering / after leaving it
-    if (ti && remaining < ti + B) off += (LANE_OFFSET - lane.offset) * (1 - (remaining - ti) / B);
-    if (fi && c.s < fi + B) off += (LANE_OFFSET - lane.offset) * (1 - (c.s - fi) / B);
+    if (nl && next === nl.to && remaining < B) off += (nl.offset - lane.offset) * 0.5 * (1 - remaining / B);
+    if (c.prev && c.s < B) off += (c.prevOffset - lane.offset) * 0.5 * (1 - c.s / B);
     if (!c.lc) return this.lanePos(lane, c.s, off);
     // mid-edge lane change: smoothstep slide from the old lane, nose turned along the sideways speed
     const u = c.lc / LC_S, q = this.lanePos(lane, c.s, off + c.lcOff * u * u * (3 - 2 * u));
@@ -298,9 +324,10 @@ export class RoadGraph {
   }
 
   // Cubic Bezier across node n from lane a->n (offset oi) onto n->b (offset oo); x = signed distance past n, the arc spans |x| <= r
-  // (NODE_R on single-lane roads).
+  // (NODE_R on single-lane roads; half a ring's chord).
   // Its ends sit where the straight lane's halfway offset blend is, tangent to the lanes, so the hand-off is seamless.
-  // ponytail: ignores the roundabout / next-node blends that only reach the ends on edges under ~3 NODE_R; a glitch there is cosmetic
+  // A left turn at a junction bows LANE_OFFSET toward the inside of the turn, so two opposite lefts pass each other side by side.
+  // ponytail: ignores the next-node blends that only reach the ends on edges under ~3 NODE_R; a glitch there is cosmetic
   private arcPos(a: Node, n: Node, b: Node, oi: number, oo: number, x: number): { x: number; y: number; angle: number } | null {
     // outer lanes of wide roads start the arc earlier, or a turn from one onto an inner lane is a hook
     const la = dist(a, n), r = Math.min(NODE_R + Math.max(Math.abs(oi), Math.abs(oo)) - LANE_OFFSET, 2 * NODE_R, la / 2, dist(n, b) / 2);
@@ -311,8 +338,15 @@ export class RoadGraph {
     const t = (x + r) / (2 * r), m = 1 - t, d = Math.hypot(Q.x - P.x, Q.y - P.y) * 0.4;
     const x1 = P.x + Math.cos(P.angle) * d, y1 = P.y + Math.sin(P.angle) * d, x2 = Q.x - Math.cos(Q.angle) * d, y2 = Q.y - Math.sin(Q.angle) * d;
     const bz = (p0: number, p1: number, p2: number, p3: number) => m * m * m * p0 + 3 * m * t * (m * p1 + t * p2) + t * t * t * p3;
-    const dz = (p0: number, p1: number, p2: number, p3: number) => m * m * (p1 - p0) + 2 * m * t * (p2 - p1) + t * t * (p3 - p2);
-    return { x: bz(P.x, x1, x2, Q.x), y: bz(P.y, y1, y2, Q.y), angle: Math.atan2(dz(P.y, y1, y2, Q.y), dz(P.x, x1, x2, Q.x)) };
+    const dz = (p0: number, p1: number, p2: number, p3: number) => 3 * (m * m * (p1 - p0) + 2 * m * t * (p2 - p1) + t * t * (p3 - p2));
+    // the bow: 16 t^2 m^2 (flat at both ends, so the heading stays continuous) along the inside of the turn
+    let wx = 0, wy = 0;
+    if (n.edges.length > 2 && !onRing(n) && turnAt(a, n, b) < 0) {
+      const ux = Math.cos(Q.angle) - Math.cos(P.angle), uy = Math.sin(Q.angle) - Math.sin(P.angle), k = LANE_OFFSET / (Math.hypot(ux, uy) || 1);
+      wx = ux * k; wy = uy * k;
+    }
+    const w = 16 * t * t * m * m, dw = 32 * t * m * (m - t);
+    return { x: bz(P.x, x1, x2, Q.x) + wx * w, y: bz(P.y, y1, y2, Q.y) + wy * w, angle: Math.atan2(dz(P.y, y1, y2, Q.y) + wy * dw, dz(P.x, x1, x2, Q.x) + wx * dw) };
   }
 
   // Left turn from lane l (offset l.offset) onto the opposite lane (offset oo), NODE_R before l.to; p = 0..2*NODE_R
@@ -320,17 +354,6 @@ export class RoadGraph {
     const t = Math.PI * Math.min(1, p / (2 * NODE_R)), r = (l.offset + oo) / 2;
     const q = this.lanePos(l, l.edge.length - NODE_R + r * Math.sin(t), (l.offset - oo) / 2 + r * Math.cos(t));
     return { ...q, angle: q.angle - t };
-  }
-
-  // Counter-clockwise (on screen) around n from the 'from' approach to the 'to' exit; p = straight-line progress 0..2*ringIn
-  private ringPos(n: Node, from: Node, to: Node, p: number): { x: number; y: number; angle: number } {
-    const R = ringR(n), d = Math.asin(LANE_OFFSET / R);
-    const a = Math.atan2(from.y - n.y, from.x - n.x) - d;
-    const b = Math.atan2(to.y - n.y, to.x - n.x) + d;
-    let arc = (a - b) % (Math.PI * 2);
-    if (arc <= 0) arc += Math.PI * 2;
-    const ang = a - arc * (p / (2 * ringIn(n)));
-    return { x: n.x + Math.cos(ang) * R, y: n.y + Math.sin(ang) * R, angle: ang - Math.PI / 2 };
   }
 
   // A node takes a road of this level when all its roads are on it (a ramp joint, on two levels, takes none); doors take ground roads
@@ -350,8 +373,7 @@ export class RoadGraph {
     for (const n of this.nodes) {
       if (level !== undefined && !this.nodeLevelOk(n, level)) continue;
       if (!n.building && n.edges.length && n.edges.every(e => this.hidden.has(e))) continue;
-      // a roundabout is hit anywhere on its ring
-      const d = dist(p, n) - (n.control === 'roundabout' ? ringR(n) - NODE_R : 0);
+      const d = dist(p, n);
       if (d <= (n.building ? DOOR_R : r) && d < bestD) { best = n; bestD = d; }
     }
     return best;
@@ -381,9 +403,10 @@ export class RoadGraph {
     return out.sort((p, q) => p.t - q.t);
   }
 
-  // via: the edge a car arrives by; the road's own traffic passes a driveway junction like a bend (only held for a merge)
+  // via: the edge a car arrives by; the road's own traffic passes a driveway junction like a bend (only held for a merge), ring
+  // traffic passes an arm's node
   needsControl(n: Node, via?: Edge | null): boolean {
-    return (n.edges.length >= 3 || n.control !== 'none') && !(via && !via.drive && this.drivewayJunction(n));
+    return (n.edges.length >= 3 || n.control !== 'none') && !(via && !via.drive && this.drivewayJunction(n)) && !via?.ring;
   }
 
   // A plain node where driveways meet one road (two road arms): driveway cars merge (update), the road does not stop for it
@@ -407,14 +430,18 @@ export class RoadGraph {
     return n.queue.some(m => m.wait > MERGE_S && this.meets(m, n, via, true) && (via !== m.exit?.edge || this.fits(n, m)));
   }
 
-  // A road car in m's way at driveway junction n: in the box, or reaching it before it could stop plus 'margin' px (the merge gap).
+  // A road car in m's way at driveway junction n: in the box, or reaching it before it could stop (with its gap and reaction) plus
+  // 'margin' px (the merge gap).
   // Looks back over driveway junctions and bends up to 150px, since a home-lined road is cut into ~40px links.
   private roadNear(n: Node, m: Car, margin: (c: Car) => number): boolean {
+    const reach = (c: Car, d: number): boolean => d < stopDist(n) + c.speed * c.speed / (2 * BRAKE) + margin(c);
     const near = (l: Lane, d: number): boolean => {
       const c = l.cars[l.cars.length - 1];
-      if (c) return d + l.edge.length - c.s < stopDist(n) + c.speed * c.speed / (2 * BRAKE) + margin(c);
+      if (c) return reach(c, d + l.edge.length - c.s);
       const p = l.from, back = p.edges.filter(x => !x.drive && x !== l.edge);
       d += l.edge.length;
+      // a car granted onto l at its far end (one leaving its driveway there) is about to be on it
+      for (const o of p.occupants) if (o.granted === p && o.exit === l && reach(o, d)) return true;
       return d < 150 && !p.building && p.control === 'none' && back.length === 1 && back[0].lanes.some(x => x.to === p && near(x, d));
     };
     for (const e of n.edges) {
@@ -452,14 +479,64 @@ export class RoadGraph {
   }
 
   // Don't block the box: the exit lane needs the car's length of room past the junction, after the cars already granted into it.
-  // A driveway car only needs room past the node: the road does not keep a driveway junction's box clear.
+  // A driveway or ring entry only needs room past the node: the road does not keep its box clear.
+  // Two lanes never feed one exit lane at once: a car granted into it from another lane enters first (else they meet in the box).
   private fits(n: Node, c: Car): boolean {
     const l = c.exit;
     if (!l) return false;
     const f = l.cars[0];
-    let room = (f ? f.s - f.len / 2 : Infinity) - (this.drivewayJunction(n) ? 0 : CAR_LEN / 2 + stopDist(n));
-    for (const o of n.occupants) if (o.granted === n && o.exit === l) room -= o.len + GAP;
+    let room = (f ? f.s - f.len / 2 : Infinity) - (this.drivewayJunction(n) || onRing(n) ? 0 : CAR_LEN / 2 + stopDist(n));
+    for (const o of n.occupants) {
+      if (o.granted !== n || o.exit !== l) continue;
+      if (o.lane !== c.lane) return false;
+      room -= o.len + GAP;
+    }
     return room >= c.len + GAP;
+  }
+
+  // Ring traffic at arm node n for entering car m: a car still to pass n on the ring (one leaving there never meets m) reaching it
+  // before it could stop plus MERGE_GAP s past m's own time to the node, or the rear of one just past it. No courtesy merge: held
+  // ring traffic would gridlock the ring.
+  private ringNear(n: Node, m: Car): boolean {
+    const f = this.ringLane(n, false).cars[0], te = (m.lane.edge.length - m.s) / Math.max(m.speed, 20);
+    if (f && f.s - f.len / 2 < NODE_R) return true;
+    const reach = (c: Car, d: number): boolean => d < NODE_R + c.speed * c.speed / (2 * BRAKE) + c.speed * (MERGE_GAP + te) + CAR_LEN;
+    for (let l = this.ringLane(n, true), d = 0; d < 250; l = this.ringLane(l.from, true)) {
+      for (let i = l.cars.length - 1; i >= 0; i--) if (this.passes(l.cars[i], n)) return reach(l.cars[i], d + l.edge.length - l.cars[i].s);
+      d += l.edge.length;
+      if (l.from === n) break;
+      // a car granted in at l's start is about to be on the ring
+      for (const o of l.from.occupants) if (o.granted === l.from && this.passes(o, n)) return reach(o, d + o.lane.edge.length - o.s);
+    }
+    return false;
+  }
+
+  // The ring lane into (or out of) ring node v
+  private ringLane(v: Node, into: boolean): Lane {
+    return v.edges.find(e => e.ring && (into ? e.b : e.a) === v)!.lanes[0];
+  }
+
+  // Ring car c keeps on the ring past n; an unknown route counts as yes
+  private passes(c: Car, n: Node): boolean {
+    const p = c.path, i = p ? p.indexOf(n) : 0;
+    return !p || (i >= 0 && i + 1 < p.length && !!this.edgeBetween(n, p[i + 1])?.ring);
+  }
+
+  // Room for c in the road it leaves the ring by, after the ring cars heading there: a blocked exit holds cars at the entry, not on
+  // the ring. ponytail: cars granted at other entries don't count; a jam there only stalls the ring until REROUTE_S
+  private exitRoom(n: Node, c: Car): boolean {
+    const p = c.path, r = this.ringOf(n);
+    if (!p || !r) return true;
+    let j = 0;
+    while (j + 1 < p.length && this.edgeBetween(p[j], p[j + 1])?.ring) j++;
+    const x = p[j], q = p[j + 1], e = q && this.edgeBetween(x, q);
+    if (!j || !e) return true;
+    let need = c.len + GAP;
+    for (const v of r.nodes) for (const o of this.ringLane(v, true).cars) {
+      const i = o.path?.indexOf(x) ?? -1;
+      if (i >= 0 && o.path![i + 1] === q) need += o.len + GAP;
+    }
+    return this.lanesFrom(e, x).some(l => (l.cars[0] ? l.cars[0].s - l.cars[0].len / 2 : Infinity) >= need);
   }
 
   update(dt: number): void {
@@ -482,10 +559,10 @@ export class RoadGraph {
       }
       if (!n.queue.length) continue;
       // Arrival order; lights and the main road of a yield junction admit every car their signal lets go, a plain junction every car
-      // whose path crosses none in the box, the roundabout up to its size's cap (RINGS), the rest 1. A car that can't go holds back the cars queued behind
+      // whose path crosses none in the box, the rest 1 (a ring entry: into a gap). A car that can't go holds back the cars queued behind
       // it in its lane.
-      const dj = this.drivewayJunction(n), plain = n.control === 'none' && !dj;
-      const cap = n.control === 'light' || n.control === 'yield' || plain ? Infinity : n.control === 'roundabout' ? RINGS[n.ring].cap : 1;
+      const dj = this.drivewayJunction(n), rv = onRing(n), plain = n.control === 'none' && !dj && !rv;
+      const cap = n.control === 'light' || n.control === 'yield' || plain ? Infinity : 1;
       // Approach and movement of every car queued at or granted into n (plan nodes only)
       const mv = new Map<Car, [number, Move]>();
       if (plan) for (const c of [...n.queue, ...n.occupants]) if (c.exit && c.lane.to === n) mv.set(c, [approachOf(plan, n, c.lane.edge), moveOf(n, c.lane.edge, c.exit.edge)]);
@@ -520,6 +597,7 @@ export class RoadGraph {
           if (main.includes(c.lane.edge)) return !side && (x![1] === LEFT ? left(c, x![0]) : !lefty(oppositeOf(plan!, x![0])));
           return !n.occupants.size && (starving(c) || !n.queue.some(o => o !== c && main.includes(o.lane.edge)));
         }
+        if (rv) return !this.ringNear(n, c) && this.exitRoom(n, c);
         // stop: only from a standstill at the line
         if (n.control === 'stop') return c.speed < 1 && c.lane.edge.length - c.s - stopDist(n) < GAP + 3;
         // driveway: into a gap in the road's traffic; after MERGE_S the road keeps clear (held) and only cars that can't stop count
@@ -540,6 +618,77 @@ export class RoadGraph {
         return false;
       });
     }
+  }
+
+  ringOf(n: Node): Ring | null {
+    return n.edges.find(e => e.ring)?.ring ?? this.rings.find(r => r.hub === n) ?? null;
+  }
+  // The ring drawn under p (pad px of slack round its outer edge)
+  ringAt(p: Vec, pad = 0): Ring | null {
+    return this.rings.find(r => dist(p, r.hub) <= ringOut(r.hub.ring) + pad) ?? null;
+  }
+  // The ring whose clear radius p is inside
+  nearRing(p: Vec): Ring | null {
+    return this.rings.find(r => dist(p, r.hub) < clearR(r.hub.ring)) ?? null;
+  }
+
+  // Replaces junction n with a ring of this size (Game.ringRoom checks the fit): each arm, followed through its bends, is cut where it
+  // crosses the ring, its inner piece removed, and the cut points joined round by ring edges of about one chord (RINGS n), so the
+  // arms sit exactly on ring nodes. Null (and nothing changed) when an arm meets a junction, door or dead end inside the ring.
+  buildRing(n: Node, size: RingSize, day: number): { ring: Ring; cars: Car[] } | null {
+    const R = RINGS[size].r, other = (e: Edge, v: Node) => e.a === v ? e.b : e.a;
+    const plain = (v: Node) => !v.building && v.control === 'none' && v.edges.length === 2;
+    const arms: { inner: Edge[]; e: Edge; at: Node; o: Node }[] = [];
+    for (const e0 of n.edges) {
+      let at = n, e = e0;
+      const inner: Edge[] = [];
+      while (dist(other(e, at), n) < R && plain(other(e, at))) {
+        inner.push(e);
+        at = other(e, at);
+        e = at.edges[0] === e ? at.edges[1] : at.edges[0];
+      }
+      if (dist(other(e, at), n) < R) return null;
+      arms.push({ inner, e, at, o: other(e, at) });
+    }
+    const cars: Car[] = [], cuts: Node[] = [];
+    for (const { inner, e, at, o } of arms) {
+      // where at->o crosses the circle: |at + t (o - at) - n| = R
+      const dx = o.x - at.x, dy = o.y - at.y, fx = at.x - n.x, fy = at.y - n.y, A = dx * dx + dy * dy, B = fx * dx + fy * dy;
+      const t = (-B + Math.sqrt(Math.max(0, B * B - A * (fx * fx + fy * fy - R * R)))) / A, p = { x: at.x + dx * t, y: at.y + dy * t };
+      const v = dist(p, o) < 1 ? o : this.splitEdge(e, p);
+      inner.push(v === o ? e : this.edgeBetween(at, v)!);
+      for (const x of inner) cars.push(...this.removeEdge(x));
+      cuts.push(v);
+    }
+    // counter-clockwise on screen = falling angle; each arc between two arms split into whole chords
+    const ang = (v: Vec) => Math.atan2(v.y - n.y, v.x - n.x), step = 2 * Math.PI / RINGS[size].n, nodes: Node[] = [];
+    cuts.sort((p, q) => ang(q) - ang(p));
+    cuts.forEach((v, i) => {
+      nodes.push(v);
+      let arc = ang(v) - ang(cuts[(i + 1) % cuts.length]);
+      if (arc <= 1e-9) arc += 2 * Math.PI;
+      const k = Math.max(1, Math.round(arc / step));
+      for (let j = 1; j < k; j++) { const a = ang(v) - arc * j / k; nodes.push(this.addNode(n.x + Math.cos(a) * R, n.y + Math.sin(a) * R)); }
+    });
+    const hub = this.node(n.x, n.y), ring: Ring = { hub, nodes };
+    Object.assign(hub, { control: 'roundabout', ring: size, controlDay: day });
+    nodes.forEach((v, i) => this.addEdge(v, nodes[(i + 1) % nodes.length], { bridge: false, tunnel: false, level: 0, type: RING_TYPE, ring }, day));
+    this.rings.push(ring);
+    return { ring, cars };
+  }
+
+  // Takes the ring out: a plain node at its centre joined to each arm by a spoke of the arm's type (keeping a one-way arm's direction).
+  // Returns that node and the cars taken off the ring.
+  removeRing(r: Ring): { node: Node; cars: Car[] } {
+    const c = this.addNode(r.hub.x, r.hub.y), cars: Car[] = [];
+    for (const v of r.nodes) for (const a of v.edges.filter(e => !e.ring)) {
+      const out = a.type.oneWay && a.a === v;
+      this.addEdge(out ? c : v, out ? v : c, { bridge: a.bridge, tunnel: a.tunnel, level: a.level, type: a.type }, a.day);
+    }
+    for (const v of r.nodes) for (const e of [...v.edges]) if (e.ring) cars.push(...this.removeEdge(e));
+    this.rings = this.rings.filter(x => x !== r);
+    this.dropIfOrphan(c);
+    return { node: c, cars };
   }
 
   detachCar(c: Car): void {

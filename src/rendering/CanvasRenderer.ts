@@ -1,10 +1,10 @@
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, RINGS, ringR, roadWidth } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, onRing, ringOut, roadWidth } from '../network/RoadGraph.ts';
 import { approachOf, autoMasks, inLanes, laneMasks, links, mainEdges, moveOf, planOf } from '../network/Junction.ts';
 import { curve, editable, linkUI, linksOf, handles, targets } from '../ui/LaneLinks.ts';
-import type { Edge, Node, RoadType } from '../network/RoadGraph.ts';
+import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Car } from '../entities/Car.ts';
 import type { Game, PathPlan, PathSeg } from '../core/Game.ts';
@@ -38,13 +38,13 @@ const SMOG = '#9A6B2F';
 // Sidewalk paving and its outer kerb (street, avenue, boulevard); driveways in concrete; paint near junctions
 const WALK = '#EFECE5', KERB = '#CBC6BA', PAINT = '#B9B9B4', GRANITE = '#B3AEA2', JOINT = '#D9D4C9';
 // a busy junction gets zebras too: a light, or four roads or more
-const zebraAt = (n: Node): boolean => n.control === 'light' || (n.control !== 'roundabout' && n.edges.filter(e => !e.drive).length >= 4);
+const zebraAt = (n: Node): boolean => n.control === 'light' || (!onRing(n) && n.edges.filter(e => !e.drive).length >= 4);
 // stable 0..1 per world spot, for the scattered details
 const hash01 = (x: number, y: number): number => ((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1 + 1) % 1;
 const DRIVE = { out: '#BDB6A6', fill: '#E3DED3' };
 const walked = (e: Edge): boolean => !e.drive && !e.bridge && !e.tunnel && (e.type.tier === 'street' || e.type.tier === 'avenue' || e.type.tier === 'boulevard');
 // A junction that gets paint: 3+ roads, or a sign or light (a driveway junction is a bend for the road's traffic)
-const junction = (n: Node): boolean => !n.building && n.control !== 'roundabout' && (n.control !== 'none' || n.edges.filter(e => !e.drive).length >= 3);
+const junction = (n: Node): boolean => !n.building && (n.control !== 'none' || n.edges.filter(e => !e.drive).length >= 3);
 // Heat map: free flow -> slow -> jammed
 const HEAT: [number, number, number][] = [[0x4C, 0xC2, 0x6A], [0xE0, 0xA1, 0x00], [0xE5, 0x48, 0x4D]];
 export const heatColor = (h: number): string => {
@@ -277,7 +277,7 @@ export class CanvasRenderer {
     }
 
     // Junction open in the Edit panel
-    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, NODE_R + 26, ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
+    if (game.inspect) { ctx.globalAlpha = 0.5; this.ring(game.inspect.x, game.inspect.y, hubR(game.inspect), ACCENT, 2); ctx.globalAlpha = 1; this.linkEditor(game.inspect); }
     if (game.picked) this.outlineB(game.picked, ACCENT, 6);
     // the building being moved still stands where it was until it is set down; the one a Demolish click armed
     if (game.moving) { ctx.setLineDash([5, 4]); this.outlineB(game.moving, ACCENT, 6); ctx.setLineDash([]); }
@@ -460,7 +460,7 @@ export class CanvasRenderer {
       const main = this.ctx;
       this.ctx = c.getContext('2d')!;
       this.ctx.setTransform(s, 0, 0, s, -x * s, -y * s);
-      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0);
+      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0, game.graph.rings);
       this.ctx = main;
       r = this.roads = { key, t: game.terrain, s, x, y, w, h, c };
     }
@@ -469,7 +469,7 @@ export class CanvasRenderer {
 
   // Ground roads: bridge decks, kerbs, sidewalks with paving joints, boulevard verges, the asphalt (tier outline, fill, grain, tyre
   // wear, repairs, cracks), markings, details, then the static junction paint (islands, stop lines, zebras, signs)
-  private paintRoads(terrain: Game['terrain'], ground: Edge[], nodes: Node[], nodes0: Node[]): void {
+  private paintRoads(terrain: Game['terrain'], ground: Edge[], nodes: Node[], nodes0: Node[], rings: Ring[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -481,11 +481,7 @@ export class CanvasRenderer {
     const band = (col: (e: Edge) => string, extra: (e: Edge) => number, only: (e: Edge) => boolean, edgesOnly = false): void => {
       for (const e of ground) if (walked(e) && only(e)) this.line(e, col(e), e.width + extra(e));
       if (edgesOnly) return;
-      for (const [n, j] of walkJ) {
-        if (!only(j)) continue;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), col(j), ROAD_W + extra(j));
-        else this.circle(n.x, n.y, (j.width + extra(j)) / 2, col(j));
-      }
+      for (const [n, j] of walkJ) if (only(j)) this.circle(n.x, n.y, (j.width + extra(j)) / 2, col(j));
     };
     const all = (): boolean => true;
     band(e => e.type.tier === 'street' ? KERB : GRANITE, kerbX, all);
@@ -512,15 +508,14 @@ export class CanvasRenderer {
       for (const e of ground) if (!(extra && e.bridge)) this.line(e, col(e.drive ? DRIVE[key] : TIERS[e.type.tier][key]), e.width + extra - (e.drive ? 4 : 0));
       for (const n of joints) {
         const j = jointEdge(n, 0), color = col(j?.drive ? DRIVE[key] : TIERS[j?.type.tier ?? 'street'][key]);
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), color, ROAD_W + extra);
-        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
+        this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra - (j?.drive ? 4 : 0)) / 2, color);
       }
     };
     pass('out', 3);
     pass('fill', 0);
-    // markings stop outside a roundabout's ring, and at the edge of a junction's box
+    // markings stop at the edge of a junction's box
     const cut = (n: Node, o: Node): Vec => {
-      const d = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 : junction(n) ? Math.max(...n.edges.map(x => x.drive || x.a === o || x.b === o ? 0 : x.width / 2 + 1)) : 0;
+      const d = junction(n) ? Math.max(...n.edges.map(x => x.drive || x.a === o || x.b === o ? 0 : x.width / 2 + 1)) : 0;
       if (!d) return n;
       const k = Math.min(0.5, d / (Math.hypot(o.x - n.x, o.y - n.y) || 1));
       return { x: n.x + (o.x - n.x) * k, y: n.y + (o.y - n.y) * k };
@@ -528,7 +523,7 @@ export class CanvasRenderer {
     // wear: tyre tracks down each lane, now and then a repair patch or a crack
     ctx.lineCap = 'butt';
     for (const e of ground) {
-      if (e.drive || e.type.tier === 'dirt') continue;
+      if (e.drive || e.ring || e.type.tier === 'dirt') continue;
       const ux = (e.b.x - e.a.x) / e.length, uy = (e.b.y - e.a.y) / e.length, A = cut(e.a, e.b), B = cut(e.b, e.a);
       const at = (s: number, o: number): Vec => ({ x: e.a.x + ux * s - uy * o, y: e.a.y + uy * s + ux * o });
       const s0 = Math.hypot(A.x - e.a.x, A.y - e.a.y) + 4, s1 = e.length - Math.hypot(B.x - e.b.x, B.y - e.b.y) - 4;
@@ -561,9 +556,10 @@ export class CanvasRenderer {
     }
     ctx.lineCap = 'round';
 
-    for (const e of ground) if (!e.drive) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
-    this.details(ground);
+    for (const e of ground) if (!e.drive && !e.ring) this.markings(cut(e.a, e.b), cut(e.b, e.a), e.type);
+    this.details(ground.filter(e => !e.ring));
     this.controls(nodes0, 'static');
+    for (const r of rings) this.island(r);
   }
 
   // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
@@ -641,9 +637,9 @@ export class CanvasRenderer {
         below(game.armed === b ? `Click again: ${who}` : `Demolish ${ZONES[b.kind].label.toLowerCase()}${game.creative ? '' : ` · back to the tray · ${fmtMoney(game.moveCost)}`}`, b, RED);
         return;
       }
-      const n = g.nearestNode(p, NODE_R + 4);
+      const n = g.ringAt(p, 4)?.hub ?? g.nearestNode(p, NODE_R + 4);
       if (n && n.control !== 'none') {
-        this.ring(n.x, n.y, n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 6, RED, 3);
+        this.ring(n.x, n.y, n.control === 'roundabout' ? ringOut(n.ring) + 2 : NODE_R + 6, RED, 3);
         label(`Remove ${CONTROL_LABEL[n.control].toLowerCase()} · +${fmtMoney(game.controlRefund(n))}`, n.x, n.y, RED);
         return;
       }
@@ -658,15 +654,15 @@ export class CanvasRenderer {
       this.line(e, TIERS[e.type.tier].fill, e.width);
       label(`Demolish · +${fmtMoney(game.refundOf(e))}`, hit.point.x, hit.point.y, RED);
     } else if (game.tool === 'light' || game.tool === 'roundabout') {
-      const n = g.nearestNode(p, NODE_R + 6);
+      const r = g.ringAt(p, 4), n = r?.hub ?? g.nearestNode(p, NODE_R + 6);
       if (!n) return;
       const kind = game.tool === 'light' ? 'light' : 'roundabout';
       const cost = game.controlPrice(kind) - game.controlRefund(n), ring = kind === 'roundabout';
       const here = n.control === kind && (!ring || n.ring === game.ringSize);
-      const reason = n.building || n.edges.length < 3 ? 'Needs an intersection (3+ roads)'
+      const reason = n.building || (!r && n.edges.length < 3) ? 'Needs an intersection (3+ roads)'
         : ring && !here && game.ringRoom(n, game.ringSize) || (!here && cost > game.money ? 'Not enough money' : null);
       // a roundabout previews the ring of the chosen size
-      this.ring(n.x, n.y, ring ? RINGS[game.ringSize].r + ROAD_W / 2 + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
+      this.ring(n.x, n.y, ring ? ringOut(game.ringSize) + 2 : NODE_R + 6, reason ? RED : GREEN, 3);
       const what = !ring ? 'Place traffic light' : `${n.control === kind ? 'Resize to' : 'Place'} ${RINGS[game.ringSize].label.toLowerCase()} roundabout`;
       const place = here ? 'Already here' : `${what} · ${cost < 0 ? '+' : ''}${fmtMoney(Math.abs(cost))}`;
       label(reason ? '⚠ ' + reason : place, n.x, n.y, reason ? RED : '#2E8B4A');
@@ -682,7 +678,7 @@ export class CanvasRenderer {
       // the picked junction (or the one under the cursor); its reason when no ghost can be drawn
       const n = game.ichg?.node ?? game.junctionAt(p);
       if (!n) { label('Click a junction of 3 or 4 roads', p.x, p.y, DARK); return; }
-      this.ring(n.x, n.y, NODE_R + 26, preview?.ok ? GREEN : RED, 2);
+      this.ring(n.x, n.y, hubR(n), preview?.ok ? GREEN : RED, 2);
       if (!preview) label('⚠ Needs a junction of 3 or 4 roads', n.x, n.y, RED);
       else if (!preview.segs.length) label('⚠ ' + preview.reason, n.x, n.y, RED);
       else if (!game.ichg) label('Click to pick an interchange', n.x, n.y + 18, ACCENT);
@@ -699,8 +695,8 @@ export class CanvasRenderer {
       }
       const j = game.junctionAt(p);
       if (j) {
-        this.ring(j.x, j.y, NODE_R + 26, ACCENT, 1.5);
-        label('Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
+        this.ring(j.x, j.y, hubR(j), ACCENT, 1.5);
+        label(j.control === 'roundabout' ? 'Click to edit roundabout: size, control' : 'Click to edit junction: control, phases, lanes', j.x, j.y, ACCENT);
         return;
       }
       const b = game.buildingUnder(p);
@@ -1041,20 +1037,15 @@ export class CanvasRenderer {
     ctx.lineCap = 'round';
   }
 
-  // Intersection markings (stop lines), roundabout islands and traffic lights
-  // part: 'static' (islands, stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
+  // Intersection markings (stop lines) and traffic lights
+  // part: 'static' (stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
   private controls(nodes: Node[], part: 'static' | 'live' | 'all'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
-      if (part !== 'static' && (n.control === 'roundabout' || junction(n))) {
-        if (n.control === 'light') this.drawLights(n);
-      }
-      if (part === 'live') continue;
-      if (n.control === 'roundabout') this.island(n);
-      if (n.control !== 'roundabout' && !junction(n)) continue;
-      // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way or a plain junction. ponytail: on
-      // roundabouts it goes outside the ring (at NODE_R+4 it would fall inside it)
-      const d0 = n.control === 'roundabout' ? ringR(n) + ROAD_W / 2 + 2 : NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
+      if (part !== 'static' && n.control === 'light') this.drawLights(n);
+      if (part === 'live' || !junction(n)) continue;
+      // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way, a plain junction or a ring entry
+      const d0 = NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
       // a light's zebra starts past the widest road crossing the arm, its stop line just behind it. ponytail: cars still stop at
       // stopDist, so on a street meeting an avenue they halt a few px past the line
       const zb = zebraAt(n);
@@ -1066,7 +1057,7 @@ export class CanvasRenderer {
       ctx.lineCap = 'butt';
       ctx.beginPath();
       for (const e of n.edges) {
-        if (e.drive || (e.type.oneWay && e.a === n)) continue;
+        if (e.drive || e.ring || (e.type.oneWay && e.a === n)) continue;
         const [ux, uy] = this.dir(n, e), d = at(e);
         const x = n.x + ux * d, y = n.y + uy * d, h = e.width / 2 - 0.5, h0 = e.type.oneWay ? -h : TIERS[e.type.tier].median / 2;
         ctx.moveTo(x + uy * h0, y - ux * h0);
@@ -1095,8 +1086,8 @@ export class CanvasRenderer {
   }
 
   // Roundabout centre: a cobbled truck apron, a kerb, a planted island with a flower bed, shrubs round it and a tree in the middle
-  private island(n: Node): void {
-    const ctx = this.ctx, R = ringR(n) - ROAD_W / 2, g = shade(this.land, -0.12);
+  private island(ring: Ring): void {
+    const ctx = this.ctx, n = ring.hub, R = RINGS[n.ring].r - RING_W / 2, g = shade(this.land, -0.12);
     this.circle(n.x, n.y, R, '#D9D3C5');
     ctx.setLineDash([1.2, 1.2]);
     this.ring(n.x, n.y, R - 1.3, '#C4BDAD', 1.4);
@@ -1166,8 +1157,7 @@ export class CanvasRenderer {
     const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
         const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
-        if (n.control === 'roundabout') this.ring(n.x, n.y, ringR(n), c, ROAD_W + extra);
-        else this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
+        this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
     for (const e of edges) this.line(e, BRIDGE, e.width + 5);
@@ -1403,11 +1393,15 @@ export class CanvasRenderer {
     ctx.stroke();
   }
 
+  // a ring road edge is drawn as its arc of the circle
   private line(e: Edge, color: string | CanvasPattern, width: number): void {
-    const ctx = this.ctx;
+    const ctx = this.ctx, r = e.ring?.hub;
     ctx.beginPath();
-    ctx.moveTo(e.a.x, e.a.y);
-    ctx.lineTo(e.b.x, e.b.y);
+    if (r) ctx.arc(r.x, r.y, RINGS[r.ring].r, Math.atan2(e.a.y - r.y, e.a.x - r.x), Math.atan2(e.b.y - r.y, e.b.x - r.x), true);
+    else {
+      ctx.moveTo(e.a.x, e.a.y);
+      ctx.lineTo(e.b.x, e.b.y);
+    }
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.stroke();
@@ -1524,7 +1518,7 @@ export class CanvasRenderer {
   private arrowsOf(n: Node, e: Edge): number[] | null {
     const p = n.plan, k = inLanes(n, e);
     if (p && (laneMasks(p, n, e) || p.ban[approachOf(p, n, e)].some(Boolean))) return links(p, n, e);
-    return k > 1 && n.control !== 'roundabout' ? autoMasks(k) : null;
+    return k > 1 && !onRing(n) ? autoMasks(k) : null;
   }
   // Lane connection editor (LaneLinks) of the junction open in the panel: a soft pad, the target zones on the roads out, a curve per
   // connection in its approach's colour (thicker hovered), the lane handles, and the line being dragged snapping onto a zone
@@ -1592,6 +1586,9 @@ export class CanvasRenderer {
     }
   }
 }
+
+// Highlight radius round a junction, or round a roundabout (its hub)
+const hubR = (n: Node): number => n.control === 'roundabout' ? ringOut(n.ring) + 8 : NODE_R + 26;
 
 // Joint disc: the widest non-tunnel road of that level meeting at the node sets its width and tier colour
 function jointEdge(n: Node, level: number): Edge | null {

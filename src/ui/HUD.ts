@@ -23,7 +23,7 @@ const TOOLS: Record<Tool, { label: string; tip: string }> = {
   road: { label: 'Road', tip: 'Click start, click end. Hold the end and drag to bend. V: straight or curved, Shift: straight once, Ctrl: 15° steps. Esc cancels.' },
   grid: { label: 'Grid', tip: 'Street grid: click a corner, click the end of the first side (any angle), then click how deep. Uses the road type; pick the block size beside it.' },
   light: { label: 'Light', tip: `Click an intersection (3+ roads). ${fmtMoney(T.LIGHT_COST)}, ${fmtMoney(T.LIGHT_UPKEEP)}/day. Edit it for phases and lane connections.` },
-  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring takes more cars at once and needs longer roads). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
+  roundabout: { label: 'Roundabout', tip: `Click an intersection; pick the size beside Build (a bigger ring is faster and takes more and wider roads, but needs more room). From ${fmtMoney(T.ROUNDABOUT_COST)}, ${fmtMoney(T.ROUNDABOUT_UPKEEP)}/day.` },
   interchange: { label: 'Interchange', tip: 'Click a junction to turn it into a diamond, cloverleaf (4 roads) or trumpet (3 roads). The ghost shows it and its price before you build.' },
   place: { label: 'Buildings', tip: 'Place buildings from the tray. Near a road they face it and get a free driveway; R turns a free one. Esc stops.' },
   edit: { label: 'Edit', tip: `Click a car to follow it, a building for its details, a junction for its control, light phases and lane connections (drag from a lane to a road), or a road to change its type. Drag a road to bend it, a building to move it (${fmtMoney(T.MOVE_COST)}).` },
@@ -65,7 +65,7 @@ function tierPic(t: Tier): string {
 }
 
 const GRID_SIZES = [3, 4, 6] as const;
-const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: ${RINGS[r].cap} cars at once${price ? ` · ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
+const ringTip = (r: number, price = true): string => `${RINGS[r].label} ring: up to ${RINGS[r].arms} roads, ${RINGS[r].lanes} lane${RINGS[r].lanes > 1 ? 's' : ''} each way${price ? ` · ${fmtMoney(T.ROUNDABOUT_COST * RINGS[r].cost)}` : ''}`;
 // one button per roundabout size; a = the data attribute it sets
 const ringBtns = (a: string, on: number): string => RINGS.map((x, r) =>
   `<button class="lane wide" ${a}="${r}" aria-pressed="${r === on}" data-tip="${ringTip(r)}"><small>${x.label}</small></button>`).join('');
@@ -136,7 +136,7 @@ const CONTROL_TIP: Record<Control, string> = {
   yield: 'Yield signs: the main road (highest tier) has right of way, side roads give way',
   stop: 'All-way stop: every car stops at the line, then one at a time',
   light: 'Traffic light: phases you can edit, protected lefts',
-  roundabout: 'Roundabout: several cars at once (more on a bigger ring), no stopping when it is clear',
+  roundabout: 'Roundabout: cars merge into gaps in the ring traffic, no stopping when it is clear',
 };
 const MOVES = ['Left', 'Straight', 'Right'];
 const PRESETS: [Preset, string, string][] = [

@@ -2,10 +2,10 @@ import type { Vec } from '../util/geom.ts';
 import { dist, distToSegment } from '../util/geom.ts';
 import type { Terrain } from '../world/MapGenerator.ts';
 import { WORLD, generateTerrain, inWater, inMountain, segmentCrosses, shoreSplits, findStarterTown } from '../world/MapGenerator.ts';
-import type { Control, Node, Edge, EdgeFlags, RingSize, RoadType } from '../network/RoadGraph.ts';
+import type { Control, Node, Edge, EdgeFlags, Lane, RingSize, RoadType } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
-import { clonePlan, planFits, planOf } from '../network/Junction.ts';
-import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, RINGS, ringStop, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
+import { clonePlan, edgeAngle, planFits, planOf } from '../network/Junction.ts';
+import { RoadGraph, TILE, ROAD_W, NODE_R, GAP, CAR_LEN, DEFAULT_TYPE, RINGS, clearR, onRing, ringOut, laneFactor, sameType, fitType, roadWidth } from '../network/RoadGraph.ts';
 import { cubicPoints, bendControls, autoControls } from '../util/curve.ts';
 import { findPath } from '../network/Pathfinder.ts';
 import { DOOR_D, DOOR_R, Building, buildingAt } from '../entities/Building.ts';
@@ -49,7 +49,7 @@ export const fmtMin = (secs: number): string => {
   return m < 59.5 ? `${Math.round(m)} min` : `${(m / 60).toFixed(1)} h`;
 };
 // What held a car up at node n: its control, 'none' for a plain junction, 'road' for a queue between junctions
-export const jamAt = (n: Node | null): Control | 'road' => !n || (n.control === 'none' && n.edges.length < 3) ? 'road' : n.control;
+export const jamAt = (n: Node | null): Control | 'road' => !n ? 'road' : onRing(n) ? 'roundabout' : n.control === 'none' && n.edges.length < 3 ? 'road' : n.control;
 export interface Snap { node: Node | null; edge: Edge | null; point: Vec }
 // Place tool ghost: road = where its driveway would join (null: no access road in reach); warn = what its residents will dislike
 export interface PlacePlan { b: Building; ok: boolean; reason: string; warn: string; road: Vec | null }
@@ -665,7 +665,10 @@ export class Game {
     const s = this.snapEnd(p);
     const cands: Vec[] = [];
     const push = (x: number, y: number) => { const l = Math.hypot(x, y); if (l) cands.push({ x: x / l, y: y / l }); };
-    if (s.node) {
+    // a road leaves a ring straight out from its centre
+    const r = s.node ? this.graph.ringOf(s.node) : s.edge?.ring;
+    if (r) push(s.point.x - r.hub.x, s.point.y - r.hub.y);
+    else if (s.node) {
       const n = s.node;
       for (const e of n.edges) {
         const o = e.a === n ? e.b : e.a;
@@ -768,7 +771,7 @@ export class Game {
   // An edited junction plan whose roads changed (an arm added, removed or turned past 15 degrees) goes back to the default
   private syncPlans(): void {
     for (const n of this.graph.nodes) if (n.plan && !planFits(n, n.plan)) { n.plan = null; this.say('Junction plan reset: its roads changed'); }
-    if (this.inspect && !this.graph.nodes.includes(this.inspect)) this.inspect = null;
+    if (this.inspect && !this.graph.nodes.includes(this.inspect) && !this.graph.rings.some(r => r.hub === this.inspect)) this.inspect = null;
     if (this.ichg && !this.graph.nodes.includes(this.ichg.node)) this.ichg = null;
   }
 
@@ -783,9 +786,9 @@ export class Game {
     return base * (1 + (f.bridge ? (T.BRIDGE_X - 1) * s.water : 0) + (f.tunnel ? (T.TUNNEL_X - 1) * s.mountain : 0));
   }
 
-  // A driveway is free as it stands, but priced in full when 'type' (a retype) is asked for
+  // A driveway is free as it stands, but priced in full when 'type' (a retype) is asked for; a ring road is part of its roundabout
   private edgePrice(e: Edge, type?: RoadType): number {
-    return !type && (e.drive || exitEdge(e)) ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
+    return e.ring ? 0 : !type && (e.drive || exitEdge(e)) ? 0 : this.price(e.a, e.b, { ...e, type: type ?? e.type });
   }
 
   // A road from a to b runs through a footprint grown by pad (by default up to DOOR_D - 2, so a road along the front still reaches a door)
@@ -807,11 +810,23 @@ export class Game {
     for (const b of this.buildings) {
       if (b.connected) continue;
       const door = b.node;
-      const hits = this.accessEdges().map(e => ({ e, ...distToSegment(door, e.a, e.b) })).filter(h => h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
+      // never inside a roundabout's clear radius: the nearest point along the road outside it (2px steps)
+      const clear = (h: { e: Edge; d: number; point: Vec; t: number }): typeof h | null => {
+        if (!g.nearRing(h.point)) return h;
+        let best: typeof h | null = null;
+        for (const k of [-1, 1]) for (let t = h.t; t >= 0 && t <= 1; t += k * 2 / h.e.length) {
+          const point = { x: h.e.a.x + (h.e.b.x - h.e.a.x) * t, y: h.e.a.y + (h.e.b.y - h.e.a.y) * t };
+          if (g.nearRing(point)) continue;
+          if (!best || dist(door, point) < best.d) best = { e: h.e, d: dist(door, point), point, t };
+          break;
+        }
+        return best;
+      };
+      const hits = this.accessEdges().map(e => clear({ e, ...distToSegment(door, e.a, e.b) })).filter((h): h is NonNullable<typeof h> => !!h && h.d <= T.ACCESS_R).sort((p, q) => p.d - q.d);
       hit: for (const h of hits) {
         // a road node within DRIVE_SNAP is joined rather than split beside: a stretch shorter than a truck between two junctions
         // locks both (don't block the box). ponytail: that stub runs at an angle, the place ghost still previews it square to the road
-        const snap = [h.e.a, h.e.b].filter(n => !n.building && dist(h.point, n) <= T.DRIVE_SNAP).sort((p, q) => dist(h.point, p) - dist(h.point, q))[0];
+        const snap = [h.e.a, h.e.b].filter(n => !n.building && !g.nearRing(n) && dist(h.point, n) <= T.DRIVE_SNAP).sort((p, q) => dist(h.point, p) - dist(h.point, q))[0];
         // never split beside a door: that cuts a zero-length stub off a road ending there
         const byDoor = [h.e.a, h.e.b].some(n => n.building && dist(h.point, n) <= NODE_R);
         if (!snap && byDoor) continue;
@@ -828,9 +843,9 @@ export class Game {
     this.version++;
   }
 
-  // Roads a driveway may join: ground, not a bridge or tunnel, not a driveway, an access tier
+  // Roads a driveway may join: ground, not a bridge or tunnel, not a driveway or ring, an access tier
   private accessEdges(): Edge[] {
-    return this.graph.edges.filter(e => e.level === 0 && !e.tunnel && !e.bridge && !e.drive && TIERS[e.type.tier].access);
+    return this.graph.edges.filter(e => e.level === 0 && !e.tunnel && !e.bridge && !e.drive && !e.ring && TIERS[e.type.tier].access);
   }
 
   private refundX(day: number): number {
@@ -852,7 +867,7 @@ export class Game {
   upkeepPerDay(): number {
     let sum = 0;
     for (const e of this.graph.edges) sum += this.edgePrice(e) * T.UPKEEP_RATE;
-    for (const n of this.graph.nodes) sum += CONTROL_UPKEEP[n.control] * (n.control === 'roundabout' ? RINGS[n.ring].cost : 1);
+    for (const n of [...this.graph.nodes, ...this.graph.rings.map(r => r.hub)]) sum += CONTROL_UPKEEP[n.control] * (n.control === 'roundabout' ? RINGS[n.ring].cost : 1);
     return sum * DIFFICULTY[this.cfg.difficulty].upkeep;
   }
 
@@ -950,6 +965,8 @@ export class Game {
     }
     if (!built) { plan.reason = 'Already exists'; return plan; }
     if (total < TILE / 2) return plan; // 'Too short'
+    const ring = this.ringBlock(list, plan.segs as SegPlan[], type);
+    if (ring) { plan.reason = ring; return plan; }
     if (blocked) { plan.reason = 'Too low for the mountain'; return plan; }
     const tunnel = (plan.segs as SegPlan[]).some(g => g.tunnel && !g.exists) ? this.lockOf('tunnel') : '';
     if (tunnel) { plan.reason = tunnel; return plan; }
@@ -959,6 +976,34 @@ export class Game {
     plan.reason = this.lockedMsg(type) || this.afford(plan.cost);
     plan.ok = !plan.reason;
     return plan;
+  }
+
+  // Why a path may not touch a roundabout ('' = fine): it joins a ring only at its ends, from outside, on a free spot, as one more arm
+  // the ring takes (ringRoom's rules); nothing else crosses the ring or splits, joins or ends a road within its clear radius
+  private ringBlock(list: Snap[], segs: SegPlan[], type: RoadType): string {
+    const g = this.graph, last = list.length - 1;
+    for (const [i, s] of list.entries()) {
+      const r = s.node ? g.ringOf(s.node) : s.edge?.ring;
+      if (!r) {
+        const near = g.nearRing(s.point);
+        if (near && (s.node || s.edge || dist(s.point, near.hub) < ringOut(near.hub.ring) + ROAD_W / 2)) return 'Too close to the roundabout';
+        continue;
+      }
+      if (i && i < last) return 'Roads can\'t cross a roundabout';
+      const S = RINGS[r.hub.ring], label = S.label.toLowerCase(), q = list[i ? i - 1 : 1].point;
+      if (dist(q, r.hub) <= S.r) return 'Roads join a roundabout from outside';
+      if (s.node?.edges.some(e => !e.ring && !g.hidden.has(e))) return 'That spot on the roundabout already has a road';
+      const arms = r.nodes.filter(v => v.edges.some(e => !e.ring && !g.hidden.has(e)));
+      if (arms.length >= S.arms) return `Too many roads for a ${label} roundabout (${S.arms} at most)`;
+      if (type.lanes > S.lanes) return `Too many lanes for a ${label} roundabout`;
+      const a = Math.atan2(s.point.y - r.hub.y, s.point.x - r.hub.x);
+      if (arms.some(v => Math.abs(Math.atan2(Math.sin(Math.atan2(v.y - r.hub.y, v.x - r.hub.x) - a), Math.cos(Math.atan2(v.y - r.hub.y, v.x - r.hub.x) - a))) < 2 * Math.PI / (S.arms + 1) - 0.01)) return 'Arms too close together';
+    }
+    for (const c of segs.flatMap(x => x.crossings)) {
+      if (c.edge.ring) return 'Roads can\'t cross a roundabout';
+      if (g.nearRing(c.point)) return 'Too close to the roundabout';
+    }
+    return '';
   }
 
   // link: give buildings near the new road their driveways (commitBend does it itself once its cars are moved)
@@ -986,6 +1031,8 @@ export class Game {
     const b = this.buildingUnder(p);
     if (b) { this.tryDemolish(b); return; }
     this.armed = null;
+    const r = this.graph.ringAt(p, 4);
+    if (r) { this.setControl(r.hub, 'none'); return; }
     const n = this.graph.nearestNode(p, NODE_R + 4);
     if (n && n.control !== 'none') { this.setControl(n, 'none'); return; }
     // prefer a road on the current level where several are stacked
@@ -1018,10 +1065,12 @@ export class Game {
     return hit ? this.graph.runOf(hit.edge).edges : null;
   }
 
-  // A junction (3+ roads, not a door) near p
+  // A junction (3+ roads, not a door) near p; a roundabout's hub anywhere on it
   junctionAt(p: Vec): Node | null {
+    const r = this.graph.ringAt(p, 4);
+    if (r) return r.hub;
     const n = this.graph.nearestNode(p, NODE_R + 6);
-    return n && !n.building && n.edges.length >= 3 ? n : null;
+    return n && !n.building && n.edges.length >= 3 ? this.graph.ringOf(n)?.hub ?? n : null;
   }
 
   // The car drawn nearest p within r
@@ -1309,7 +1358,7 @@ export class Game {
     const built = this.lastBuilt;
     // the bent road keeps its oldest build day, so a bend never buys a same-day refund
     for (const e of built) e.day = day;
-    const len = built.reduce((n, e) => n + e.length, 0);
+    const len = built.reduce((n, e) => n + e.length, 0), touched = new Set<Lane>();
     for (const m of moved) {
       const fwd = m.forward !== rev;
       let d = (rev ? 1 - m.frac : m.frac) * len, i = 0;
@@ -1323,7 +1372,10 @@ export class Game {
       c.path = null; c.queued = false; c.granted = null; c.clearing = null; c.prev = null;
       const at = lane.cars.findIndex(o => o.s > c.s);
       lane.cars.splice(at < 0 ? lane.cars.length : at, 0, c);
+      touched.add(lane);
     }
+    // a shorter road or fewer lanes: cars pushed back off each other, the ones that no longer fit go back to their origins
+    for (const l of touched) this.dropCars(this.graph.respace(l));
     this.connect();
     const live = built.filter(e => g.edges.includes(e));
     this.selected = live.length ? live : null;
@@ -1482,6 +1534,7 @@ export class Game {
     const n = this.junctionAt(p);
     this.ichg = null;
     if (!n) return;
+    if (n.control === 'roundabout') { this.say('Take the roundabout out first'); return; }
     const kinds = ICHG_KEYS.filter(k => ICHG[k].arms === n.edges.length);
     if (!kinds.length) { this.say('Interchanges go on a junction of 3 or 4 roads'); return; }
     this.ichg = { node: n, kind: kinds.find(k => this.planInterchange(n, k).ok) ?? kinds[0] };
@@ -1529,46 +1582,75 @@ export class Game {
   }
 
   placeControl(p: Vec, kind: Control): void {
-    const n = this.graph.nearestNode(p, NODE_R + 6);
-    if (!n || n.building || n.edges.length < 3) { this.say('Place on an intersection'); return; }
-    this.setControl(n, kind, this.ringSize);
+    const r = this.graph.ringAt(p, 4), n = r?.hub ?? this.graph.nearestNode(p, NODE_R + 6);
+    if (!n || n.building || (!r && n.edges.length < 3)) { this.say('Place on an intersection'); return; }
+    this.setControl(n, kind, kind === 'roundabout' ? this.ringSize : undefined);
   }
 
-  // Why a ring of this size does not fit at n ('' = it fits): every approach, followed through the bends of its road up to the next
-  // junction or door, needs room for a queued car behind the stop line and the far end's box. A small ring fits wherever a junction
-  // does (as before sizes).
-  // ponytail: checked when placed only; a road built later onto a large ring can still be short
-  ringRoom(n: Node, ring: RingSize): string {
-    if (!ring) return '';
-    const need = ringStop(ring) + CAR_LEN + GAP + NODE_R;
-    for (const e0 of n.edges) {
-      let e = e0, at = n, len = 0;
-      for (let k = 0; k < 50; k++) {
-        len += e.length;
-        at = e.a === at ? e.b : e.a;
-        if (len >= need || at === n || at.building || at.control !== 'none' || at.edges.length !== 2) break;
-        e = at.edges[0] === e ? at.edges[1] : at.edges[0];
+  // Why a ring of this size does not fit at junction n, or round ring hub n for a resize ('' = it fits): at most RINGS arms of at most
+  // RINGS lanes each way, on the ground, no two closer than a full turn / (arms + 1); every arm's next junction, door or dead end
+  // (followed through its bends and driveway joins) outside the clear radius, and no other road or building under the ring
+  ringRoom(n: Node, size: RingSize): string {
+    const g = this.graph, S = RINGS[size], r = g.ringOf(n), label = S.label.toLowerCase(), R = clearR(size);
+    const arms = r ? r.nodes.flatMap(v => v.edges.filter(e => !e.ring).map(e => ({ v, e }))) : n.edges.map(e => ({ v: n, e }));
+    if (arms.length > S.arms) return `Too many roads for a ${label} roundabout (${S.arms} at most)`;
+    if (arms.some(({ e }) => e.level || e.bridge || e.tunnel)) return 'Roundabouts go on ground junctions';
+    if (arms.some(({ e }) => e.type.lanes > S.lanes)) return `Too many lanes for a ${label} roundabout`;
+    const ang = arms.map(({ v, e }) => r ? Math.atan2(v.y - n.y, v.x - n.x) : edgeAngle(n, e)).sort((a, b) => a - b);
+    const T2 = 2 * Math.PI;
+    if (ang.some((a, i) => ((ang[(i + 1) % ang.length] - a + T2) % T2 || T2) < T2 / (S.arms + 1) - 0.01)) return 'Arms too close together';
+    const walked = new Set<Edge>(r ? r.nodes.flatMap(v => v.edges) : []), seen = new Set<Node>(r ? r.nodes : [n]);
+    for (const { v, e } of arms) {
+      for (let at = v, cur = e, k = 0; k < 100; k++) {
+        walked.add(cur);
+        const o = cur.a === at ? cur.b : cur.a;
+        if (o.building || o.control !== 'none' || o.edges.filter(x => !x.drive).length !== 2 || seen.has(o)) {
+          if (dist(o, n) < R) return 'Too close to the next junction';
+          break;
+        }
+        seen.add(o);
+        at = o;
+        cur = o.edges.find(x => !x.drive && x !== cur)!;
       }
-      if (len < need) return `Too tight for a ${RINGS[ring].label.toLowerCase()} roundabout: a road leaves it after ${Math.round(len)}px, needs ${Math.round(need)}`;
     }
+    const reach = ringOut(size) + ROAD_W / 2;
+    if (g.edges.some(e => !walked.has(e) && !e.drive && !e.level && !e.tunnel && distToSegment(n, e.a, e.b).d < reach + e.width / 2)) return 'Too close to another road';
+    if (this.buildings.some(b => b.kind !== 'gate' && b.contains(n, ringOut(size)))) return 'Blocked by a building';
     return '';
   }
 
-  // Switching sells the old control under the refund rule; 'none' just sells it. A roundabout keeps its size unless one is given
-  // (the tool's for a new one); a resize is a switch.
-  setControl(n: Node, kind: Control, ring: RingSize = n.control === 'roundabout' ? n.ring : this.ringSize): boolean {
-    if (n.control === kind && (kind !== 'roundabout' || n.ring === ring)) return true;
+  // Switching sells the old control under the refund rule; 'none' just sells it. A roundabout (n: its hub or one of its nodes) keeps its
+  // size unless one is given (the tool's for a new one); a resize is a switch. A ring is built round the junction or taken out (back to
+  // one node joining the arms), the cars on the pieces that go back to their origins, and the open panel follows. Driveways joining
+  // inside the new ring's clear radius are laid again outside it.
+  setControl(n: Node, kind: Control, ring?: RingSize): boolean {
+    const g = this.graph, r = g.ringOf(n);
+    if (r) n = r.hub;
+    const size = ring ?? (r ? n.ring : this.ringSize);
+    if (n.control === kind && (kind !== 'roundabout' || n.ring === size)) return true;
     const locked = kind === 'roundabout' ? this.lockOf('roundabout') : '';
     if (locked) { this.say(locked); return false; }
-    const tight = kind === 'roundabout' ? this.ringRoom(n, ring) : '';
+    const tight = kind === 'roundabout' ? this.ringRoom(n, size) : '';
     if (tight) { this.say(tight); return false; }
-    const cost = this.controlPrice(kind, ring) - this.controlRefund(n);
+    const cost = this.controlPrice(kind, size) - this.controlRefund(n);
     if (cost > this.money) { this.say('Not enough money'); return false; }
-    if (kind === 'roundabout') n.ring = ring;
-    n.control = kind;
-    n.controlDay = this.today;
-    n.phase = 0;
-    n.phaseTimer = 0;
+    let m = n;
+    if (r) { const x = g.removeRing(r); this.dropCars(x.cars); m = x.node; }
+    if (kind === 'roundabout') {
+      const drives = g.edges.filter(e => e.drive && [e.a, e.b].some(v => !v.building && dist(v, m) < clearR(size)));
+      for (const e of drives) this.dropCars(g.removeEdge(e));
+      // ponytail: ringRoom passed, so every arm reaches the circle and the build cannot fail
+      const b = g.buildRing(m, size, this.today)!;
+      this.dropCars(b.cars);
+      m = b.ring.hub;
+      if (drives.length) this.connect();
+    } else {
+      m.control = kind;
+      m.controlDay = this.today;
+      m.phase = 0;
+      m.phaseTimer = 0;
+    }
+    if (this.inspect === n) this.inspect = m;
     this.spend(cost);
     return true;
   }

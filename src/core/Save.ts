@@ -26,7 +26,9 @@ export interface SaveData {
   buildings: BuildingData[];
   commuters: (Omit<Commuter, 'home' | 'work'> & { home: Ref; work: Ref })[];
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number; ring?: RingSize }[];
-  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number }[];
+  edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number; ring?: Ref }[];
+  // absent before ring roundabouts (a 'roundabout' node is rebuilt as a ring on load)
+  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[] }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -37,7 +39,7 @@ const revive = (k: string, v: unknown): unknown => v === 'Infinity' && k !== 'se
 
 export function serialize(g: Game): string {
   const bi = new Map(g.buildings.map((b, i) => [b, i])), ci = new Map(g.commuters.map((c, i) => [c, i]));
-  const ni = new Map(g.graph.nodes.map((n, i) => [n, i]));
+  const ni = new Map(g.graph.nodes.map((n, i) => [n, i])), ri = new Map(g.graph.rings.map((r, i) => [r, i]));
   const trip = (t: Trip, queued = t.queued): TripData => {
     const { jam: _, ...rest } = t;
     return { ...rest, queued, from: bi.get(t.from)!, to: bi.get(t.to)!, who: t.who ? ci.get(t.who)! : -1 };
@@ -59,7 +61,9 @@ export function serialize(g: Game): string {
     })),
     edges: g.graph.edges.map(e => ({
       a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
+      ring: e.ring ? ri.get(e.ring) : undefined,
     })),
+    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!) })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,
   };
@@ -82,7 +86,18 @@ export function deserialize(json: string): Game {
   const trip = (t: TripData): Trip => ({ ...t, from: B[t.from], to: B[t.to], who: t.who < 0 ? null : C[t.who], jam: null });
   d.buildings.forEach((x, i) => { B[i].pending = x.pending.map(trip); B[i].parked = x.parked.map(trip); });
   const N = d.nodes.map(({ x, y, b, ...n }) => Object.assign(graph.addNode(x, y, b < 0 ? null : B[b]), n));
-  for (const e of d.edges) graph.addEdge(N[e.a], N[e.b], e, e.day).heat = e.heat;
+  const R = (d.rings ?? []).map(x => {
+    const hub = Object.assign(graph.node(x.x, x.y), { control: 'roundabout', ring: x.size, controlDay: x.day } as const), r = { hub, nodes: x.nodes.map(i => N[i]) };
+    graph.rings.push(r);
+    return r;
+  });
+  for (const e of d.edges) graph.addEdge(N[e.a], N[e.b], { ...e, ring: e.ring === undefined ? null : R[e.ring] }, e.day).heat = e.heat;
+  // an older save's roundabout is one node: rebuilt as a ring of its size, a smaller one where an arm is too short, else a plain junction
+  for (const n of graph.nodes.filter(x => x.control === 'roundabout')) {
+    n.control = 'none';
+    n.plan = null;
+    for (let s = n.ring; s >= 0 && !graph.buildRing(n, s as RingSize, n.controlDay); s--);
+  }
   g.reports = d.reports.map(r => ({ ...r, from: B[r.from], to: B[r.to] }));
   Object.assign(g.metrics, d.metrics);
   const { time, lastHour, assignAt, money, score, upkeepDay, cityLevel, tray, happiness, cityParts, debtDays, sadDays, stats, ledger, roadType } = d;

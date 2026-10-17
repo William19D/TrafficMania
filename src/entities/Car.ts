@@ -1,4 +1,4 @@
-import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, boxR, stopDist } from '../network/RoadGraph.ts';
+import { BRAKE, CAR_LEN, GAP, LC_M, LC_S, NODE_R, RINGS, stopDist } from '../network/RoadGraph.ts';
 import type { RoadGraph, Lane, Node, Edge } from '../network/RoadGraph.ts';
 import { TIERS } from '../core/config.ts';
 import { findPath } from '../network/Pathfinder.ts';
@@ -39,7 +39,7 @@ export class Car {
   granted: Node | null = null;
   clearing: Node | null = null;
   queued = false;
-  // Node before lane.from (the approach we came from), for the roundabout ring animation
+  // Node before lane.from (the approach we came from), for the turn arc
   prev: Node | null = null;
   // Lateral offset of the previous lane, to blend the lane change at the node
   prevOffset = 0;
@@ -71,9 +71,9 @@ export class Car {
     this.react = 0.2 * random();
   }
 
-  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit
+  // Top speed on an edge: the driver's own, scaled by the road tier's speed limit (a ring's own)
   top(e: Edge): number {
-    return this.vmax * TIERS[e.type.tier].limit / MAX_SPEED;
+    return this.vmax * (e.ring ? RINGS[e.ring.hub.ring].v : TIERS[e.type.tier].limit) / MAX_SPEED;
   }
 
   get dest(): Building { return this.trip.to; }
@@ -112,7 +112,11 @@ export class Car {
       const e = next ? graph.edgeBetween(node, next) : null;
       // Keep the exit once granted or inside the turn arc, so fits()'s lane is the one entered and the drawn arc doesn't jump
       const x = this.exit, keep = x && x.edge === e && x.from === node && e.lanes.includes(x) && (this.granted === node || remaining < 2 * NODE_R);
-      nextLane = keep ? x : e ? graph.pickLane(e, node, graph.turn(this.path, 1), this.path[2]) : null;
+      // through a bend (or past a driveway join) a car keeps its lane where the count does too, so two lanes never feed one unchecked
+      const ls = e ? graph.lanesFrom(e, node) : [], mine = graph.lanesFrom(lane.edge, lane.from), same = ls[mine.indexOf(lane)];
+      const ok = e && graph.arrowLanes(e, node, this.path[2]);
+      nextLane = keep ? x : !e ? null : same && ls.length === mine.length && !graph.needsControl(node, lane.edge) && (!ok || ok.includes(same)) ? same
+        : graph.pickLane(e, node, graph.turn(this.path, 1), this.path[2]);
       // missing edge or now one-way against: recompute the route next tick
       if (!nextLane) this.path = null;
     }
@@ -129,7 +133,16 @@ export class Car {
     this.blink = this.lc ? -Math.sign(this.lcOff) : !isDest && this.path && remaining < 60 ? graph.turn(this.path, 0, lane.from) : 0;
     const ahead = lane.cars[idx + 1];
     if (ahead) gap = ahead.s - this.s - sep(this, ahead);
-    else if (nextLane && nextLane.cars.length) gap = remaining + nextLane.cars[0]!.s - sep(this, nextLane.cars[0]!);
+    // else the first car on the lanes ahead along the route within braking reach (short links: a ring's chords are shorter than a
+    // truck), each the same lane index on (as through a bend)
+    // ponytail: 150px like the stop line horizon below; a lane picked past a junction may differ, its stop line covers that
+    else for (let j = 1, d = remaining, l = nextLane; l; j++) {
+      const f = l.cars[0];
+      if (f) { gap = d + f.s - sep(this, f); break; }
+      if ((d += l.edge.length) > 150) break;
+      const q = this.path?.[j + 1], e = q && graph.edgeBetween(l.to, q), ls = e ? graph.lanesFrom(e, l.to) : [];
+      l = ls[Math.min(graph.lanesFrom(l.edge, l.from).indexOf(l), ls.length - 1)] ?? null;
+    }
 
     // Intersection control: request a turn and wait before the node. Road traffic only stops at a driveway junction to keep it
     // clear for a merging car (RoadGraph.held), and only when it still can.
@@ -159,8 +172,8 @@ export class Car {
     }
 
     let target = this.top(lane.edge);
-    // approach a junction slowly until granted; once granted only the corner speed below applies (roundabouts: the ring)
-    if (needs && remaining < 60 && (this.granted !== node || node.control === 'roundabout')) target = Math.min(target, TURN_SPEED);
+    // approach a junction slowly until granted; once granted only the corner speed below applies
+    if (needs && remaining < 60 && this.granted !== node) target = Math.min(target, TURN_SPEED);
     if (nextLane) {
       // Corner speed: top speed (the slower tier of the two) * cos(turn angle) at the node, floored at TURN_SPEED,
       // braked down to by the node box; so a car also slows down before a slower tier
@@ -171,6 +184,7 @@ export class Car {
     }
     target = Math.min(target, Math.sqrt(2 * BRAKE * Math.max(0, gap - GAP - this.speed * this.react)));
     this.brake = target < this.speed || this.speed < 1;
+    const s0 = this.s;
     this.speed = target > this.speed ? Math.min(target, this.speed + this.acc * dt) : Math.max(target, this.speed - BRAKE * dt);
     this.s += this.speed * dt;
     this.trip.driven += this.speed * dt;
@@ -180,13 +194,14 @@ export class Car {
     // (at the next line, or in a queue through a driveway junction): on a link shorter than ~NODE_R + stopDist + the car, holding
     // the box there gridlocks the two junctions.
     // ponytail: the rear then overhangs the box by a few px; DRIVE_SNAP keeps driveways from cutting such links
-    if (this.clearing && (this.s - this.len / 2 > boxR(this.clearing) || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
+    if (this.clearing && (this.s - this.len / 2 > NODE_R || this.speed < 1)) { this.clearing.occupants.delete(this); this.clearing = null; }
 
     if (this.s < lane.edge.length) return 'ok';
     if (isDest) return 'arrived';
-    // No exit, no grant (a control placed too close to stop), or another car just entered it (same light group / roundabout): wait in the box
+    // No exit, no grant (a control placed too close to stop), or another car just entered the next lane: wait where it was this tick.
+    // Never at the node itself on top of that car.
     const first = nextLane?.cars[0];
-    if (!nextLane || (needs && this.granted !== node) || (first && first.s < sep(this, first) + GAP)) { this.s = lane.edge.length; this.speed = 0; return 'ok'; }
+    if (!nextLane || (needs && this.granted !== node) || (first && first.s < sep(this, first) + GAP)) { this.s = Math.min(s0, lane.edge.length); this.speed = 0; return 'ok'; }
 
     // Move to the next lane
     let ns = this.s - lane.edge.length;

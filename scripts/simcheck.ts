@@ -2,10 +2,10 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, lightGroup, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, RIGHT, STRAIGHT, applyPreset, approachOf, clonePlan, links, moveOf, planOf, setLink, setSeconds } from '../src/network/Junction.ts';
 import { tutorialSteps } from '../src/ui/Tutorial.ts';
-import type { Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
+import type { Edge, Lane, Node, RoadType } from '../src/network/RoadGraph.ts';
 import { buildingAt } from '../src/entities/Building.ts';
 import { makeTrip } from '../src/entities/Trip.ts';
 import type { Trip } from '../src/entities/Trip.ts';
@@ -92,7 +92,7 @@ for (const [a, b, type] of roads) {
 }
 game.placeControl(J1, 'light');
 game.placeControl(R, 'roundabout');
-if (J1.control !== 'light' || R.control !== 'roundabout') fail('controls not placed');
+if (J1.control !== 'light' || g.rings.length !== 1 || g.rings[0]!.hub.ring !== 0 || g.nodes.includes(R)) fail('controls not placed');
 
 // Car invariants: every lane sorted with no overlaps or stale cars, every junction occupant on the graph
 const invariants = (w: Game): void => {
@@ -110,6 +110,32 @@ const invariants = (w: Game): void => {
   for (const e of w.graph.edges) if (e.length < 1) fail(`edge ${e.id} is ${e.length.toFixed(2)}px long at t=${t}`);
   for (const n of w.graph.nodes) for (const c of n.occupants) {
     if (!live.has(c) || !c.lane.cars.includes(c)) fail(`node ${n.id} holds a car off the graph at t=${t}`);
+  }
+};
+// Overlaps the lane check misses. Across a node: a car never closer than touching to the first car on its exit lane that came the same
+// way. On screen: two cars on one edge or on consecutive lanes (a junction or ring hand-off) heading the same way (within 30 degrees)
+// are never drawn closer than 0.8 x touching along their heading while less than a car width apart across it.
+// ponytail: cars entering one lane from two approaches are measured on screen only (their path gap is no distance); O(n^2), so not
+// in the rush hour
+const overlaps = (w: Game, what: string, drawn = true): void => {
+  const t = w.time.toFixed(2), g = w.graph;
+  for (const c of w.cars) {
+    const f = c.exit?.cars[0];
+    if (!f || f === c || c.lane.to !== c.exit!.from || f.prev !== c.lane.from) continue;
+    const gap = c.lane.edge.length - c.s + f.s - sep(c, f);
+    if (gap < -0.5) fail(`${what}: cars overlap across node ${c.lane.to.id} by ${(-gap).toFixed(1)}px at t=${t}`);
+  }
+  if (!drawn) return;
+  const pos = w.cars.map(c => g.carPos(c));
+  for (let i = 0; i < w.cars.length; i++) for (let j = i + 1; j < w.cars.length; j++) {
+    const a = w.cars[i], b = w.cars[j], la = a.lane, lb = b.lane;
+    if (la.edge !== lb.edge && la.to !== lb.from && lb.to !== la.from) continue;
+    // ponytail: a car pulling in at its door vanishes there; a car leaving that door may already show beside it
+    if ([a, b].some(c => c.lane.to === c.dest.node && c.lane.edge.length - c.s < CAR_LEN)) continue;
+    const p = pos[i], q = pos[j], dx = q.x - p.x, dy = q.y - p.y;
+    if (Math.abs(Math.atan2(Math.sin(p.angle - q.angle), Math.cos(p.angle - q.angle))) > Math.PI / 6) continue;
+    const lon = Math.abs(dx * Math.cos(p.angle) + dy * Math.sin(p.angle)), lat = Math.abs(dy * Math.cos(p.angle) - dx * Math.sin(p.angle));
+    if (lat < 6 && lon < 0.8 * sep(a, b)) fail(`${what}: cars drawn on top of each other (${lon.toFixed(1)}px apart) at t=${t} [${[a, b].map(c => `${c.kind} ${c.lane.from.id}>${c.lane.to.id} s=${c.s.toFixed(1)}/${c.lane.edge.length.toFixed(0)} v=${c.speed.toFixed(0)} lc=${c.lc.toFixed(2)} g=${c.granted?.id} cl=${c.clearing?.id} drive=${c.lane.edge.drive}`).join(" | ")}]`);
   }
 };
 const DT = 1 / 60, STEPS = 300 * 60;
@@ -138,6 +164,7 @@ for (let i = 0; i < STEPS; i++) {
     exits.set(c, [c.lane, c.exit]);
   }
   invariants(game);
+  overlaps(game, 'main run');
 }
 if (game.score <= 0) fail('no car arrived');
 // Commuters leave home in the morning rush, and some reached work and drove home
@@ -624,37 +651,99 @@ for (const [k, b] of Object.entries(BIOMES)) {
   const lum = (c: string): number => [1, 3, 5].reduce((n, i) => n + parseInt(c.slice(i, i + 2), 16), 0);
   if (lum(b.bands[2]) <= lum(b.bands[0])) fail(`mountains: ${k} peak ${b.bands[2]} is darker than its foot ${b.bands[0]}`);
 }
-// Roundabout sizes: a 4-arm cross flooded from every arm; a large ring holds more cars at once than a small one and every car still
-// gets through. A large ring is refused where a road leaves it after 70px, a small one fits there.
+// Roundabout sizes: a 4-arm cross flooded from every arm (each car to another exit) through a ring of every size. Every car gets
+// through, a large ring holds more cars at once than a small one, nothing overlaps (lanes, across nodes, on screen), and on and around
+// the ring a car never turns more than 35 degrees in 0.1 s nor sheds speed faster than it brakes (no stop-then-jump at the entry).
+// A large ring is refused where a road leaves it after 70px, a small one fits there; a resize keeps the arms joined and a removal
+// leaves one junction joining them, refunded under the control rule.
 {
   const most: number[] = [];
-  for (const size of [0, 2] as const) {
+  for (const size of [0, 1, 2] as const) {
     const w = blank(), wg = w.graph, J = wg.addNode(1000, 1000), arms = [[1000, 550], [1450, 1000], [1000, 1450], [550, 1000]] as const;
     const H = arms.map(([x, y], i) => town(w, x, y, 'home', i === 0));
     for (const h of H) w.commitPath(w.planPath([h, J], 0, DEFAULT_TYPE));
     w.demandOff = true;
     w.ringSize = size;
     w.placeControl(J, 'roundabout');
-    if (J.control !== 'roundabout' || J.ring !== size) fail(`ring sizes: size ${size} not placed`);
+    const ring = wg.rings[0]!;
+    if (!ring || ring.hub.ring !== size || wg.nodes.includes(J)) fail(`ring sizes: size ${size} not placed (${w.message})`);
     H.forEach((h, i) => {
-      const e = wg.edgeBetween(h, J)!, lane = wg.lanesFrom(e, h)[0]!;
+      const e = h.edges[0]!, lane = wg.lanesFrom(e, h)[0]!;
       for (let k = 0; k < 6; k++) {
-        const c = new Car(lane, trip(h, H[(i + 2) % 4]));
+        const c = new Car(lane, trip(h, H[(i + 1 + k % 3) % 4]));
         c.s = 330 - k * 24;
         lane.cars.unshift(c);
         w.cars.push(c);
       }
     });
     let max = 0;
-    for (let t = 0; t < 60 * 60 && w.cars.length; t++) { w.update(DT); max = Math.max(max, J.occupants.size); }
+    const seen = new Map<Car, { a: number[]; v: number }>();
+    for (let t = 0; t < 90 * 60 && w.cars.length; t++) {
+      w.update(DT);
+      invariants(w);
+      overlaps(w, `ring sizes ${size}`);
+      max = Math.max(max, ring.nodes.reduce((n, v) => n + v.edges.filter(e => e.ring && e.a === v)[0]!.lanes[0]!.cars.length, 0));
+      for (const c of w.cars) {
+        const p = wg.carPos(c), h = seen.get(c) ?? { a: [], v: c.speed };
+        h.a.push(p.angle);
+        if (h.a.length > 7) h.a.shift();
+        if (dist(p, ring.hub) < ringOut(size) + 12) {
+          const turn = Math.abs(Math.atan2(Math.sin(p.angle - h.a[0]!), Math.cos(p.angle - h.a[0]!))) * 180 / Math.PI;
+          if (turn > 35) fail(`ring sizes: a car turned ${turn.toFixed(0)} degrees in 0.1s on a size ${size} ring`);
+          if (h.v - c.speed > BRAKE * DT + 1e-6) fail(`ring sizes: a car stopped dead on a size ${size} ring (${h.v.toFixed(1)} -> ${c.speed.toFixed(1)}px/s)`);
+        }
+        h.v = c.speed;
+        seen.set(c, h);
+      }
+    }
     if (w.score !== 24) fail(`ring sizes: ${w.score} of 24 cars through a size ${size} ring`);
     most.push(max);
     if (size) continue;
     const K = wg.addNode(1300, 1300);
     for (const [x, y] of [[1370, 1300], [1300, 1100], [1100, 1300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
     if (w.setControl(K, 'roundabout', 2) || !w.setControl(K, 'roundabout', 0)) fail(`ring sizes: room check on a 70px arm (${w.ringRoom(K, 2)})`);
+    const joined = (): boolean => H.every(a => H.every(b => a === b || !!findPath(wg, a, b, null, true)));
+    const cash = w.money, price = w.controlPrice('roundabout', 1);
+    if (!w.setControl(ring.hub, 'roundabout', 1) || wg.rings.length !== 2 || wg.rings.some(r => r.hub === ring.hub) || !joined()) fail('ring sizes: resize');
+    if (Math.abs(w.money - (cash - price + w.controlPrice('roundabout', 0))) > 1e-6) fail(`ring sizes: resize cost ${cash - w.money}`);
+    w.demolishAt({ x: 1000, y: 1000 });
+    const c = wg.nearestNode({ x: 1000, y: 1000 }, 1);
+    if (wg.rings.length !== 1 || !c || c.edges.length !== 4 || !joined() || Math.abs(w.money - (cash + w.controlPrice('roundabout', 0))) > 1e-6) fail('ring sizes: removal');
   }
-  if (most[1] <= most[0]) fail(`ring sizes: large ring held ${most[1]} cars at once, small ${most[0]}`);
+  if (most[2]! <= most[0]!) fail(`ring sizes: large ring held ${most[2]} cars at once, small ${most[0]}`);
+}
+// Short links by a ring: a large ring on a street lined with homes lays their driveways again outside its clear radius (no junction,
+// split or driveway join inside it, so no link there a queued car overhangs), a road may not join an arm inside it but may join the
+// ring itself from outside, a small ring is refused with a junction inside its own clear radius, and trips through keep every
+// overlap check
+{
+  const w = blank(), wg = w.graph, J = wg.addNode(800, 800), R = clearR(2);
+  const ends = [[300, 800], [1300, 800], [800, 300]].map(([x, y], i) => town(w, x, y, 'home', i === 2));
+  for (const e of ends) w.commitPath(w.planPath([J, e], 0, DEFAULT_TYPE));
+  w.tray.home = 99;
+  for (const x of [645, 725, 875, 955]) { w.startPlacing('home'); w.placeBuilding({ x, y: 760 }); }
+  w.demandOff = true;
+  w.ringSize = 2;
+  w.placeControl(J, 'roundabout');
+  const r = wg.rings[0]!;
+  if (!r) fail(`short links: large ring refused (${w.message})`);
+  const inner = wg.nodes.filter(n => !n.building && !r.nodes.includes(n) && dist(n, r.hub) < R && n.edges.length !== 2);
+  if (inner.length) fail(`short links: a junction inside the clear radius ${inner.map(n => [n.x, n.y, n.edges.length, n.edges.map(e => e.drive)])}`);
+  if (w.buildings.some(b => !b.connected)) fail('short links: a home lost its road');
+  if (w.planPath([{ x: 800 + R - 12, y: 700 }, { x: 800 + R - 12, y: 800 }]).reason !== 'Too close to the roundabout') fail('short links: a road split an arm by the ring');
+  const into = w.planPath([{ x: 800, y: 970 }, { x: 800, y: 850 }]);
+  if (!into.ok) fail(`short links: a road onto the ring refused (${into.reason})`);
+  w.commitPath(into);
+  if (r.nodes.filter(v => v.edges.some(e => !e.ring)).length !== 4) fail('short links: the new road did not join the ring');
+  const homes = w.buildings.filter(b => b.kind === 'home');
+  for (const a of homes) for (const b of homes) if (a !== b) w.queueTrip(a, b, 'commute');
+  const n = homes.length * (homes.length - 1);
+  for (let t = 0; t < 400 * 60 && w.score < n; t++) { w.update(DT); invariants(w); overlaps(w, 'short links'); }
+  if (w.score !== n) fail(`short links: ${w.score} of ${n} trips through the large ring`);
+  const K = wg.addNode(300, 300);
+  for (const [x, y] of [[300, 345], [300, 100], [100, 300], [500, 300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+  for (const x of [180, 420]) w.commitPath(w.planPath([{ x: 300, y: 345 }, { x, y: 345 }], 0, DEFAULT_TYPE));
+  if (w.setControl(K, 'roundabout', 0) || !w.message.startsWith('Too close')) fail(`short links: a small ring placed with a junction 45px out (${w.message})`);
 }
 // Yield: at a junction of an avenue (main road) and a street, a street car at the line waits while an avenue car is queued;
 // at a stop junction a car is only granted from a standstill
@@ -884,10 +973,12 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   w.setTool('road');
   for (const b of w.buildings) if (b.kind === 'home') b.residents = 15;
   for (const [x, y, c] of [[520, 450, 'light'], [840, 450, 'light'], [1160, 450, 'light'], [520, 700, 'roundabout'], [1480, 450, 'yield']] as const) w.placeControl({ x, y }, c);
-  if (w.buildings.filter(b => b.kind === 'home').length < 90 || w.buildings.some(b => !b.connected)) fail('rush hour: town not built');
+  if (w.graph.rings.length !== 1) fail(`rush hour: roundabout refused (${w.message})`);
+  if (w.buildings.filter(b => b.kind === 'home').length < 90 || w.buildings.some(b => !b.connected)) fail(`rush hour: town not built ${w.buildings.filter(b => !b.connected).map(b => [b.x, b.y])}`);
   let maxWait = 0;
   while (w.clock < 34) {
     w.update(DT);
+    overlaps(w, 'rush hour', false);
     for (const c of w.cars) maxWait = Math.max(maxWait, c.wait);
   }
   const smooth = w.stats.smooth / w.stats.arrived;
@@ -1021,19 +1112,16 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const n = CAR_PAINT.map(() => 0);
   for (let i = 0; i < 500; i++) n[pick(CAR_PAINT, new Car(g.edges[0]!.lanes[0]!, makeTrip('commute', game.buildings[0]!, game.buildings[1]!)).paint)]!++;
   if (n.some(x => !x) || Math.max(...n) !== n[0]) fail(`art: paint spread ${n.join(',')}`);
-  // road layer cache: its key holds still on an unchanged network and moves with a control, a ring size or a retype
+  // road layer cache: its key holds still on an unchanged network and moves with a control or a retype (a ring resize rebuilds its edges)
   const key = (): number => netKey(g.edges, g.nodes), k0 = key(), was = J2.control, t0 = g.edges[0]!.type;
   if (key() !== k0) fail('art: road key unstable');
   J2.control = 'stop';
   const k1 = key();
   J2.control = was;
-  R.ring = R.ring === 2 ? 0 : 2;
-  const k2 = key();
-  R.ring = R.ring === 2 ? 0 : 2;
   g.edges[0]!.type = { ...t0, tier: 'boulevard' };
   const k3 = key();
   g.edges[0]!.type = t0;
-  if (new Set([k0, k1, k2, k3]).size !== 4 || key() !== k0) fail('art: road key misses a change');
+  if (new Set([k0, k1, k3]).size !== 3 || key() !== k0) fail('art: road key misses a change');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through
@@ -1042,13 +1130,80 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   if (serialize(w) !== json) fail('save: a loaded game saves differently');
   const pending = (x: Game): number => x.buildings.reduce((n, b) => n + b.pending.length, 0);
   if (w.cars.length || pending(w) !== pending(game) + game.cars.length) fail(`save: ${pending(w)} trips waiting, expected ${pending(game) + game.cars.length}`);
-  if (w.graph.edges.length !== g.edges.length || w.graph.nodes.filter(n => n.control !== 'none').length !== g.nodes.filter(n => n.control !== 'none').length) fail('save: the network changed');
+  if (w.graph.edges.length !== g.edges.length || w.graph.nodes.filter(n => n.control !== 'none').length !== g.nodes.filter(n => n.control !== 'none').length
+    || w.graph.rings.length !== 1 || w.graph.edges.filter(e => e.ring === w.graph.rings[0]).length !== g.edges.filter(e => e.ring).length) fail('save: the network changed');
   const score = w.score;
   for (let t = 0; t < 60 * 60; t++) {
     try { w.update(DT); } catch (e) { fail(`save: exception in the loaded game: ${(e as Error).stack}`); }
     invariants(w);
   }
   if (w.score <= score) fail('save: no trip arrived in the loaded game');
+}
+// Re-spacing: a 2-lane road packed in both lanes and retyped to one lane, then a packed curve bent straight (shorter), leave no car on
+// top of another; the cars that no longer fit go back to their origin's queue
+{
+  const w = blank(), wg = w.graph, two: RoadType = { tier: 'avenue', lanes: 2, oneWay: false }, one: RoadType = { tier: 'avenue', lanes: 1, oneWay: false };
+  const X = town(w, 100, 500), Y = town(w, 900, 500), M = wg.addNode(300, 500), N = wg.addNode(700, 500);
+  for (const [a, b, t] of [[X, M, one], [M, N, two], [N, Y, one]] as const) w.commitPath(w.planPath([a, b], 0, t));
+  w.demandOff = true;
+  const pack = (run: Edge[], gap: number): number => {
+    let k = 0;
+    for (const e of run) for (const l of e.lanes) for (let s = 10; s < e.length - 10; s += gap) { const c = new Car(l, trip(X, Y)); c.s = s; l.cars.push(c); w.cars.push(c); k++; }
+    return k;
+  };
+  const sent = (): number => X.building!.pending.length;
+  let n = pack([wg.edgeBetween(M, N)!], 16);
+  w.retype([wg.edgeBetween(M, N)!], one);
+  invariants(w);
+  if (!sent() || sent() + w.cars.length !== n) fail(`re-spacing: retype kept ${w.cars.length} of ${n} cars, sent back ${sent()}`);
+  for (const c of [...w.cars]) { wg.detachCar(c); w.cars.splice(w.cars.indexOf(c), 1); }
+  X.building!.pending.length = 0;
+  w.commitBend(w.runAt({ x: 500, y: 500 })!, w.planBend(w.runAt({ x: 500, y: 500 })!, { x: 500, y: 380 }));
+  const curve = w.selected!;
+  if (!curve) fail(`re-spacing: bend refused (${w.message})`);
+  // one direction packed end to end along the whole curve, 15.05px apart (touching is 15): the straight road is shorter
+  const run = wg.runOf(curve[0]!);
+  n = 0;
+  for (let i = 0, at = 0, d = 10; i < run.edges.length; at += run.edges[i]!.length, i++) {
+    const e = run.edges[i]!, l = wg.lanesFrom(e, run.nodes[i]!)[0]!;
+    for (; d - at < e.length - 1; d += 15.05) { const c = new Car(l, trip(X, Y)); c.s = d - at; l.cars.push(c); w.cars.push(c); n++; }
+  }
+  if (!w.commitBend(curve, w.planBend(curve, { x: 500, y: 500 }))) fail(`re-spacing: straightening refused (${w.message})`);
+  invariants(w);
+  if (sent() + w.cars.length !== n) fail(`re-spacing: bend kept ${w.cars.length} of ${n} cars, sent back ${sent()}`);
+}
+// Opposite lefts: two cars turning left from opposite arms of a crossroads, both at the node, are drawn a car width apart, not on top
+// of each other
+{
+  const wg = new RoadGraph(), J = wg.addNode(500, 500), [Nn, E, S, W] = [[500, 300], [700, 500], [500, 700], [300, 500]].map(([x, y]) => wg.addNode(x!, y!));
+  for (const o of [Nn, E, S, W]) wg.addEdge(J, o!, { bridge: false, tunnel: false, level: 0, type: DEFAULT_TYPE });
+  const at = (from: Node, to: Node): Vec => {
+    const c = new Car(wg.lanesFrom(wg.edgeBetween(from, J)!, from)[0]!, makeTrip('commute', game.buildings[0]!, game.buildings[1]!));
+    c.s = c.lane.edge.length;
+    c.path = [J, to];
+    c.exit = wg.lanesFrom(wg.edgeBetween(J, to)!, J)[0]!;
+    return wg.carPos(c);
+  };
+  const d = dist(at(S!, W!), at(Nn!, E!));
+  if (d < 8) fail(`opposite lefts: drawn ${d.toFixed(1)}px apart at the node`);
+}
+// Old saves: a roundabout was one node with a size; it loads as a ring of that size, a smaller one where an arm is too short for it,
+// with its arms joined and no 'roundabout' node left
+{
+  const w = blank(), wg = w.graph, J = wg.addNode(800, 800), K = wg.addNode(300, 300);
+  const H = [[800, 500], [1100, 800], [800, 1100], [500, 800]].map(([x, y], i) => town(w, x, y, 'home', i === 0));
+  for (const h of H) w.commitPath(w.planPath([h, J], 0, DEFAULT_TYPE));
+  for (const [x, y] of [[330, 300], [300, 100], [100, 300]]) w.commitPath(w.planPath([K, { x, y }], 0, DEFAULT_TYPE));
+  const d = JSON.parse(serialize(w)) as { nodes: { control: string; ring: number }[]; edges: { ring?: number }[]; rings?: unknown };
+  delete d.rings;
+  for (const e of d.edges) delete e.ring;
+  Object.assign(d.nodes[wg.nodes.indexOf(J)]!, { control: 'roundabout', ring: 1 });
+  Object.assign(d.nodes[wg.nodes.indexOf(K)]!, { control: 'roundabout', ring: 2 });
+  const v = deserialize(JSON.stringify(d)), sizes = v.graph.rings.map(r => r.hub.ring).sort();
+  const homes = v.buildings.filter(b => b.kind === 'home').map(b => b.node);
+  if (sizes.join() !== '0,1' || v.graph.nodes.some(n => n.control === 'roundabout') || homes.some(a => homes.some(b => a !== b && !findPath(v.graph, a, b, null, true))))
+    fail(`old save: roundabouts loaded as rings of sizes ${sizes}`);
+  for (let t = 0; t < 10 * 60; t++) { v.update(DT); invariants(v); }
 }
 const out = game.reports.reduce<Record<string, number>>((o, r) => (o[r.outcome] = (o[r.outcome] ?? 0) + 1, o), {});
 console.log(`SIMCHECK OK: t=${game.time.toFixed(0)}s day=${game.day} score=${game.score} cars=${game.cars.length} maxCars=${maxCars} `
