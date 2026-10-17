@@ -1597,6 +1597,7 @@ export class Game {
     if (b.kind === 'home') b.residents = b.cap * T.PLACED_OCC;
     this.addBuilding(b);
     this.connect();
+    pruneLots(this);
     this.sfx.add('place');
     // a special is paid for, and its card opens
     if (b.special) {

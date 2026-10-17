@@ -1470,6 +1470,17 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const P = w.buildings.find(b => b.special === 'plaza')!, m1 = w.money;
   w.tryDemolish(P);
   if (w.buildings.includes(P) || w.money !== m1 + SPECIALS.plaza.cost * TUNING.SPECIAL_REFUND) fail(`specials: demolish refunded $${w.money - m1}`);
+  // a special set down on zoned lots clears the lots under and right beside it; the brush paints none there afterwards
+  {
+    const pl = planZone(w, { x: 1500, y: 500 }, { x: 1850, y: 500 }, 'shop')!;
+    commitZone(w, pl);
+    const n0 = w.lots.length, why = place('plaza', 1680, 440), Z = w.buildings.filter(b => b.special === 'plaza').at(-1)!;
+    const hits = (): boolean => w.lots.some(l => Z.contains(l, 2)) || Z.outline().some(q => lotAt(w, q));
+    if (why || hits() || w.lots.length >= n0) fail(`specials: zone lots left under a plaza (${why}, ${n0} -> ${w.lots.length} lots)`);
+    const again = planZone(w, { x: 1500, y: 500 }, { x: 1850, y: 500 }, 'shop');
+    if (again?.ok) commitZone(w, again);
+    if (hits()) fail('specials: the brush painted lots under a plaza');
+  }
   // an emergency call: the ambulance drives out and back, fast enough on empty roads to cheer the street
   const home = w.addBuilding(buildingAt('home', { x: 1600, y: 480 }, Math.PI / 2, 1)), hosp = w.buildings.find(b => b.special === 'hospital')!;
   w.connect();
