@@ -216,6 +216,22 @@ Trips/day are rough totals of both legs on Normal:
 - The place ghost shows `+140 trips/day · $12,000 · upkeep $70` before placing (Islanders).
 - Demolishing a special refunds 50%.
 
+### G2 as built (where it differs from the above)
+Code: `TIER_DEFS`, `LEGACY`, `SPECIALS` and the G2 numbers in `TUNING` (`config.ts`); upgrades in `Zones.ts` (`upgradeBlock`, `nextLots`, `upgrade`, `downgrade`); specials in `Game` (`specialWhy`, `specialLimit`, `specialsHour`, `tripsPerDay`); art in `src/rendering/TierArt.ts`.
+- **Unlocks** are city levels until G3's maps: each `TierDef.level` / `SpecialDef.level` is the map number in the tables above (tier 1 of every zone is level 1). Locked buttons and the building card say the level.
+- **Visitors:** corner shop 2/day and store 4/day (the table lists none), so small shops still trade with linked exits as they did in G1. Legacy buildings keep the old `VISITS`, `TRUCKS_PER_DAY`, `POLLUTION_R` (`LEGACY`).
+- **Upgrade timer** reuses `upH` (hours good; while abandoned it still counts toward recovery). It stops at `UPGRADE_H`, so a building waiting for its neighbour lots upgrades the hour they free up. Demand is the one computed that hour. A frozen city does not upgrade.
+- **Extra lots** must be in line: same angle (within ~3°), fronts within 2 px, sides touching. Lots round a curve never merge. The far side along the frontage is tried first. The new footprint must clear other buildings and roads (SAT). The door moves to the middle of the lots and the driveway is laid again (`Game.rehome`). Cars heading there re-path.
+- **Downgrade** keeps the first lots in frontage order and the residents that fit; workers over the job slots lose the job. The feed says `Townhouses shrank to House: <cause>`. Only tier 1 is abandoned.
+- **Noise:** a logistics park adds noise `0.5 x staffed` at homes within `NOISE_R`. A tower home multiplies its noise part by 1.5 (`noiseX`).
+- **Specials** work as a zone (`kind`): plaza = shop, terminal = industry (no pollution, no imports of its own), stadium and hospital = office. They have no lots, are never abandoned or upgraded, and only get an access score. Placing one opens its card. Limits: plazas 2, stadium 1, hospital `max(1, floor(pop / 2,000))`, terminal one per linked exit and within 400 px of an exit. Demolish refunds 50% (nothing in Creative).
+- **Terminal:** with one in reach, a factory's exports and imports (and a short shop's imports) go to or come from the terminal (paid as a delivery, `TAX_FREIGHT`). The terminal's own 30 trucks/day x staffed drive to the exit and pay exports x1.5. ponytail: its truck count does not follow the goods routed through it.
+- **Stadium:** a basic match day already runs in G2 on even days. The feed warns at 12:00; fans `min(240, 60 + pop / 15)` set off half at 17:00 and half at 18:00 (40% from linked exits, the rest from homes, as `visit` trips); $25 for each arriving before 19:00; they leave 22:00-23:00. G5 adds the countdown ring and the $2,000 on-time bonus.
+- **Hospital:** emergency calls (purpose `emergency`, red; vehicle kind `ambulance`, never random) at `pop / 200` a day shared among the hospitals, to a home picked by residents; it waits `CALL_STAY` 0.25 h and drives back. Calls pay nothing. Outbound within 1.3x its ideal = Fast: homes within 300 px get +3 happiness for a day (`Building.cheer`). Priority (`RoadGraph.update`): its lane goes first, a light switches to a phase that lets it go once it is within `AMB_R` 60 px, a yield treats it as the main road, a stop lets it roll.
+- **Art:** `Building.art` picks the model: a special's own, `home2`..`home4`, `shop2`, `shop3`, `office2`, `industry3`, `workshop` (tier 1 industry), `industry2` (= the factory). Detail depends on the tier and lot count (units, bays, docks). Variants are still seeded by position, not building id. Neighbour-aware detail is not done.
+- **Save:** `buildings[].special?` (null) and `cheer?` (0). No version bump.
+- **HUD:** the Build menu has a Specials group (picture, name, price, lock). The building card shows `Tier n of m · next: <name> (<lots> lots)` and what blocks it, or the hours left. A special's card shows its effect, upkeep and trips a day. The ghost label is `<name> · +N trips/day · $cost · upkeep $u/day`.
+
 ---
 
 ## 4. Campaign (G3)
