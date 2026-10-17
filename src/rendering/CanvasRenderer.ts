@@ -2,7 +2,7 @@ import { profile } from '../core/Profile.ts';
 import type { Vec } from '../util/geom.ts';
 import { WORLD, inWater } from '../world/MapGenerator.ts';
 import { BIOMES, PURPOSES, TIERS, ZONES, ZONE_NAME, TUNING } from '../core/config.ts';
-import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, onRing, ringOut, roadWidth } from '../network/RoadGraph.ts';
+import { ROAD_W, NODE_R, LANE_W, RINGS, RING_W, deckH, onRing, rampJoint, ringOut, roadWidth } from '../network/RoadGraph.ts';
 import { PRIORITY, STOP, YIELD, approachOf, autoMasks, inLanes, laneMasks, links, moveOf, planOf, signOf } from '../network/Junction.ts';
 import { armSpot, curve, editable, linkUI, linksOf, handles, signPost, targets } from '../ui/LaneLinks.ts';
 import type { Edge, Node, Ring, RoadType } from '../network/RoadGraph.ts';
@@ -221,9 +221,11 @@ export class CanvasRenderer {
     const nodes = game.graph.nodes;
     const ground = edges.filter((e) => !e.tunnel && e.level === 0);
     // A node belongs to the level of its edges; a ramp joint to the upper one (doors are ground)
-    const levelNodes = (L: number): Node[] => nodes.filter((n) => (n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level))) === L);
+    const topOf = (n: Node): number => (n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level)));
+    const levelNodes = (L: number): Node[] => nodes.filter((n) => topOf(n) === L);
+    // a car goes over the highest deck at either end of its road, so one crossing a ramp joint is never cut by the next deck up
     const carsAt = (L: number): void => {
-      for (const car of game.cars) if (car.lane.edge.level === L) this.car(game, car);
+      for (const car of game.cars) if (Math.max(topOf(car.lane.edge.a), topOf(car.lane.edge.b)) === L) this.car(game, car);
     };
 
     // Tunnels: body hidden under the mountain, faint dashed trace + big portals
@@ -264,9 +266,10 @@ export class CanvasRenderer {
 
     // Elevated layers, lowest first: each covers the roads and cars below it
     const top = edges.reduce((m, e) => Math.max(m, e.level), 0);
+    this.deckShadows(edges.filter(e => e.level > 0));
     for (let L = 1; L <= top; L++) {
       const layer = edges.filter((e) => e.level === L);
-      if (!layer.length) continue;
+      if (!layer.length) { carsAt(L); continue; }
       const nodesL = levelNodes(L);
       halo(L);
       this.viaduct(L, layer, nodesL);
@@ -1362,57 +1365,76 @@ export class CanvasRenderer {
     tree(ctx, n, r, 'round', this.treeCol, 0.02, n.id);
   }
 
-  // One elevated layer: ground shadow, pillars, blue-grey deck, white body, railings, centre line
-  private viaduct(level: number, edges: Edge[], joints: Node[]): void {
+  // Every deck's ground shadow, cast down-right as far as the deck is high (deckH, smooth along a ramp): a faint wide band and a core.
+  // One path per width over all levels, so shadows meeting at a ramp joint or crossing do not darken each other.
+  // ponytail: drawn under every deck, so a high deck casts none on a lower one; per-layer shadows need square ends at ramp joints
+  private deckShadows(edges: Edge[]): void {
     const ctx = this.ctx;
-    // Shadow cast down-right, further and softer the higher the deck: a faint wide band and a core. One path per width so
-    // overlapping shadows do not darken each other
-    ctx.save();
-    ctx.translate(level * 3, level * 4.5);
-    // ponytail: one path per width; shadows of different widths overlapping darken slightly
     for (const w of new Set(edges.map((e) => e.width))) {
       ctx.beginPath();
       for (const e of edges) {
         if (e.width !== w) continue;
-        ctx.moveTo(e.a.x, e.a.y);
-        ctx.lineTo(e.b.x, e.b.y);
+        // a ramp's foot (height 0) pulls its end in, so the round end stays under the deck and off the ground road
+        const ha = deckH(e, e.a), hb = deckH(e, e.b), [ux, uy] = this.dir(e.a, e), k = Math.min(e.length / 2, w / 2 + 7);
+        const ia = ha ? 0 : k, ib = hb ? 0 : k;
+        ctx.moveTo(e.a.x + ux * ia + ha * 3, e.a.y + uy * ia + ha * 4.5);
+        ctx.lineTo(e.b.x - ux * ib + hb * 3, e.b.y - uy * ib + hb * 4.5);
       }
       ctx.strokeStyle = 'rgba(20,30,50,.06)';
-      ctx.lineWidth = w + 10 + level * 2;
+      ctx.lineWidth = w + 14;
       ctx.stroke();
       ctx.strokeStyle = 'rgba(20,30,50,.12)';
       ctx.lineWidth = w + 4;
       ctx.stroke();
     }
-    ctx.restore();
+  }
 
-    // Pillars, each with its own shadow down to the ground
+  // One elevated layer: pillars, blue-grey deck, white body, railings, centre line. Heights run smoothly along a ramp (deckH): the
+  // pillars follow them, and a deck stops square where it meets the ramp piece below, so a ramp reads as one slope
+  private viaduct(level: number, edges: Edge[], joints: Node[]): void {
+    const ctx = this.ctx;
+    // Pillars, each with its own shadow down to the ground; none where a ramp is still near the ground
     for (const e of edges) {
       const off = e.width / 2 + 2;
       const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
       const len = Math.hypot(dx, dy) || 1;
-      const ux = dx / len, uy = dy / len;
+      const ux = dx / len, uy = dy / len, ha = deckH(e, e.a), hb = deckH(e, e.b);
       for (let s = 20; s < len; s += 40) {
-        const x = e.a.x + ux * s, y = e.a.y + uy * s;
+        const x = e.a.x + ux * s, y = e.a.y + uy * s, h = ha + (hb - ha) * s / len;
+        if (h < 0.5) continue;
         for (const k of [1, -1]) {
           const px = x - k * uy * off, py = y + k * ux * off;
-          this.seg({ x: px, y: py }, { x: px + level * 3, y: py + level * 4.5 }, 'rgba(20,30,50,.12)', 3);
+          this.seg({ x: px, y: py }, { x: px + h * 3, y: py + h * 4.5 }, 'rgba(20,30,50,.12)', 3);
           this.circle(px, py, 2.6, PILLAR);
           this.circle(px - 0.6, py - 0.6, 1.3, '#A7B4C5');
         }
       }
     }
 
-    // color null: the tier fill of the joint's widest road
+    // color null: the tier fill of the joint's widest road. A ramp joint has no disc: the two decks meet there
     const joint = (color: string | null, extra: number): void => {
       for (const n of joints) {
+        if (rampJoint(n)) continue;
         const j = jointEdge(n, level), c = color ?? TIERS[j?.type.tier ?? 'street'].fill;
         this.circle(n.x, n.y, ((j?.width ?? ROAD_W) + extra) / 2, c);
       }
     };
-    for (const e of edges) this.line(e, BRIDGE, e.width + 5);
+    // a square end where the road meets the ramp piece below (whose round end fills the outside of a bend), round ends elsewhere. The
+    // outline stops 1px short of the joint, so its antialiased edge leaves no seam across the body there
+    const down = (e: Edge, n: Node): boolean => rampJoint(n) && n.edges.some(x => x.level < e.level);
+    const deck = (color: (e: Edge) => string, extra: number): void => {
+      for (const e of edges) {
+        if (!down(e, e.a) && !down(e, e.b)) { this.line(e, color(e), e.width + extra); continue; }
+        const [ux, uy] = this.dir(e.a, e), ia = down(e, e.a) && extra ? 1 : 0, ib = down(e, e.b) && extra ? 1 : 0;
+        ctx.lineCap = 'butt';
+        this.seg({ x: e.a.x + ux * ia, y: e.a.y + uy * ia }, { x: e.b.x - ux * ib, y: e.b.y - uy * ib }, color(e), e.width + extra);
+        ctx.lineCap = 'round';
+        for (const n of [e.a, e.b]) if (!down(e, n)) this.circle(n.x, n.y, (e.width + extra) / 2, color(e));
+      }
+    };
+    deck(() => BRIDGE, 5);
     joint(BRIDGE, 5);
-    for (const e of edges) this.line(e, TIERS[e.type.tier].fill, e.width);
+    deck(e => TIERS[e.type.tier].fill, 0);
     for (const e of edges) this.rails(e.a, e.b, e.width);
     // Joints after the railings keep junctions open
     joint(null, 0);

@@ -93,6 +93,19 @@ export interface Ring { hub: Node; nodes: Node[]; spokes: Map<Node, Spoke> }
 
 export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean; exit?: boolean; ring?: Ring | null }
 
+// A ramp joint: a plain joint between roads on two levels
+export function rampJoint(n: Node): boolean {
+  return !n.building && n.edges.length === 2 && n.edges[0].level !== n.edges[1].level;
+}
+
+// Deck height of e at its end n, in levels: a ramp joint sits at the lower of its two roads, so each ramp piece climbs one level over
+// its length and the slope is continuous; any other node at its highest road.
+// ponytail: drawing only (shadows, pillars); the sim keeps whole levels per edge
+export function deckH(e: Edge, n: Node): number {
+  const h = rampJoint(n) ? Math.min(n.edges[0].level, n.edges[1].level) : Math.max(0, ...n.edges.map(x => x.level));
+  return Math.max(e.level - 1, Math.min(e.level, h));
+}
+
 export class RoadGraph {
   nodes: Node[] = [];
   edges: Edge[] = [];

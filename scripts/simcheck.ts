@@ -2,7 +2,7 @@
 // Run: npm run simcheck   (= node --experimental-transform-types --no-warnings scripts/simcheck.ts)
 // Exits 1 on the first failure. Add one scenario/assertion per behaviour you want to lock in.
 import { Game, HOUR, levelPop } from '../src/core/Game.ts';
-import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
+import { RoadGraph, BRAKE, CAR_LEN, DEFAULT_TYPE, deckH, LIGHT_PERIOD, MERGE_S, NODE_R, RINGS, clearR, lightGroup, ringOut, stopDist } from '../src/network/RoadGraph.ts';
 import { LEFT, PRIORITY, RIGHT, STOP, STRAIGHT, YIELD, applyPreset, approachOf, clonePlan, cycleSign, links, moveOf, planOf, setLink, setSeconds, signOf } from '../src/network/Junction.ts';
 import { stepDone, tutorialSteps } from '../src/ui/Tutorial.ts';
 import { dueTip } from '../src/ui/Tips.ts';
@@ -950,6 +950,13 @@ for (const kind of ['yield', 'stop'] as const) {
   const down = w.planPath([Q, Y], 2, flat), dl = down.segs.map(g => g.level);
   if (!down.ok || dl[0] !== 2 || dl[dl.length - 1] !== 0) fail(`ramps: down to the door ${dl} (${down.reason})`);
   w.commitPath(down);
+  // drawn heights run smoothly: two roads meeting at a joint agree on its height, and no piece climbs more than a level
+  for (const n of w.graph.nodes) {
+    const hs = n.edges.map(e => deckH(e, n));
+    if (n.edges.length === 2 && !n.building && hs[0] !== hs[1]) fail(`ramps: a step at a joint (${hs})`);
+  }
+  if (w.graph.edges.some(e => Math.abs(deckH(e, e.a) - deckH(e, e.b)) > 1)) fail('ramps: a piece climbs more than a level');
+  if (!w.graph.edges.some(e => e.level === 1 && Math.min(deckH(e, e.a), deckH(e, e.b)) === 0)) fail('ramps: no ramp foot at height 0');
   w.queueTrip(X.building!, Y.building!, 'commute');
   for (let t = 0; t < 30 * 60; t++) w.update(DT);
   if (w.score !== 1) fail(`ramps: the commute over the viaduct did not arrive (score ${w.score})`);
