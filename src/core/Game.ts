@@ -1083,8 +1083,11 @@ export class Game {
     return CONTROL_COST[kind] * (kind === 'roundabout' ? RINGS[ring].cost : 1);
   }
 
+  // less a ring's fresh spokes (RoadGraph.spokesOf), which its removal lays
   controlRefund(n: Node): number {
-    return this.controlPrice(n.control, n.ring) * this.refundX(n.controlDay);
+    const r = n.control === 'roundabout' ? this.graph.ringOf(n) : null;
+    const spokes = r ? this.graph.spokesOf(r, this.today).filter(x => x.fresh).reduce((m, { v, a, s }) => m + this.price(r.hub, v, { ...a, type: s.type }), 0) : 0;
+    return this.controlPrice(n.control, n.ring) * this.refundX(n.controlDay) - spokes;
   }
 
   upkeepPerDay(): number {
@@ -1916,7 +1919,7 @@ export class Game {
     const cost = this.controlPrice(kind, size) - this.controlRefund(n);
     if (cost > this.money) { this.say('Not enough money'); return false; }
     let m = n;
-    if (r) { const x = g.removeRing(r); this.dropCars(x.cars); m = x.node; }
+    if (r) { const x = g.removeRing(r, this.today); this.dropCars(x.cars); m = x.node; }
     if (kind === 'roundabout') {
       const drives = g.edges.filter(e => e.drive && [e.a, e.b].some(v => !v.building && dist(v, m) < clearR(size)));
       for (const e of drives) this.dropCars(g.removeEdge(e));

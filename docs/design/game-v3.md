@@ -38,7 +38,7 @@ A roundabout is no longer a node with a fake ring. Placing one removes the junct
 **Ring record:** `Ring { hub: Node; nodes: Node[] }` in `RoadGraph.rings`. The hub is a node off the graph at the centre with control `roundabout`, `ring` = size and `controlDay`: the junction panel, the control price, refunds and upkeep use it as they used the old roundabout node.
 - Edit-clicking any ring edge or vertex opens the roundabout panel: size S/M/L with the price difference, and Remove.
 - Changing size rebuilds the ring. Cars on it go back to their trip origin, as on demolish.
-- Remove restores a plain node joining the arms (refunded under the road rule, by `controlDay`).
+- Remove restores a plain node joining the arms (refunded under the road rule, by `controlDay`). Each spoke is the arm piece the build took out there (`Ring.spokes`: the cheapest type per px and the oldest build day of the pieces, with driveway / exit flags), so a build and removal never turn a cheap stub into a free copy of the outer road. A road joined to the ring later (or a ring saved before spokes) gets a fresh spoke of its type, priced into the removal (`controlRefund` less it).
 
 **Entry and exit:**
 - An arm vertex is a `yield` node whose main edges are the two ring edges.

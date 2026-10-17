@@ -742,6 +742,30 @@ for (const [k, b] of Object.entries(BIOMES)) {
   }
   if (most[2]! <= most[0]!) fail(`ring sizes: large ring held ${most[2]} cars at once, small ${most[0]}`);
 }
+// Ring value: a ring built and taken out puts back the arm pieces it took (type, oldest day), so a street stub by an avenue never comes
+// back as a free avenue spoke, and a road joined to the ring later pays for its spoke: the cash plus every road's and control's refund
+// never rises over build / remove cycles of each size
+{
+  const w = blank(), wg = w.graph, J = wg.addNode(800, 800), av: RoadType = { tier: 'avenue', lanes: 2, oneWay: false };
+  w.commitPath(w.planPath([J, { x: 500, y: 800 }], 0, DEFAULT_TYPE));
+  w.commitPath(w.planPath([J, { x: 834, y: 800 }], 0, DEFAULT_TYPE));
+  w.commitPath(w.planPath([{ x: 834, y: 800 }, { x: 1100, y: 800 }], 0, av));
+  const worth = (): number => w.money + wg.edges.reduce((n, e) => n + w.refundOf(e), 0) + wg.rings.reduce((n, r) => n + w.controlRefund(r.hub), 0);
+  const start = worth(), hub = () => (wg.rings[0] ?? { hub: wg.nearestNode({ x: 800, y: 800 }, 1)! }).hub;
+  for (const size of [0, 1, 2, 2, 1, 0] as const) {
+    if (!w.setControl(hub(), 'roundabout', size)) fail(`ring value: size ${size} refused (${w.message})`);
+    if (!w.setControl(hub(), 'none')) fail('ring value: removal refused');
+    if (worth() > start + 1e-6) fail(`ring value: a size ${size} cycle gained $${(worth() - start).toFixed(1)}`);
+  }
+  const spoke = wg.nearestNode({ x: 800, y: 800 }, 1)!.edges.find(e => e.length < 40);
+  if (spoke?.type.tier !== 'street') fail(`ring value: the east spoke came back as ${spoke?.type.tier}`);
+  w.setControl(hub(), 'roundabout', 1);
+  const top = wg.rings[0]!.nodes.reduce((p, q) => q.y < p.y ? q : p), pl = w.planPath([top, { x: top.x, y: 500 }], 0, av);
+  if (!pl.ok) fail(`ring value: road to the ring refused (${pl.reason})`);
+  w.commitPath(pl);
+  w.setControl(hub(), 'none');
+  if (worth() > start + 1e-6) fail(`ring value: a road joined to the ring gained $${(worth() - start).toFixed(1)} on removal`);
+}
 // Short links by a ring: a large ring on a street lined with homes lays their driveways again outside its clear radius (no junction,
 // split or driveway join inside it, so no link there a queued car overhangs), a road may not join an arm inside it but may join the
 // ring itself from outside, a small ring is refused with a junction inside its own clear radius, and trips through keep every

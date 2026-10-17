@@ -82,8 +82,10 @@ export interface Edge {
 
 // A roundabout: one-way ring edges joining its nodes counter-clockwise on screen (nodes[i] -> nodes[i + 1]); the cars entering from an
 // arm merge into gaps in the ring traffic. Its hub stands in for it off the graph (the junction panel, the control price): control
-// 'roundabout', ring = its size, controlDay, at the centre.
-export interface Ring { hub: Node; nodes: Node[] }
+// 'roundabout', ring = its size, controlDay, at the centre. spokes: per arm node, the arm piece the build took out there (the cheapest
+// type per px, the oldest day), put back as its spoke when the ring goes, so a build and removal never mint a road.
+export interface Spoke { type: RoadType; day: number; drive: boolean; exit: boolean; out: boolean } // out: one-way away from the hub
+export interface Ring { hub: Node; nodes: Node[]; spokes: Map<Node, Spoke> }
 
 export interface EdgeFlags { bridge: boolean; tunnel: boolean; level: number; type: RoadType; drive?: boolean; exit?: boolean; ring?: Ring | null }
 
@@ -652,25 +654,30 @@ export class RoadGraph {
   buildRing(n: Node, size: RingSize, day: number): { ring: Ring; cars: Car[] } | null {
     const R = RINGS[size].r, other = (e: Edge, v: Node) => e.a === v ? e.b : e.a;
     const plain = (v: Node) => !v.building && v.control === 'none' && v.edges.length === 2;
-    const arms: { inner: Edge[]; e: Edge; at: Node; o: Node }[] = [];
+    const arms: { inner: Edge[]; from: Node[]; e: Edge; at: Node; o: Node }[] = [];
     for (const e0 of n.edges) {
       let at = n, e = e0;
-      const inner: Edge[] = [];
+      const inner: Edge[] = [], from: Node[] = [];
       while (dist(other(e, at), n) < R && plain(other(e, at))) {
         inner.push(e);
+        from.push(at);
         at = other(e, at);
         e = at.edges[0] === e ? at.edges[1] : at.edges[0];
       }
       if (dist(other(e, at), n) < R) return null;
-      arms.push({ inner, e, at, o: other(e, at) });
+      arms.push({ inner, from, e, at, o: other(e, at) });
     }
-    const cars: Car[] = [], cuts: Node[] = [];
-    for (const { inner, e, at, o } of arms) {
+    const cars: Car[] = [], cuts: Node[] = [], spoke = new Map<Node, Spoke>();
+    const rate = (x: Edge) => x.drive || x.exit ? 0 : laneFactor(x.type) * TIERS[x.type.tier].cost;
+    for (const { inner, from, e, at, o } of arms) {
       // where at->o crosses the circle: |at + t (o - at) - n| = R
       const dx = o.x - at.x, dy = o.y - at.y, fx = at.x - n.x, fy = at.y - n.y, A = dx * dx + dy * dy, B = fx * dx + fy * dy;
       const t = (-B + Math.sqrt(Math.max(0, B * B - A * (fx * fx + fy * fy - R * R)))) / A, p = { x: at.x + dx * t, y: at.y + dy * t };
       const v = dist(p, o) < 1 ? o : this.splitEdge(e, p);
       inner.push(v === o ? e : this.edgeBetween(at, v)!);
+      from.push(at);
+      const i = inner.reduce((k, x, j) => rate(x) < rate(inner[k]) ? j : k, 0), x = inner[i];
+      spoke.set(v, { type: x.type, day: Math.min(...inner.map(y => y.day)), drive: x.drive, exit: x.exit, out: x.type.oneWay && x.a === from[i] });
       for (const x of inner) cars.push(...this.removeEdge(x));
       cuts.push(v);
     }
@@ -684,21 +691,28 @@ export class RoadGraph {
       const k = Math.max(1, Math.round(arc / step));
       for (let j = 1; j < k; j++) { const a = ang(v) - arc * j / k; nodes.push(this.addNode(n.x + Math.cos(a) * R, n.y + Math.sin(a) * R)); }
     });
-    const hub = this.node(n.x, n.y), ring: Ring = { hub, nodes };
+    const hub = this.node(n.x, n.y), ring: Ring = { hub, nodes, spokes: spoke };
     Object.assign(hub, { control: 'roundabout', ring: size, controlDay: day });
     nodes.forEach((v, i) => this.addEdge(v, nodes[(i + 1) % nodes.length], { bridge: false, tunnel: false, level: 0, type: RING_TYPE, ring }, day));
     this.rings.push(ring);
     return { ring, cars };
   }
 
-  // Takes the ring out: a plain node at its centre joined to each arm by a spoke of the arm's type (keeping a one-way arm's direction).
-  // Returns that node and the cars taken off the ring.
-  removeRing(r: Ring): { node: Node; cars: Car[] } {
+  // The spokes removeRing lays, one per road off the ring: the piece the build took out there (Ring spokes), else (a road joined to the
+  // ring later, or a ring saved before spokes) a fresh one of that road's type and its direction, dated day: Game charges for those.
+  spokesOf(r: Ring, day: number): { v: Node; a: Edge; s: Spoke; fresh: boolean }[] {
+    return r.nodes.flatMap(v => v.edges.filter(e => !e.ring).map((a, i) => {
+      const s = i ? undefined : r.spokes.get(v);
+      return { v, a, s: s ?? { type: a.type, day, drive: false, exit: false, out: a.type.oneWay && a.a === v }, fresh: !s };
+    }));
+  }
+
+  // Takes the ring out: a plain node at its centre joined to each road off it by a spoke (spokesOf). Returns that node and the cars
+  // taken off the ring.
+  removeRing(r: Ring, day: number): { node: Node; cars: Car[] } {
     const c = this.addNode(r.hub.x, r.hub.y), cars: Car[] = [];
-    for (const v of r.nodes) for (const a of v.edges.filter(e => !e.ring)) {
-      const out = a.type.oneWay && a.a === v;
-      this.addEdge(out ? c : v, out ? v : c, { bridge: a.bridge, tunnel: a.tunnel, level: a.level, type: a.type }, a.day);
-    }
+    for (const { v, a, s } of this.spokesOf(r, day))
+      this.addEdge(s.out ? c : v, s.out ? v : c, { bridge: a.bridge, tunnel: a.tunnel, level: a.level, type: s.type, drive: s.drive, exit: s.exit }, s.day);
     for (const v of r.nodes) for (const e of [...v.edges]) if (e.ring) cars.push(...this.removeEdge(e));
     this.rings = this.rings.filter(x => x !== r);
     this.dropIfOrphan(c);

@@ -9,7 +9,7 @@ import { Building } from '../entities/Building.ts';
 import type { Commuter, Parts } from '../entities/Building.ts';
 import type { Trip, TripReport } from '../entities/Trip.ts';
 import { RoadGraph } from '../network/RoadGraph.ts';
-import type { Control, RingSize, RoadType } from '../network/RoadGraph.ts';
+import type { Control, RingSize, RoadType, Spoke } from '../network/RoadGraph.ts';
 import type { JunctionPlan } from '../network/Junction.ts';
 import { adoptLots, demandOf } from './Zones.ts';
 import { milestonesAt, run0 } from './Campaign.ts';
@@ -41,7 +41,7 @@ export interface SaveData {
   nodes: { x: number; y: number; b: Ref; control: Control; controlDay: number; phase: number; phaseTimer: number; plan: JunctionPlan | null; delay: number; ring?: RingSize }[];
   edges: { a: Ref; b: Ref; type: RoadType; bridge: boolean; tunnel: boolean; level: number; day: number; drive: boolean; exit?: boolean; heat: number; ring?: Ref }[];
   // absent before ring roundabouts (a 'roundabout' node is rebuilt as a ring on load)
-  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[] }[];
+  rings?: { x: number; y: number; size: RingSize; day: number; nodes: Ref[]; spokes?: (Spoke | null)[] }[];
   reports: (Omit<TripReport, 'from' | 'to'> & { from: Ref; to: Ref })[];
   metrics: Metrics;
 }
@@ -81,7 +81,7 @@ export function serialize(g: Game): string {
       a: ni.get(e.a)!, b: ni.get(e.b)!, type: e.type, bridge: e.bridge, tunnel: e.tunnel, level: e.level, day: e.day, drive: e.drive, exit: e.exit, heat: e.heat,
       ring: e.ring ? ri.get(e.ring) : undefined,
     })),
-    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!) })),
+    rings: g.graph.rings.map(r => ({ x: r.hub.x, y: r.hub.y, size: r.hub.ring, day: r.hub.controlDay, nodes: r.nodes.map(v => ni.get(v)!), spokes: r.nodes.map(v => r.spokes.get(v) ?? null) })),
     reports: g.reports.map(r => ({ ...r, from: bi.get(r.from)!, to: bi.get(r.to)! })),
     metrics: g.metrics,
   };
@@ -113,7 +113,8 @@ export function deserialize(json: string): Game {
   d.buildings.forEach((x, i) => { B[i].pending = x.pending.map(trip); B[i].parked = x.parked.map(trip); });
   const N = d.nodes.map(({ x, y, b, ...n }) => Object.assign(graph.addNode(x, y, b < 0 ? null : B[b]), n));
   const R = (d.rings ?? []).map(x => {
-    const hub = Object.assign(graph.node(x.x, x.y), { control: 'roundabout', ring: x.size, controlDay: x.day } as const), r = { hub, nodes: x.nodes.map(i => N[i]) };
+    const hub = Object.assign(graph.node(x.x, x.y), { control: 'roundabout', ring: x.size, controlDay: x.day } as const), nodes = x.nodes.map(i => N[i]);
+    const r = { hub, nodes, spokes: new Map(nodes.flatMap((v, i) => x.spokes?.[i] ? [[v, x.spokes[i]!] as const] : [])) };
     graph.rings.push(r);
     return r;
   });
