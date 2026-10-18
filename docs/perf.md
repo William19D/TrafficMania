@@ -89,3 +89,31 @@ Known gaps:
 - About 4.2 Mpx are blitted at the whole-city view, against a target of 2. With the whole world on screen, the terrain and the scene layer are each about one screen (1.75 and 1.94 Mpx), and cloud shadows add 0.36. Only merging the terrain into the scene would get under 2, and that merge measured as worth about 4 fps.
 - The ~550 ms frame right after a zoom remains. It is `paintTerrain` (about 310 ms at any scale) plus the layer repaints. A terrain kept across zoom buckets or tiles would remove it.
 - 4x at 3x zoom is now sim-bound: 10 ms of sim per frame against 4 ms of drawing.
+
+## P3: graphics quality setting and Auto
+
+Settings (renamed from Sound in the main and pause menus) has a Graphics row: Auto, High, Medium or Low. The choice is saved in `localStorage` (`tm_quality`), and `?quality=` overrides it for tests. `npm run bench` pins `?quality=high` (`--quality low|medium|auto` to change it) so Auto cannot move mid-run.
+
+- High: everything, as before. The backing store is `devicePixelRatio` capped at 1.5 (`Quality.pxRatio`), so this only changes screens above 1.5x.
+- Medium: full resolution, pedestrians capped at 60 (instead of 140), no birds.
+- Low: the canvas backing store at 0.75 of that, CSS-scaled to the window. 30 pedestrians, no birds, no cloud shadows, and flat cars (`farCars`) at every zoom.
+- Auto (`AutoQuality`, the default) counts frames over 2 s windows. Under 52 fps it steps down one level. It steps back up after `wait` windows in a row at 58 fps or more, and `wait` doubles on every step down (2, 4, 8 ... 64 windows), so a level that could not hold is not retried every few seconds. The window right after a change is ignored, and so is any window with a frame gap over 250 ms (a zoom repaint, a hidden tab). simcheck covers the steps.
+- F3 toggles a small `fps · level` readout in the bottom-left corner.
+
+Same laptop GPU, median of 3 runs. Before is commit d1af903, measured in this session; the medium column ignores one run in which the 4x zoom scenario stalled (sim 103 ms per frame).
+
+| scenario | fps before | High | Medium | Low | draw ms before / Low |
+|---|---|---|---|---|---|
+| 1x whole city | 104.0 | 106.6 | 113.5 | 120.2 | 4.88 / 4.33 |
+| 4x whole city | 70.1 | 75.2 | 76.1 | 81.6 | 4.38 / 3.99 |
+| 4x zoom 3x | 52.8 | 54.9 | 58.4 | 65.4 | 4.36 / 3.57 |
+| paused draw-only | 119.0 | 124.1 | 132.1 | 139.8 | 6.03 / 4.88 |
+
+High runs the same code as before at 1x DPR, and its census is identical (229 drawImage, 4.22 Mpx blitted), so the High column is the same as before within run-to-run noise. Low census: 223 drawImage, 63 fill, 38 stroke, 2.17 Mpx blitted (was 4.22).
+
+Known gaps:
+
+- Low gains about 15-25%. That is not a 2x: at 4x the sim is now the larger part of the frame (6-8 ms against 4 ms of drawing).
+- A display or browser capped under 60 Hz (30 Hz battery saver) reads as slow, so Auto ends on Low there.
+- Auto starts at High each session, so a slow machine spends its first ~6 s stepping down. Saving the last Auto level would skip that.
+- On Low, text drawn on the canvas (labels, offscreen markers) is a little soft from the 0.75 upscale.
