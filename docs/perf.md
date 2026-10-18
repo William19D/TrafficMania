@@ -32,3 +32,29 @@ Laptop GPU `ANGLE (Intel, Intel(R) UHD Graphics (0x000046A3) Direct3D11)`, commi
 Paused frame census: 888 drawImage, 1487 fill, 1217 stroke, 1010 fillRect, 39 fillText; 4.3 Mpx blitted (6.9 Mpx of source).
 
 Reading it: paused, the main thread is ~65% idle yet the frame rate is 21, so drawing is GPU-bound (thousands of small draws plus large layer blits), not JS-bound. At 4x the sim adds ~22 ms per frame; its top self time is `Car.update` (13%), `RoadGraph.update` (7%), `approachOf` (4%), `findPath` (4%), `turn` (3%), `defaultPlan` (3%). The 4x zoom run has a single ~600 ms frame shortly after the zoom.
+
+## P1: static art cached in layers
+
+What a paused frame used to redraw every time now lives in offscreen layers over the view plus a quarter view of margin, at the half-power-of-2 zoom bucket the road layer already used (`CanvasRenderer.statics`):
+
+- roads layer: the ground roads as before, now with the lane arrows and the signal poles. Key: `netKey`, which now also covers the junction plans' lane connections and legacy bans, plus the island decor.
+- scene layer, the one blitted each frame: lots, then the roads layer, then every building (shadow, sprite, dashed no-road outline), then the static parts of the highway exits. Key: `sceneKey` over the lots and buildings (placement, model, abandoned, empty home, road access). It is repainted when either key changes.
+- night layer: the lamp pools and lit windows, added up in one canvas and blitted with `lighter` at the night's strength. Repainted only when the scene changes and it is night.
+- deck layers: one per elevated level, bounded to that level's own extent (the first one also holds every deck's ground shadow). Cleared with the roads.
+
+Still drawn live each frame: cars, signal heads (a cached sprite per lamp state, so one drawImage), trip dots (one fill per purpose plus one stroke), smoke, pins, events, overlays, selection/hover, previews, juice and ambience. Pedestrians and birds are batched into a few paths. The vehicle sprites now include the tail lights (a dim and a braking variant) and the indicator, so cars need no per-frame `fillRect`.
+
+A whole layer is repainted when it goes stale: about 3 ms when a building changes, and about 20 ms when a road change repaints the roads under it. That happens at most once per in-game hour for growth, and otherwise only on player edits or when the view pans out of the margin. Screenshots before and after at the same camera, with the clock frozen, differ only in edge antialiasing (0.3% of pixels by more than 24/255; day, zoom 3x, night, night zoom).
+
+Same laptop GPU, median of 3 runs (range in brackets):
+
+| scenario | fps before | fps after | draw ms before | draw ms after | sim ms after | worst ms after |
+|---|---|---|---|---|---|---|
+| 1x whole city | 20.8 | 76.0 (71.9-77.2) | 10.8 | 6.2 | 2.3 | 49 |
+| 4x whole city | 21.3 | 59.7 (56.0-59.8) | 10.6 | 5.5 | 7.7 | 56 |
+| 4x zoom 3x | 26.5 | 33.7 (32.6-35.8) | 12.3 | 8.6 | 15.1 | 554 |
+| paused draw-only | 21.3 | 81.7 (81.1-82.8) | 11.5 | 6.7 | 0 | 97 |
+
+Paused frame census: 748 drawImage (was 888), 87 fill (was 1487), 55 stroke (was 1217), 21 fillRect (was 1010), 27 fillText; 4.3 Mpx blitted. Fills plus strokes went from 2704 to 142.
+
+Sim ms per frame dropped only because there are more frames per second; the sim's cost per game second is unchanged. The 4x zoom run is now sim-bound: `Car.update`, `RoadGraph.update`, `Junction.diff`, `turn` and `findPath` lead its profile. Its single ~550 ms frame right after the zoom is still there.
