@@ -117,3 +117,36 @@ Known gaps:
 - A display or browser capped under 60 Hz (30 Hz battery saver) reads as slow, so Auto ends on Low there.
 - Auto starts at High each session, so a slow machine spends its first ~6 s stepping down. Saving the last Auto level would skip that.
 - On Low, text drawn on the canvas (labels, offscreen markers) is a little soft from the 0.75 upscale.
+
+## P4: simulation hot paths
+
+`npm run simbench` (`scripts/simbench.ts`) times the sim alone in Node: it restores the bench city, pre-rolls 45 game seconds like `npm run bench`, then runs 60 more at the 1/60 s step. It prints ms per step, ms per 4x frame (4 steps) and a fingerprint of the final state (score, car count, a sum over car positions and speeds). For a pure optimization the fingerprint must not change. It is `score=27476 cars=449 ... sum=38216.90515950716` both before and after this step, and simcheck's whole output is identical too.
+
+What changed (no gameplay change):
+
+- `Junction.planOf`: the default plan was rebuilt on every call (atan2 per arm, a sort, the phase arrays), several times per light or sign junction per tick. It is now cached per node and rebuilt when the node's roads change: `addEdge` pushes onto `n.edges` and `unlink` replaces the array, so the cache is keyed by that array and its length. Node positions never change, and plan edits always replace the plan object.
+- `Junction.approachOf` (the `diff` calls in the old profile) is memoised per plan object and edge.
+- `RoadGraph.lanesFrom` returns per-edge lane lists built with the lanes (`Edge.fwd` / `Edge.back`) instead of filtering a new array per call. `edgeBetween` is a plain loop that skips the hidden-set lookup when nothing is hidden. `drivewayJunction` counts instead of filtering. `speedX` skips the event map when it is empty.
+- `RoadGraph.update`: each node's queue is compacted in place, and a node with no queue that is not a light is skipped before the plan, ambulance and closure setup. The ambulance lane set is only built when there is an ambulance, and the per-lane hold set is an array.
+- `findPath`: g-scores and closed flags live in reused typed arrays stamped per search, and the heap uses parallel arrays with hole sifting, so a search no longer allocates a Map, a Set and a tuple per push. It does the same comparisons in the same order, so routes are unchanged.
+- `Car.update` checks the cheap `arrows(lane) !== ANY` before `arrowLanes`, and `arrowLanes` returns before `edgeBetween` at nodes with no plan.
+
+Not done: a route cache per destination. Cars recompute their route on every new edge with the live congestion, so reusing a route would change where they drive. The binary heap was already there.
+
+simbench, the same machine: 1.42-1.49 ms per step before, 0.77 after (median of 5), so 5.7 ms per 4x frame becomes 3.1.
+
+`npm run bench`, same laptop GPU, both columns measured in this session. Before is commit 81b5184, median of 3 runs. After is the median of 3 runs: a fourth run was left out because everything in it ran about 2x slower, drawing and HUD included, which points to CPU throttling rather than the sim.
+
+| scenario | fps before | fps after | sim ms before | sim ms after | draw ms after | worst ms after |
+|---|---|---|---|---|---|---|
+| 1x whole city | 115.2 | 121.0 | 2.06 | 1.49 | 4.48 | 49 |
+| 4x whole city | 79.7 | 104.8 | 6.14 | 3.28 | 3.88 | 76 |
+| 4x zoom 3x | 56.2 | 80.9 | 9.64 | 4.66 | 4.16 | 447 |
+| paused draw-only | 130.4 | 131.5 | 0 | 0 | 4.75 | 111 |
+
+The 4x sim cost is now 3-5 ms per frame against a 15 ms target. The paused frame census is unchanged (229 drawImage, 4.22 Mpx blitted).
+
+Known gaps:
+
+- `Car.update`, `RoadGraph.update`, `findPath` and `turn` still lead the sim profile. What is left is mostly the per-car route search on each new edge and the junction logic's closures for nodes with a queue.
+- The roughly 450 ms frame right after a zoom (the terrain repaint) is unchanged.
