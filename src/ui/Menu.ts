@@ -182,7 +182,7 @@ export class Menu {
     if (v === 'main') {
       const a = slotLine(AUTO);
       const p = profile(), stars = totalStars(p);
-      body = `<h1 id="mn-title" class="brand">TrafficMania</h1>
+      body = `<h1 id="mn-title" class="brand"><img src="/logo.svg" alt="TrafficMania" width="1200" height="620"></h1>
         <p class="sub">Design the road network, find the bottleneck, fix it and grow the city.</p>
         <div class="mlist">
           ${a.ok ? btn('continue', `<span>Continue</span><small>${a.text}</small>`, 'primary') : ''}

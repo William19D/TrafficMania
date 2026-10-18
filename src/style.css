@@ -899,6 +899,7 @@ button.nrow:hover { background: var(--soft); }
 #menu h1, #menu h2 { margin: 0; font-size: 1.25em; }
 #menu h2 + .field, #menu h2 + table { margin-top: 1em; }
 #menu .brand { font-size: 2em; letter-spacing: -.02em; }
+#menu .brand img { display: block; width: 100%; max-width: 440px; height: auto; margin: 0 auto; }
 #menu .sub { margin: .375em 0 1.25em; color: var(--muted); font-size: max(14px, .875em); }
 #menu .mlist { display: flex; flex-direction: column; gap: .5em; }
 #menu .mlist .btn { justify-content: flex-start; width: 100%; }
