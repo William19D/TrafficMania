@@ -81,8 +81,8 @@ const SKIN = ['#F1C9A5', '#D9A47C', '#A8754F', '#6E4A32'];
 export function pedestrians(ctx: CanvasRenderingContext2D, edges: Edge[], hour: number, now: number, v: View, cap = 140): void {
   if (hour < 5 || hour > 23.5) return;
   const busy = hour > 7 && hour < 21 ? 1 : 0.35;
-  // batched: every shadow in one fill, then one fill per shirt and skin tone
-  const shadow = new Path2D(), shirts = SHIRTS.map(() => new Path2D()), skins = SKIN.map(() => new Path2D());
+  // every shadow, then every walker, as sprites off one sheet so the draws batch on the GPU (a path with hundreds of parts is slow to fill)
+  const at: number[] = [];
   let drawn = 0;
   for (const e of edges) {
     if (drawn >= cap) break;
@@ -94,19 +94,47 @@ export function pedestrians(ctx: CanvasRenderingContext2D, edges: Edge[], hour: 
       const hk = Math.imul(h ^ (k * 40503), 2246822519) >>> 0, side = k % 2 ? 1 : -1, spd = 5 + (hk % 5);
       const d = (now * spd + (hk % 997)) % (2 * L), s = Math.min(L - 3, Math.max(3, d < L ? d : 2 * L - d)), off = side * (e.width / 2 + 2.5) - (e.ring ? (e.type.lanes - 1) * 4.5 : 0); // a ring's road lies inside its chords' axis
       const x = a.x + ux * s - uy * off, y = a.y + uy * s + ux * off, step = Math.sin(now * spd * 1.6 + k) * 0.5;
-      // a negative skin index (hk >> 4 is signed) has always drawn the head in the shirt colour
-      const r = Math.atan2(uy, ux) + Math.PI / 2, sh = shirts[hk % SHIRTS.length], si = (hk >> 4) % SKIN.length, sk = si < 0 ? sh : skins[si];
-      shadow.moveTo(x + 2.7, y + 0.9); shadow.ellipse(x + 0.8, y + 0.9, 1.9, 1.5, 0, 0, Math.PI * 2);
-      sh.moveTo(x + 1.4 * Math.cos(r), y + 1.4 * Math.sin(r)); sh.ellipse(x, y, 1.4, 1.85 + step * 0.25, r, 0, Math.PI * 2);
-      sk.moveTo(x + 0.85, y); sk.arc(x, y, 0.85, 0, Math.PI * 2);
+      const r = Math.atan2(uy, ux) + Math.PI / 2, sh = hk % SHIRTS.length, si = (hk >> 4) % SKIN.length;
+      at.push(x, y, r, step, sh, si);
       drawn++;
     }
   }
   if (!drawn) return;
-  ctx.fillStyle = 'rgba(0,0,0,.18)';
-  ctx.fill(shadow);
-  shirts.forEach((p, i) => { ctx.fillStyle = SHIRTS[i]; ctx.fill(p); });
-  skins.forEach((p, i) => { ctx.fillStyle = SKIN[i]; ctx.fill(p); });
+  const m = ctx.getTransform(), K = m.a, sc = Math.min(8, 2 ** Math.ceil(Math.log2(Math.max(1, K)))), c = walkerSheet(sc), px = Math.ceil(WS * sc), cp = px + 2;
+  for (let i = 0; i < at.length; i += 6) {
+    ctx.setTransform(K, 0, 0, K, m.e + K * (at[i] + 0.8), m.f + K * (at[i + 1] + 0.9));
+    ctx.drawImage(c, 1, 1, px, px, -WS / 2, -WS / 2, px / sc, px / sc);
+  }
+  for (let i = 0; i < at.length; i += 6) {
+    // the stride stretches the body along the walk (and the head a little with it)
+    const co = K * Math.cos(at[i + 2]), sn = K * Math.sin(at[i + 2]), sy = (1.85 + at[i + 3] * 0.25) / 1.85;
+    const cell = 1 + at[i + 4] * (SKIN.length + 1) + (at[i + 5] < 0 ? SKIN.length : at[i + 5]);
+    ctx.setTransform(co, sn, -sn * sy, co * sy, m.e + K * at[i], m.f + K * at[i + 1]);
+    ctx.drawImage(c, cell * cp + 1, 1, px, px, -WS / 2, -WS / 2, px / sc, px / sc);
+  }
+  ctx.setTransform(m);
+}
+
+// Walker sheet at sc px per world px, WS-px cells: the shadow, then per shirt a body with each skin tone's head and one with a head in
+// the shirt colour (a negative skin index, hk >> 4 being signed, has always drawn that)
+const WS = 6;
+let sheet: { sc: number; c: HTMLCanvasElement } | null = null;
+function walkerSheet(sc: number): HTMLCanvasElement {
+  if (sheet?.sc === sc) return sheet.c;
+  const cp = Math.ceil(WS * sc) + 2, c = document.createElement('canvas'), x = c.getContext('2d')!;
+  c.width = (1 + SHIRTS.length * (SKIN.length + 1)) * cp;
+  c.height = cp;
+  const blob = (cell: number, fill: string, rx: number, ry: number): void => {
+    x.setTransform(sc, 0, 0, sc, cell * cp + 1 + WS / 2 * sc, 1 + WS / 2 * sc);
+    x.beginPath();
+    x.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    x.fillStyle = fill;
+    x.fill();
+  };
+  blob(0, 'rgba(0,0,0,.18)', 1.9, 1.5);
+  SHIRTS.forEach((sh, i) => [...SKIN, sh].forEach((sk, j) => { const cell = 1 + i * (SKIN.length + 1) + j; blob(cell, sh, 1.4, 1.85); blob(cell, sk, 0.85, 0.85); }));
+  sheet = { sc, c };
+  return c;
 }
 
 // Soft cloud shadow, drawn once: overlapping radial pools on a small canvas, stretched over the world

@@ -35,27 +35,44 @@ export function pick(p: Palette, u: number): number {
 }
 
 const KI: Record<Kind, number> = { car: 0, truck: 1, moto: 2, ambulance: 3 };
-const GLASS = '#2C3949', LAMP = '#FFF4C8';
-const sprites = new Map<number, HTMLCanvasElement>();
+export const GLASS = '#2C3949';
+const LAMP = '#FFF4C8';
+// A sprite: its rect on an atlas page. Every model at one pixel scale shares pages, so the renderer's draws batch on the GPU
+export interface Cell { c: HTMLCanvasElement; x: number; y: number; w: number; h: number }
+const sprites = new Map<number, Cell>();
+const pages = new Map<number, { c: HTMLCanvasElement; n: number; cols: number; rows: number }>();
+const MAX_L = Math.max(...Object.values(KINDS).map(k => k.len));
 
-function frame(kind: Kind, s: number, draw: (c: CanvasRenderingContext2D, h: number, w: number) => void): HTMLCanvasElement {
-  const L = KINDS[kind].len, c = document.createElement('canvas');
-  c.width = Math.ceil((L + 2 * VPAD) * s);
-  c.height = Math.ceil(VH * s);
-  const ctx = c.getContext('2d')!;
-  ctx.scale(s, s);
-  ctx.translate(L / 2 + VPAD, VH / 2);
+// ponytail: pages of 256 cells (1 px gutters), a new page when one fills; never freed
+function frame(kind: Kind, s: number, draw: (c: CanvasRenderingContext2D, h: number, w: number) => void): Cell {
+  const L = KINDS[kind].len, cw = Math.ceil((MAX_L + 2 * VPAD) * s) + 2, ch = Math.ceil(VH * s) + 2;
+  let pg = pages.get(s);
+  if (!pg || pg.n === pg.cols * pg.rows) {
+    const cols = Math.max(1, Math.floor(2048 / cw)), rows = Math.ceil(256 / cols), c = document.createElement('canvas');
+    c.width = cols * cw;
+    c.height = rows * ch;
+    pages.set(s, pg = { c, n: 0, cols, rows });
+  }
+  const cell = { c: pg.c, x: (pg.n % pg.cols) * cw + 1, y: Math.floor(pg.n / pg.cols) * ch + 1, w: Math.ceil((L + 2 * VPAD) * s), h: ch - 2 };
+  pg.n++;
+  const ctx = pg.c.getContext('2d')!;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(cell.x, cell.y, cell.w, cell.h);
+  ctx.clip();
+  ctx.setTransform(s, 0, 0, s, cell.x + (L / 2 + VPAD) * s, cell.y + VH / 2 * s);
   ctx.lineCap = ctx.lineJoin = 'round';
   draw(ctx, L / 2, VW[kind] / 2);
-  return c;
+  ctx.restore();
+  return cell;
 }
 
 // Soft drop shadow of the body (the renderer offsets it down-right in world space)
-export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
+export function vshadow(kind: Kind, s: number): Cell {
   const key = -1 - (KI[kind] * 16 + Math.log2(s));
   let c = sprites.get(key);
   if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => {
-    // the shape is drawn far off the canvas and only its blurred shadow lands on it (shadow offsets ignore the transform)
+    // the shape is drawn far off the cell and only its blurred shadow lands on it (shadow offsets ignore the transform)
     x.shadowColor = 'rgba(20,30,50,.38)';
     x.shadowBlur = 1.6 * s;
     x.shadowOffsetX = 1000 * s;
@@ -66,8 +83,31 @@ export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
   return c;
 }
 
+// Body colour of a vehicle, for the far-zoom shapes
+export function paintOf(kind: Kind, paint: number): string {
+  const p = kind === 'truck' ? TRUCK_LIVERY : SETS[Math.max(0, PAINTS.indexOf(profile().cosmetics.paint))]!;
+  return p[pick(p, paint)]![0];
+}
+
+// Far-zoom shapes of a vehicle, local frame, as [x0, y0, x1, y1, part]: 0 body (paint), 1 darker body (truck cab), 2 glass, 3 roof
+// (lighter paint); ambulances wear white
+type Shape = [number, number, number, number, number];
+const shapes = new Map<Kind, Shape[]>();
+export function farShapes(kind: Kind): Shape[] {
+  let s = shapes.get(kind);
+  if (!s) shapes.set(kind, s = farShapes0(kind));
+  return s;
+}
+function farShapes0(kind: Kind): Shape[] {
+  const h = KINDS[kind].len / 2, w = VW[kind] / 2;
+  if (kind === 'moto') return [[-h + 0.5, -1.5, h - 0.5, 1.5, 0]];
+  if (kind === 'truck') return [[-h, -w, h - 7, w, 0], [h - 6, -w + 0.4, h, w - 0.4, 1], [h - 2.4, -w + 1, h - 1.1, w - 1, 2]];
+  if (kind === 'ambulance') return [[-h, -w, h, w, 0], [h - 5.6, -w + 0.9, h - 3.7, w - 0.9, 2]];
+  return [[-h, -w, h, w, 0], [-h + 2.1, -w + 0.8, h - 3.7, w - 0.8, 2], [-h + 4, -w + 1.3, h - 6, w - 1.3, 3]];
+}
+
 // paint: the car's roll in [0, 1), set at spawn; brake: the tail lights lit; blink: the indicator lit, 1 right / -1 left / 0 off
-export function vehicle(kind: Kind, paint: number, s: number, brake = false, blink = 0): HTMLCanvasElement {
+export function vehicle(kind: Kind, paint: number, s: number, brake = false, blink = 0): Cell {
   const set = kind === 'truck' ? 0 : Math.max(0, PAINTS.indexOf(profile().cosmetics.paint)), p = kind === 'truck' ? TRUCK_LIVERY : SETS[set]!;
   const i = pick(p, paint), key = (((set * 4 + KI[kind]) * 16 + i) * 16 + Math.log2(s)) * 6 + +brake * 3 + blink + 1;
   let c = sprites.get(key);
