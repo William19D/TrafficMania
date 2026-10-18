@@ -6,8 +6,8 @@ export const QUALITIES: Quality[] = ['auto', 'high', 'medium', 'low'];
 const LEVELS: Level[] = ['high', 'medium', 'low'];
 const KEY = 'tm_quality';
 
-// Backing-store px per CSS px: the device ratio capped at 1.5 (a 4K laptop does not need 3x the fill), 0.75 of that on Low
-export const pxRatio = (dpr: number, l: Level): number => Math.min(dpr || 1, 1.5) * (l === 'low' ? 0.75 : 1);
+// Backing-store px per CSS px: High keeps a 2x display sharp (cap 2), Medium caps at 1.5, Low is 0.75 of Medium
+export const pxRatio = (dpr: number, l: Level): number => Math.min(dpr || 1, l === 'high' ? 2 : 1.5) * (l === 'low' ? 0.75 : 1);
 
 // ?quality= (bench and tests) over the saved choice over Auto
 export function loadQuality(): Quality {

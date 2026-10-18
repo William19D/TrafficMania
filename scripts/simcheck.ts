@@ -1413,7 +1413,7 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   q.set('high');
   run(20, 10, false);
   if (q.level !== 'high' || q.fps > 21) fail('quality: a fixed level moved');
-  if (pxRatio(3, 'high') !== 1.5 || pxRatio(1, 'low') !== 0.75 || pxRatio(1, 'medium') !== 1) fail('quality: backing store ratio');
+  if (pxRatio(3, 'high') !== 2 || pxRatio(3, 'medium') !== 1.5 || pxRatio(1, 'low') !== 0.75 || pxRatio(1, 'medium') !== 1) fail('quality: backing store ratio');
 }
 // Day/night: no tint at noon, a full blue night at midnight, a warm dusk part way to night, and the tint never jumps between two
 // clock readings 3 in-game minutes apart; a shade of a shade still parses (vehicle tones are shaded again for roofs and outlines)

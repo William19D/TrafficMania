@@ -671,7 +671,7 @@ export class CanvasRenderer {
   // the view leaves the rect, else one blit.
   // ponytail: whole-layer repaints (a grown building repaints the scene, ~3 ms; a road change the roads too, ~20 ms); dirty tiles if they show
   private statics(game: Game, ground: Edge[], nodes0: Node[], dpr: number): Layer {
-    const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 60, vw = innerWidth / z, vh = innerHeight / z;
+    const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 120, vw = innerWidth / z, vh = innerHeight / z;
     const x0 = Math.max(-P, this.cam.x - vw / 2), y0 = Math.max(-P, this.cam.y - vh / 2);
     const x1 = Math.min(WORLD.w + P, this.cam.x + vw / 2), y1 = Math.min(WORLD.h + P, this.cam.y + vh / 2);
     const rk = `${netKey(game.graph.edges, game.graph.nodes)}${profile().cosmetics.island}`, sk = sceneKey(game.buildings, game.lots);
@@ -1369,7 +1369,7 @@ export class CanvasRenderer {
   private controls(nodes: Node[], part: 'static' | 'live'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
-      if (part === 'live' && n.control === 'light' && this.inView(n.x, n.y, 40)) this.drawLights(n, 'head');
+      if (part === 'live' && n.control === 'light' && this.inView(n.x, n.y, 80)) this.drawLights(n, 'head');
       if (part === 'live' || !junction(n)) continue;
       // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way, a plain junction or a ring entry
       const d0 = NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
@@ -1710,7 +1710,7 @@ export class CanvasRenderer {
     ctx.globalCompositeOperation = 'source-over';
     // signal heads stay readable: redrawn over the tint as the night deepens
     ctx.globalAlpha = d.night;
-    for (const n of game.graph.nodes) if (n.control === 'light' && this.inView(n.x, n.y, 40)) this.drawLights(n, 'all');
+    for (const n of game.graph.nodes) if (n.control === 'light' && this.inView(n.x, n.y, 80)) this.drawLights(n, 'all');
     ctx.globalAlpha = 1;
   }
 
