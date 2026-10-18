@@ -58,3 +58,34 @@ Same laptop GPU, median of 3 runs (range in brackets):
 Paused frame census: 748 drawImage (was 888), 87 fill (was 1487), 55 stroke (was 1217), 21 fillRect (was 1010), 27 fillText; 4.3 Mpx blitted. Fills plus strokes went from 2704 to 142.
 
 Sim ms per frame dropped only because there are more frames per second; the sim's cost per game second is unchanged. The 4x zoom run is now sim-bound: `Car.update`, `RoadGraph.update`, `Junction.diff`, `turn` and `findPath` lead its profile. Its single ~550 ms frame right after the zoom is still there.
+
+## P2: visible-rect blits, culling, far-zoom cars, sprite sheets
+
+What changed (`CanvasRenderer`, `VehicleArt`, `Ambience`):
+
+- Every large cached canvas (the terrain, the scene layer, its night glow, the deck layers) is blitted through `blit`, which draws only the source rect in view (in whole source px, so it lands where the full blit did). At the whole-city view the whole world is on screen, so this saves little there; at 3x zoom the blitted area dropped from 22.7 to 5.6 Mpx.
+- Culling: cars whose road is out of view (45 px margin, room for a headlight beam) are skipped before `carPos`; trip dots, smoke, roof pins and signal heads are culled to the view. Cars are bucketed by deck level in one pass, with each node's level memoised for the frame (it used to be recomputed per car per level).
+- Cars: placed with `setTransform` instead of save/translate/rotate/restore, with all shadows drawn first, then all bodies. Every vehicle model at one pixel scale lives on a shared atlas page (`VehicleArt.frame`), so consecutive draws batch on the GPU. At 0.8 px per world px or less, which includes the default whole-city view at 1080p, each car is drawn as a few flat `fillRect`s instead: shadow, body, glass, roof, the indicator while it blinks, and the VIP, ambulance and purpose extras (`farShapes`). Tail lights are dropped there because they are under a px.
+- Pedestrians and trip dots are sprites off one small sheet each, drawn per item, where they used to be Path2D batches. On this GPU a path with hundreds of parts was the slow case: one fill of the 171 trip dots cost about 20 fps, the 140 pedestrians about 30 fps at 1.5x, and Path2D-batched far cars were slower than sprites.
+- Boats and birds are skipped below 0.5 px per world px. Pedestrians were already zoom-gated.
+
+Measured, not kept: flat-shape headlight beams at far zoom were no faster than the beam sprite, so beams stay sprites. Leaving out the terrain blit (one of the two screen-sized blits at the whole-city view) gained only about 4 fps, so the terrain was not merged into the scene layer. That merge would have needed the animated water (glints, boats) re-composited under bridges and shore roads.
+
+Same laptop GPU. Both columns are measured in this session, median of 3 runs: before is commit ddcbdd9 (the P1 numbers above came from another session, and this laptop varies about 10% between sessions).
+
+| scenario | fps before | fps after | draw ms before | draw ms after | sim ms after | worst ms after |
+|---|---|---|---|---|---|---|
+| 1x whole city | 68.6 | 107.1 (106.0-115.0) | 6.72 | 4.71 | 2.23 | 69 |
+| 4x whole city | 53.4 | 73.5 (70.9-79.8) | 6.01 | 4.44 | 6.83 | 63 |
+| 4x zoom 3x | 33.2 | 53.2 (50.5-55.3) | 8.64 | 4.22 | 10.30 | 563 |
+| paused draw-only | 76.0 | 124.5 (122.4-130.4) | 7.42 | 5.20 | 0 | 118 |
+
+Paused frame census (whole-city view): 229 drawImage (was 748), 84 fill, 54 stroke, 1656 fillRect (the far cars; was 21), 27 fillText; 4.22 Mpx blitted (was 4.34). At 3x zoom: 431 drawImage (was 743), 5.6 Mpx (was 22.7).
+
+Screenshots before and after at the same camera, with the clock frozen, differ only where the far-zoom cars are (0.46% of pixels by more than 24/255 at the whole-city view). At 1.7x, at 3x and at night the difference (0.14-0.23%) is the same as between two runs of unchanged code (0.08-0.19%).
+
+Known gaps:
+
+- About 4.2 Mpx are blitted at the whole-city view, against a target of 2. With the whole world on screen, the terrain and the scene layer are each about one screen (1.75 and 1.94 Mpx), and cloud shadows add 0.36. Only merging the terrain into the scene would get under 2, and that merge measured as worth about 4 fps.
+- The ~550 ms frame right after a zoom remains. It is `paintTerrain` (about 310 ms at any scale) plus the layer repaints. A terrain kept across zoom buckets or tiles would remove it.
+- 4x at 3x zoom is now sim-bound: 10 ms of sim per frame against 4 ms of drawing.
