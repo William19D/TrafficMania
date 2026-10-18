@@ -27,7 +27,7 @@ import { mapOpen, parseProfile, profile0, recordGrade, toolLevel, totalStars } f
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
-import { netKey } from '../src/rendering/RoadArt.ts';
+import { netKey, sceneKey } from '../src/rendering/RoadArt.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -1417,6 +1417,24 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const k3 = key();
   g.edges[0]!.type = t0;
   if (new Set([k0, k1, k3]).size !== 3 || key() !== k0) fail('art: road key misses a change');
+  // ...and with a lane connection (the cached lane arrows); the scene key with a building's model, an emptied home or abandonment
+  const p0 = J2.plan, pl = planOf(J2);
+  J2.plan = { ...pl, lanes: pl.approaches.map(() => [7]) };
+  const k4 = key();
+  J2.plan = p0;
+  if (k4 === k0 || key() !== k0) fail('art: road key misses a lane connection');
+  const b0 = game.buildings.find(b => b.kind === 'home') ?? fail('art: no home'), sk = (): number => sceneKey(game.buildings, game.lots);
+  const s0 = sk(), tier = b0.tier, res = b0.residents;
+  b0.abandoned = true;
+  const s1 = sk();
+  b0.abandoned = false;
+  b0.tier = tier === 2 ? 3 : 2;
+  const s2 = sk();
+  b0.tier = tier;
+  b0.residents = res < 1 ? 5 : 0;
+  const s3 = sk();
+  b0.residents = res;
+  if (sk() !== s0 || [s1, s2, s3].includes(s0)) fail('art: scene key misses a change');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

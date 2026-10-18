@@ -5,7 +5,7 @@ import { profile } from '../core/Profile.ts';
 import { PAINTS } from '../core/Achievements.ts';
 
 // Vehicle models, flat top-down, local frame +x forward, centred. Cached per kind, paint and pixel scale; the renderer
-// draws one rotated drawImage per vehicle plus the live lights (brake, indicators, purpose dot) on top.
+// draws one rotated drawImage per vehicle (tail lights and indicators baked in) plus the live extras (VIP pennant, ambulance bar, purpose dot) on top.
 export const VW: Record<Kind, number> = { car: 8, truck: 8.5, moto: 4, ambulance: 8 };
 // Sprite frame: VPAD px round the body lengthwise, VH px tall (room for the side mirrors and the shadow's blur)
 export const VPAD = 2, VH = 14;
@@ -66,12 +66,22 @@ export function vshadow(kind: Kind, s: number): HTMLCanvasElement {
   return c;
 }
 
-// paint: the car's roll in [0, 1), set at spawn
-export function vehicle(kind: Kind, paint: number, s: number): HTMLCanvasElement {
+// paint: the car's roll in [0, 1), set at spawn; brake: the tail lights lit; blink: the indicator lit, 1 right / -1 left / 0 off
+export function vehicle(kind: Kind, paint: number, s: number, brake = false, blink = 0): HTMLCanvasElement {
   const set = kind === 'truck' ? 0 : Math.max(0, PAINTS.indexOf(profile().cosmetics.paint)), p = kind === 'truck' ? TRUCK_LIVERY : SETS[set]!;
-  const i = pick(p, paint), key = ((set * 4 + KI[kind]) * 16 + i) * 16 + Math.log2(s);
+  const i = pick(p, paint), key = (((set * 4 + KI[kind]) * 16 + i) * 16 + Math.log2(s)) * 6 + +brake * 3 + blink + 1;
   let c = sprites.get(key);
-  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => draw(x, kind, p[i]![0], h, w)));
+  if (!c) sprites.set(key, c = frame(kind, s, (x, h, w) => {
+    draw(x, kind, p[i]![0], h, w);
+    x.fillStyle = brake ? '#FF2A2A' : '#8C2A2A';
+    if (kind === 'moto') x.fillRect(-h - 0.4, -0.6, 1.2, 1.2);
+    else { x.fillRect(-h - 0.4, -w + 0.6, 1.3, 1.6); x.fillRect(-h - 0.4, w - 2.2, 1.3, 1.6); }
+    if (!blink) return;
+    const sy = blink > 0 ? w - 1.5 : -w - 0.5;
+    x.fillStyle = '#FFB020';
+    x.fillRect(-h - 1, sy, 2, 2);
+    x.fillRect(h - 1, sy, 2, 2);
+  }));
   return c;
 }
 
