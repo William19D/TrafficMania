@@ -15,10 +15,12 @@ import { corners, lotAt, lotRect } from '../core/Zones.ts';
 import { PAD, look, shade, sprite, variant } from './BuildingArt.ts';
 import { paintTerrain, shimmer, tree } from './Scenery.ts';
 import { birds, boats, cloudShadows, pedestrians } from './Ambience.ts';
-import { grain, netKey } from './RoadArt.ts';
+import { grain, netKey, sceneKey } from './RoadArt.ts';
 import { BEAM_L, BEAM_W, GLOW_R, beam, daylight, glow } from './Lighting.ts';
 import type { Daylight } from './Lighting.ts';
-import { VH, VPAD, VW, vehicle, vshadow } from './VehicleArt.ts';
+import { GLASS, VH, VPAD, VW, farShapes, paintOf, vehicle, vshadow } from './VehicleArt.ts';
+import { pxRatio } from './Quality.ts';
+import type { Level } from './Quality.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -33,9 +35,12 @@ const PILLAR = '#8A99AD';
 const ACCENT = '#2F6FED';
 // lane connection colours, one per junction approach
 const LINK_COLS = [ACCENT, '#2F8F5B', '#E08A1E', '#8A4FD8', '#D0457A', '#1E9AA8'];
-const BRAKE_ON = '#FF2A2A';
-const BRAKE_OFF = '#8C2A2A';
 const AMBER = '#FFB020';
+// Under this many px per world px cars are flat shapes (farCars)
+const FAR = 0.8;
+// shade() per colour, memoised for the far cars
+const tints = new Map<string, string>();
+const tint = (c: string, k: number): string => { const key = c + k; let t = tints.get(key); if (!t) tints.set(key, t = shade(c, k)); return t; };
 const NOISE = '#8E7CC3';
 const SMOG = '#9A6B2F';
 // Sidewalk paving and its outer kerb (street, avenue, boulevard); driveways in concrete; paint near junctions
@@ -63,8 +68,9 @@ export class CanvasRenderer {
   // Land colour of the current biome, for the roundabout islands
   private land = BIOMES.temperate.land;
   private treeCol = BIOMES.temperate.tree;
-  // Cached static ground roads (asphalt, kerbs, verges, markings, islands, stop lines) over a world rect at s px per world px
-  private roads: { key: number; isl: string; t: Game['terrain']; s: number; x: number; y: number; w: number; h: number; c: HTMLCanvasElement } | null = null;
+  // Cached static art over a world rect at s px per world px (statics): the ground roads (r), the scene blitted each frame (c: lots, r,
+  // buildings, exits), its night glow (n: lamps, lit windows; ver: the scene it was painted from) and per deck level its viaducts
+  private layer: Layer | null = null;
   // The followed car's last known route (its path is null for a tick after each node), and the car it belongs to
   private route: { car: Car | null; nodes: Node[] } = { car: null, nodes: [] };
   // Cached ground of the current map at s px per world px; building sprites' scale
@@ -73,6 +79,12 @@ export class CanvasRenderer {
   // Cars drawn this frame and where, for the headlights over the night tint
   private seen: Car[] = [];
   private seenAt: { x: number; y: number; angle: number }[] = [];
+  // This frame's world transform (px per world px, offset) and the world rect in view
+  private wt: [number, number, number] = [1, 0, 0];
+  private view = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  // graphics level (Quality.ts), set by the game loop
+  quality: Level = 'high';
+  private get px(): number { return pxRatio(devicePixelRatio, this.quality); }
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -96,7 +108,7 @@ export class CanvasRenderer {
   }
 
   resize(): void {
-    const dpr = devicePixelRatio || 1;
+    const dpr = this.px;
     this.canvas.width = Math.round(innerWidth * dpr);
     this.canvas.height = Math.round(innerHeight * dpr);
     this.canvas.style.width = innerWidth + 'px';
@@ -160,7 +172,7 @@ export class CanvasRenderer {
 
   render(game: Game, preview: PathPlan | null, anchor: Vec | null, handle: Vec | null, hover: Vec | null = null): void {
     const ctx = this.ctx;
-    const dpr = devicePixelRatio || 1;
+    const dpr = this.px;
     // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
     if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
     // still 0x0: nothing to draw, and a 0 zoom would make a 0px ground canvas whose drawImage throws and stops the game loop
@@ -198,17 +210,20 @@ export class CanvasRenderer {
     const gs = Math.min(Math.ceil(z * dpr), Math.floor(Math.sqrt(12e6 / (WORLD.w * WORLD.h)) * 100) / 100);
     if (this.ground?.t !== terrain || this.ground.s !== gs) this.ground = { t: terrain, s: gs, c: paintTerrain(terrain, gs) };
 
-    const world = (): void => ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (innerWidth / 2 - this.cam.x * z), dpr * (innerHeight / 2 - this.cam.y * z));
+    const k = dpr * z, tx = dpr * (innerWidth / 2 - this.cam.x * z), ty = dpr * (innerHeight / 2 - this.cam.y * z);
+    this.wt = [k, tx, ty];
+    const world = (): void => ctx.setTransform(k, 0, 0, k, tx, ty);
     world();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
-    ctx.drawImage(this.ground.c, 0, 0, this.ground.c.width / gs, this.ground.c.height / gs);
     const now = performance.now() / 1000, hw = innerWidth / 2 / z, hh = innerHeight / 2 / z;
-    const view = { x0: this.cam.x - hw, y0: this.cam.y - hh, x1: this.cam.x + hw, y1: this.cam.y + hh };
+    const view = this.view = { x0: this.cam.x - hw, y0: this.cam.y - hh, x1: this.cam.x + hw, y1: this.cam.y + hh };
+    this.blit(this.ground.c, { s: gs, x: 0, y: 0, w: WORLD.w, h: WORLD.h });
     shimmer(ctx, terrain, now);
-    boats(ctx, terrain, now, view);
+    // ponytail: boats and birds are under 3 px below half a px per world px
+    if (k >= 0.5) boats(ctx, terrain, now, view);
 
     // World border, almost invisible
     ctx.strokeStyle = '#DDDBD4';
@@ -221,12 +236,22 @@ export class CanvasRenderer {
     const nodes = game.graph.nodes;
     const ground = edges.filter((e) => !e.tunnel && e.level === 0);
     // A node belongs to the level of its edges; a ramp joint to the upper one (doors are ground)
-    const topOf = (n: Node): number => (n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level)));
-    const levelNodes = (L: number): Node[] => nodes.filter((n) => topOf(n) === L);
-    // a car goes over the highest deck at either end of its road, so one crossing a ramp joint is never cut by the next deck up
-    const carsAt = (L: number): void => {
-      for (const car of game.cars) if (Math.max(topOf(car.lane.edge.a), topOf(car.lane.edge.b)) === L) this.car(game, car);
+    const tops = new Map<Node, number>();
+    const topOf = (n: Node): number => {
+      let t = tops.get(n);
+      if (t === undefined) tops.set(n, t = n.building ? 0 : Math.max(0, ...n.edges.map(e => e.level)));
+      return t;
     };
+    const levelNodes = (L: number): Node[] => nodes.filter((n) => topOf(n) === L);
+    // a car goes over the highest deck at either end of its road, so one crossing a ramp joint is never cut by the next deck up;
+    // cars on a road out of view (with room for a headlight beam) are skipped before their position is worked out
+    const byLevel: Car[][] = [], M = 45;
+    for (const car of game.cars) {
+      const { a, b } = car.lane.edge;
+      if (Math.max(a.x, b.x) < view.x0 - M || Math.min(a.x, b.x) > view.x1 + M || Math.max(a.y, b.y) < view.y0 - M || Math.min(a.y, b.y) > view.y1 + M) continue;
+      (byLevel[Math.max(topOf(a), topOf(b))] ??= []).push(car);
+    }
+    const carsAt = (L: number): void => { if (byLevel[L]) this.cars(game, byLevel[L]); };
 
     // Tunnels: body hidden under the mountain, faint dashed trace + big portals
     for (const e of edges) {
@@ -250,37 +275,36 @@ export class CanvasRenderer {
       ctx.globalAlpha = 1;
     };
     halo(0);
-    this.lots(game);
 
-    // Ground roads: the cached static layer, then the live lane arrows, heat, signals and signs over it
-    const nodes0 = levelNodes(0);
-    this.roadLayer(game, ground, nodes0, dpr);
-    this.laneArrows(ground);
+    // The cached scene (lots, ground roads with their lane arrows and static junction paint, buildings, exits), then the live heat,
+    // signal heads, trip dots and smoke over it. Buildings sit on the ground, under the viaducts; cars never enter a footprint
+    const nodes0 = levelNodes(0), lay = this.statics(game, ground, nodes0, dpr);
+    this.blit(lay.c, lay);
     if (game.overlay === 'heat') this.heatMap(ground, nodes0);
     this.controls(nodes0, 'live');
-    // Buildings sit on the ground, under the viaducts; cars never enter a footprint (the door is outside it)
-    for (const b of game.buildings) if (b.kind !== 'gate') this.building(b, game.time);
-    this.exits(game);
-    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view);
+    const shown = game.buildings.filter(b => this.inView(b.x, b.y, Math.max(b.w, b.h) / 2 + 40));
+    this.pending(shown);
+    for (const b of shown) this.smoke(b, game.time);
+    this.exits(game, true);
+    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view, this.quality === 'high' ? 140 : this.quality === 'medium' ? 60 : 30);
     carsAt(0);
 
-    // Elevated layers, lowest first: each covers the roads and cars below it
-    const top = edges.reduce((m, e) => Math.max(m, e.level), 0);
-    this.deckShadows(edges.filter(e => e.level > 0));
+    // Elevated layers, lowest first: each covers the roads and cars below it; the first one cached with every deck's ground shadow
+    const top = edges.reduce((m, e) => Math.max(m, e.level), 0), decks = edges.filter(e => e.level > 0), low = Math.min(...decks.map(e => e.level));
     for (let L = 1; L <= top; L++) {
       const layer = edges.filter((e) => e.level === L);
       if (!layer.length) { carsAt(L); continue; }
       const nodesL = levelNodes(L);
       halo(L);
-      this.viaduct(L, layer, nodesL);
+      this.deck(lay, L, layer, nodesL, L === low ? decks : null);
       if (game.overlay === 'heat') this.heatMap(layer, nodesL);
-      this.controls(nodesL, 'all');
+      this.controls(nodesL, 'live');
       carsAt(L);
     }
 
     // Ambience over every level: cloud shadows drifting over the ground, birds above them
-    if (game.overlay === 'none') cloudShadows(ctx, now, view);
-    birds(ctx, now, view);
+    if (game.overlay === 'none' && this.quality !== 'low') cloudShadows(ctx, now, view);
+    if (k >= 0.5 && this.quality === 'high') birds(ctx, now, view);
 
     // Day/night: the world under a multiply tint from the clock (not under an overlay, which must read true), then the night's
     // lamps, windows and headlights over it; labels and tool hints below stay untinted
@@ -409,7 +433,7 @@ export class CanvasRenderer {
     // No road access: red badge on the roof, and a label while the cursor is over the building
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for (const b of game.buildings) {
+    for (const b of shown) {
       const over = !!hover && b.contains(hover, 4), top = b.y - Math.max(b.w, b.h) / 2 - 10;
       if (b.connected) {
         if (b.downH) { this.pin(b, top, over); continue; }
@@ -525,7 +549,7 @@ export class CanvasRenderer {
     ctx.fillRect(0, 0, W, H);
     if (ev.base) {
       ctx.strokeStyle = 'rgba(210,225,245,0.45)';
-      ctx.lineWidth = 1.2 * (devicePixelRatio || 1);
+      ctx.lineWidth = 1.2 * this.px;
       ctx.beginPath();
       // ponytail: 160 streaks on a fixed lattice scrolled by time; no splashes
       for (let i = 0; i < 160; i++) {
@@ -642,30 +666,87 @@ export class CanvasRenderer {
     ctx.fill();
   }
 
-  // The static ground roads, cached over the view and a quarter view of margin at a half-power-of-2 zoom bucket: redrawn when the
-  // network signature, the map, the bucket changes or the view leaves the rect, else one blit
-  private roadLayer(game: Game, ground: Edge[], nodes0: Node[], dpr: number): void {
-    const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 60, vw = innerWidth / z, vh = innerHeight / z;
+  // The static art, cached over the view and a quarter view of margin at a half-power-of-2 zoom bucket: the roads repainted when the
+  // network signature changes, the scene over them when the lots or buildings change too, both when the map, the bucket changes or
+  // the view leaves the rect, else one blit.
+  // ponytail: whole-layer repaints (a grown building repaints the scene, ~3 ms; a road change the roads too, ~20 ms); dirty tiles if they show
+  private statics(game: Game, ground: Edge[], nodes0: Node[], dpr: number): Layer {
+    const z = this.cam.zoom, s = Math.min(8, 2 ** (Math.ceil(2 * Math.log2(z * dpr)) / 2)), P = 120, vw = innerWidth / z, vh = innerHeight / z;
     const x0 = Math.max(-P, this.cam.x - vw / 2), y0 = Math.max(-P, this.cam.y - vh / 2);
     const x1 = Math.min(WORLD.w + P, this.cam.x + vw / 2), y1 = Math.min(WORLD.h + P, this.cam.y + vh / 2);
-    const key = netKey(game.graph.edges, game.graph.nodes), isl = profile().cosmetics.island;
-    let r = this.roads;
-    if (!r || r.key !== key || r.isl !== isl || r.t !== game.terrain || r.s !== s || x0 < r.x || y0 < r.y || x1 > r.x + r.w || y1 > r.y + r.h) {
+    const rk = `${netKey(game.graph.edges, game.graph.nodes)}${profile().cosmetics.island}`, sk = sceneKey(game.buildings, game.lots);
+    let L = this.layer;
+    if (!L || L.t !== game.terrain || L.s !== s || x0 < L.x || y0 < L.y || x1 > L.x + L.w || y1 > L.y + L.h) {
       // ponytail: no margin past ~20M px (a 4K screen close up), so a pan there redraws every frame; tile the layer if it shows
       const m = (x1 - x0) * (y1 - y0) * 2.25 * s * s > 2e7 ? 0 : 0.25;
       const x = Math.max(-P, x0 - vw * m), y = Math.max(-P, y0 - vh * m);
       const w = Math.min(WORLD.w + P, x1 + vw * m) - x, h = Math.min(WORLD.h + P, y1 + vh * m) - y;
-      const c = r?.c ?? document.createElement('canvas');
-      c.width = Math.max(1, Math.ceil(w * s));
-      c.height = Math.max(1, Math.ceil(h * s));
-      const main = this.ctx;
-      this.ctx = c.getContext('2d')!;
-      this.ctx.setTransform(s, 0, 0, s, -x * s, -y * s);
-      this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0, game.graph.rings);
-      this.ctx = main;
-      r = this.roads = { key, isl, t: game.terrain, s, x, y, w, h, c };
+      const c = (): HTMLCanvasElement => document.createElement('canvas');
+      L = this.layer = { t: game.terrain, s, x, y, w, h, rk: '', sk: -1, ver: 0, nver: -1, r: L?.r ?? c(), c: L?.c ?? c(), n: L?.n ?? c(), decks: new Map() };
     }
-    this.ctx.drawImage(r.c, r.x, r.y, r.c.width / r.s, r.c.height / r.s);
+    const lay = L;
+    if (lay.rk !== rk) {
+      this.paintInto(lay.r, lay, () => this.paintRoads(game.terrain, ground, game.graph.nodes, nodes0, game.graph.rings));
+      lay.rk = rk;
+      lay.sk = -1;
+      lay.decks.clear();
+    }
+    if (lay.sk !== sk) {
+      this.paintInto(lay.c, lay, () => {
+        this.lots(game);
+        this.ctx.drawImage(lay.r, lay.x, lay.y, lay.r.width / lay.s, lay.r.height / lay.s);
+        for (const b of game.buildings) if (b.kind !== 'gate') this.building(b);
+        this.exits(game, false);
+      });
+      lay.sk = sk;
+      lay.ver++;
+    }
+    return lay;
+  }
+
+  // One deck level's viaducts, static junction paint and signal poles (shadows: every deck's ground shadow too), cached over the
+  // part of the layer's rect they cover
+  private deck(lay: Layer, level: number, edges: Edge[], nodes: Node[], shadows: Edge[] | null): void {
+    let d = lay.decks.get(level);
+    if (!d) {
+      const es = shadows ?? edges, pad = Math.max(...es.map(e => e.width)) / 2 + 14 + 5 * Math.max(...es.map(e => e.level));
+      const x = Math.max(lay.x, Math.min(...es.map(e => Math.min(e.a.x, e.b.x))) - pad), y = Math.max(lay.y, Math.min(...es.map(e => Math.min(e.a.y, e.b.y))) - pad);
+      const w = Math.min(lay.x + lay.w, Math.max(...es.map(e => Math.max(e.a.x, e.b.x))) + pad) - x;
+      const h = Math.min(lay.y + lay.h, Math.max(...es.map(e => Math.max(e.a.y, e.b.y))) + pad) - y;
+      lay.decks.set(level, d = { s: lay.s, x, y, w, h, c: w > 0 && h > 0 ? document.createElement('canvas') : null });
+      if (d.c) this.paintInto(d.c, d, () => {
+        if (shadows) this.deckShadows(shadows);
+        this.viaduct(level, edges, nodes);
+        this.controls(nodes, 'static');
+        for (const n of nodes) if (n.control === 'light') this.drawLights(n, 'pole');
+      });
+    }
+    if (d.c) this.blit(d.c, d);
+  }
+
+  // The part of canvas c (world rect r at r.s px per world px) in view, in whole source px so it lands where the whole blit would
+  private blit(c: HTMLCanvasElement, r: Rect): void {
+    const v = this.view, s = r.s;
+    const sx = Math.max(0, Math.floor((v.x0 - r.x) * s) - 2), sy = Math.max(0, Math.floor((v.y0 - r.y) * s) - 2);
+    const ex = Math.min(c.width, Math.ceil((v.x1 - r.x) * s) + 2), ey = Math.min(c.height, Math.ceil((v.y1 - r.y) * s) + 2);
+    if (ex > sx && ey > sy) this.ctx.drawImage(c, sx, sy, ex - sx, ey - sy, r.x + sx / s, r.y + sy / s, (ex - sx) / s, (ey - sy) / s);
+  }
+
+  private inView(x: number, y: number, m: number): boolean {
+    const v = this.view;
+    return x > v.x0 - m && x < v.x1 + m && y > v.y0 - m && y < v.y1 + m;
+  }
+
+  // Paints f() into canvas c over the world rect r at r.s px per world px
+  private paintInto(c: HTMLCanvasElement, r: { s: number; x: number; y: number; w: number; h: number }, f: () => void): void {
+    c.width = Math.max(1, Math.ceil(r.w * r.s));
+    c.height = Math.max(1, Math.ceil(r.h * r.s));
+    const main = this.ctx;
+    this.ctx = c.getContext('2d')!;
+    this.ctx.setTransform(r.s, 0, 0, r.s, -r.x * r.s, -r.y * r.s);
+    this.ctx.lineCap = this.ctx.lineJoin = 'round';
+    f();
+    this.ctx = main;
   }
 
   // Ground roads: bridge decks, kerbs, sidewalks with paving joints, boulevard verges, the asphalt (tier outline, fill, grain, tyre
@@ -762,13 +843,14 @@ export class CanvasRenderer {
     this.details(ground.filter(e => !e.ring));
     this.controls(nodes0, 'static');
     for (const r of rings) { this.ringMarks(r); this.island(r); }
+    this.laneArrows(ground);
+    for (const n of nodes0) if (n.control === 'light') this.drawLights(n, 'pole');
   }
 
   // A little model per building (BuildingArt: home with a pitched roof and yard, shop with awning and sign, office tower,
-  // saw-tooth factory with a yard), its variant from its position, with a shadow as long as it is tall and smoke off a
-  // staffed factory's chimney. Pending trips are dots on the roof in their purpose colour; a building without a road gets a
-  // dashed red outline.
-  private building(b: Building, time: number): void {
+  // saw-tooth factory with a yard), its variant from its position, with a shadow as long as it is tall; a building without a road
+  // gets a dashed red outline. Cached in the scene (statics), live for a ghost; trip dots and smoke are drawn live over it.
+  private building(b: Building): void {
     const ctx = this.ctx, h = b.h / 2, w = b.w / 2, v = variant(b.x, b.y), L = look(b.art, v, h, w), alpha = ctx.globalAlpha;
     const c = Math.cos(b.angle), sn = Math.sin(b.angle), toWorld = (x: number, y: number): Vec => ({ x: b.x + x * c - y * sn, y: b.y + x * sn + y * c });
     // shadow: the body swept down-right by its height (the hull of the body and its offset copy)
@@ -784,15 +866,6 @@ export class CanvasRenderer {
     if (b.node && b.kind === 'home' && b.residents < 1) ctx.globalAlpha = alpha * 0.45;
     const img = sprite(b.art, v, this.artS, false, b.w, b.h, b.abandoned);
     ctx.drawImage(img, -h - PAD, -w - PAD, img.width / this.artS, img.height / this.artS);
-    b.pending.slice(0, Math.floor((2 * w - 6) / 6)).forEach((t, i) => {
-      ctx.beginPath();
-      ctx.roundRect(-h + 4, -w + 4 + i * 6, 4, 4, 1);
-      ctx.fillStyle = PURPOSES[t.purpose].color;
-      ctx.fill();
-      ctx.strokeStyle = CAR_OUT;
-      ctx.lineWidth = 0.75;
-      ctx.stroke();
-    });
     // a ghost (place tool) has no door node yet
     if (b.node && !b.connected) {
       ctx.setLineDash([4, 3]);
@@ -804,18 +877,36 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
     }
     ctx.restore();
-    // smoke drifts downwind off the chimney only while the factory has workers
-    if (L.chimney && b.staffed > 0) {
-      const ch = toWorld(L.chimney.x, L.chimney.y);
-      for (let i = 0; i < 4; i++) {
-        const t = (time * 0.35 + i / 4) % 1;
-        const x = ch.x + t * 24 + Math.sin(t * 6 + i) * 2, y = ch.y - t * 14, r = 2.8 + t * 6;
-        ctx.globalAlpha = alpha * 0.75 * (1 - t) * Math.min(1, t * 6);
-        this.circle(x, y, r, i % 2 ? '#C4C2BD' : '#B5B3AE');
-        this.circle(x - r * 0.3, y - r * 0.3, r * 0.55, '#DEDCD7');
-      }
-      ctx.globalAlpha = alpha;
+  }
+
+  // Pending trips as dots on the roof in their purpose colour, outlined: sprites off one sheet (dotSheet), so the draws batch
+  private pending(bs: Building[]): void {
+    const ctx = this.ctx, [K, tx, ty] = this.wt, s = this.artS, sheet = dotSheet(s), px = Math.ceil(5 * s), cp = px + 2;
+    for (const b of bs) {
+      const h = b.h / 2, w = b.w / 2, n = Math.min(b.pending.length, Math.floor((2 * w - 6) / 6));
+      if (b.kind === 'gate' || n <= 0) continue;
+      const c = K * Math.cos(b.angle), sn = K * Math.sin(b.angle);
+      ctx.setTransform(c, sn, -sn, c, tx + K * b.x, ty + K * b.y);
+      for (let i = 0; i < n; i++) ctx.drawImage(sheet, DOTS.indexOf(b.pending[i].purpose) * cp + 1, 1, px, px, -h + 3.5, -w + 3.5 + i * 6, px / s, px / s);
     }
+    ctx.setTransform(K, 0, 0, K, tx, ty);
+  }
+
+  // Smoke drifts downwind off the chimney only while the factory has workers
+  private smoke(b: Building, time: number): void {
+    if (b.staffed <= 0 || b.kind === 'gate') return;
+    const ch0 = look(b.art, variant(b.x, b.y), b.h / 2, b.w / 2).chimney;
+    if (!ch0) return;
+    const ctx = this.ctx, alpha = ctx.globalAlpha, c = Math.cos(b.angle), sn = Math.sin(b.angle);
+    const ch = { x: b.x + ch0.x * c - ch0.y * sn, y: b.y + ch0.x * sn + ch0.y * c };
+    for (let i = 0; i < 4; i++) {
+      const t = (time * 0.35 + i / 4) % 1;
+      const x = ch.x + t * 24 + Math.sin(t * 6 + i) * 2, y = ch.y - t * 14, r = 2.8 + t * 6;
+      ctx.globalAlpha = alpha * 0.75 * (1 - t) * Math.min(1, t * 6);
+      this.circle(x, y, r, i % 2 ? '#C4C2BD' : '#B5B3AE');
+      this.circle(x - r * 0.3, y - r * 0.3, r * 0.55, '#DEDCD7');
+    }
+    ctx.globalAlpha = alpha;
   }
 
   // On-map hint for what the current tool would affect under the cursor. Same lookups as Game.demolishAt / placeControl / snap.
@@ -945,15 +1036,28 @@ export class CanvasRenderer {
   }
 
   // Outside connections: past the gate the highway runs on off the map under a fade, with an arrow out and one in, and a green
-  // sign at the edge; an exit no town road reaches yet pulses at its stub's end with what linking it brings
-  private exits(game: Game): void {
+  // sign at the edge (cached in the scene); live: an exit no town road reaches yet pulses at its stub's end with what linking it brings
+  private exits(game: Game, live: boolean): void {
     const ctx = this.ctx, gates = game.buildings.filter(b => b.kind === 'gate');
     if (!gates.length) return;
-    const linked = new Set(game.linkedExits()), pulse = Math.sin(performance.now() / 250);
+    const linked = new Set(live ? game.linkedExits() : []), pulse = Math.sin(performance.now() / 250);
     for (const b of gates) {
       const d = b.node, e = d.edges[0], ux = Math.cos(b.angle), uy = Math.sin(b.angle);
       if (!e) continue;
       const w = e.width, at = (s: number, o: number): Vec => ({ x: d.x + ux * s - uy * o, y: d.y + uy * s + ux * o }), far = at(-110, 0);
+      if (live) {
+        if (linked.has(b)) continue;
+        const o = e.a === d ? e.b : e.a;
+        ctx.setLineDash([5, 4]);
+        this.ring(o.x, o.y, w / 2 + 8 + 2 * pulse, ACCENT, 2);
+        ctx.setLineDash([]);
+        const k = w / 2 + 24 + 58 * Math.abs(ux), q = { x: o.x + ux * k, y: o.y + uy * k };
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        this.text('Connect a road here', q.x, q.y - 7, 'bold 11px system-ui', ACCENT);
+        this.text('exports, imports and visitors', q.x, q.y + 7, '10px system-ui', DARK);
+        continue;
+      }
       ctx.lineCap = 'butt';
       this.seg(d, far, TIERS.highway.out, w + 3);
       this.seg(d, far, TIERS.highway.fill, w);
@@ -1012,14 +1116,6 @@ export class CanvasRenderer {
       ctx.fillText(name, s.x + 6, s.y - 3);
       ctx.font = '5.5px system-ui';
       ctx.fillText('HIGHWAY EXIT', s.x + 6, s.y + 5);
-      if (linked.has(b)) continue;
-      const o = e.a === d ? e.b : e.a;
-      ctx.setLineDash([5, 4]);
-      this.ring(o.x, o.y, w / 2 + 8 + 2 * pulse, ACCENT, 2);
-      ctx.setLineDash([]);
-      const k = w / 2 + 24 + 58 * Math.abs(ux), q = { x: o.x + ux * k, y: o.y + uy * k };
-      this.text('Connect a road here', q.x, q.y - 7, 'bold 11px system-ui', ACCENT);
-      this.text('exports, imports and visitors', q.x, q.y + 7, '10px system-ui', DARK);
     }
   }
 
@@ -1100,7 +1196,7 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
     }
     ctx.globalAlpha = 0.6;
-    this.building(b, game.time);
+    this.building(b);
     ctx.globalAlpha = 1;
     ctx.save();
     ctx.translate(b.x, b.y);
@@ -1268,12 +1364,12 @@ export class CanvasRenderer {
     ctx.lineCap = 'round';
   }
 
-  // Intersection markings (stop lines) and traffic lights
-  // part: 'static' (stop lines, zebras, signs: the cached layer), 'live' (lights), 'all'
-  private controls(nodes: Node[], part: 'static' | 'live' | 'all'): void {
+  // Intersection markings and signal heads
+  // part: 'static' (stop lines, zebras, signs: the cached layers, with the signal poles), 'live' (signal heads)
+  private controls(nodes: Node[], part: 'static' | 'live'): void {
     const ctx = this.ctx;
     for (const n of nodes) {
-      if (part !== 'static' && n.control === 'light') this.drawLights(n);
+      if (part === 'live' && n.control === 'light' && this.inView(n.x, n.y, 80)) this.drawLights(n, 'head');
       if (part === 'live' || !junction(n)) continue;
       // Stop line across the lanes coming in: solid at a light or stop sign, dashed at a give-way, a plain junction or a ring entry
       const d0 = NODE_R + 3.6, solid = n.control === 'light' || n.control === 'stop';
@@ -1488,88 +1584,133 @@ export class CanvasRenderer {
     }
   }
 
-  // A cached model (VehicleArt) on a soft shadow cast down-right, then the live lights: tail lights (bright while braking), the
-  // indicator blinking on game time (so pause freezes it) and an ambulance's red / blue bar
-  private car(game: Game, car: Car): void {
-    const ctx = this.ctx, p = game.graph.carPos(car), k = car.kind, h = car.len / 2, w = VW[k] / 2, s = this.artS;
-    this.seen.push(car);
-    this.seenAt.push(p);
-    const c = Math.cos(p.angle), sn = Math.sin(p.angle), img = vehicle(k, car.paint, s), sh = vshadow(k, s);
-    const x0 = -h - VPAD, y0 = -VH / 2, dw = img.width / s, dh = img.height / s;
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.angle);
-    // the world offset (1.2, 1.8) turned into the car's frame
-    ctx.drawImage(sh, x0 + 1.2 * c + 1.8 * sn, y0 - 1.2 * sn + 1.8 * c, dw, dh);
-    ctx.drawImage(img, x0, y0, dw, dh);
-    ctx.fillStyle = car.brake ? BRAKE_ON : BRAKE_OFF;
-    if (k === 'moto') ctx.fillRect(-h - 0.4, -0.6, 1.2, 1.2);
-    else { ctx.fillRect(-h - 0.4, -w + 0.6, 1.3, 1.6); ctx.fillRect(-h - 0.4, w - 2.2, 1.3, 1.6); }
-    if (car.blink && (game.time * 3 | 0) % 2) {
-      const sy = car.blink > 0 ? w - 1.5 : -w - 0.5;
-      ctx.fillStyle = AMBER;
-      ctx.fillRect(-h - 1, sy, 2, 2);
-      ctx.fillRect(h - 1, sy, 2, 2);
+  // A cached model (VehicleArt: tail lights bright while braking, the indicator blinking on game time, so pause freezes it) on a soft
+  // shadow cast down-right, then the live extras: a VIP's pennant, an ambulance's red / blue bar, the purpose dot. Every shadow goes
+  // first, then every car, all from one atlas page (VehicleArt) so the draws batch, each placed by setTransform rather than save /
+  // restore. Far out (under FAR px per world px) each car is a few flat rects instead (farCars).
+  private cars(game: Game, cs: Car[]): void {
+    const ctx = this.ctx, [K, tx, ty] = this.wt, s = this.artS, ps = cs.map(c => game.graph.carPos(c));
+    for (let i = 0; i < cs.length; i++) { this.seen.push(cs[i]); this.seenAt.push(ps[i]); }
+    if (K < FAR || this.quality === 'low') { this.farCars(game, cs, ps); return; }
+    for (let i = 0; i < cs.length; i++) {
+      const p = ps[i], k = cs[i].kind, sh = vshadow(k, s), c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
+      ctx.setTransform(c, sn, -sn, c, tx + K * (p.x + 1.2), ty + K * (p.y + 1.8));
+      ctx.drawImage(sh.c, sh.x, sh.y, sh.w, sh.h, -cs[i].len / 2 - VPAD, -VH / 2, sh.w / s, sh.h / s);
     }
-    // a VIP convoy car: a gold pennant on the roof
-    if (car.trip.vip) {
-      ctx.fillStyle = YELLOW;
-      ctx.fillRect(-2, -w + 1, 4, 2 * w - 2);
-      ctx.fillStyle = CAR_OUT;
-      ctx.fillRect(-0.5, -w + 1, 1, 2 * w - 2);
+    const dots = game.purposeDots || game.overlay === 'heat';
+    for (let i = 0; i < cs.length; i++) {
+      const car = cs[i], p = ps[i], k = car.kind, h = car.len / 2, w = VW[k] / 2, c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
+      const img = vehicle(k, car.paint, s, car.brake, car.blink && (game.time * 3 | 0) % 2 ? Math.sign(car.blink) : 0);
+      ctx.setTransform(c, sn, -sn, c, tx + K * p.x, ty + K * p.y);
+      ctx.drawImage(img.c, img.x, img.y, img.w, img.h, -h - VPAD, -VH / 2, img.w / s, img.h / s);
+      // a VIP convoy car: a gold pennant on the roof
+      if (car.trip.vip) {
+        ctx.fillStyle = YELLOW;
+        ctx.fillRect(-2, -w + 1, 4, 2 * w - 2);
+        ctx.fillStyle = CAR_OUT;
+        ctx.fillRect(-0.5, -w + 1, 1, 2 * w - 2);
+      }
+      if (k === 'ambulance') {
+        const on = (game.time * 4 | 0) % 2;
+        ctx.fillStyle = on ? RED : ACCENT;
+        ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
+        ctx.fillStyle = on ? ACCENT : RED;
+        ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
+      }
+      // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
+      if (dots) {
+        const bx = k === 'truck' ? -3.5 : k === 'moto' ? -1.2 : -1;
+        ctx.beginPath();
+        ctx.arc(bx, 0, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(bx, 0, 1.4, 0, Math.PI * 2);
+        ctx.fillStyle = PURPOSES[car.trip.purpose].color;
+        ctx.fill();
+      }
     }
-    if (k === 'ambulance') {
-      const on = (game.time * 4 | 0) % 2;
-      ctx.fillStyle = on ? RED : ACCENT;
-      ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
-      ctx.fillStyle = on ? ACCENT : RED;
-      ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
+    ctx.setTransform(K, 0, 0, K, tx, ty);
+  }
+
+  // Far-zoom cars: a flat shadow, then per car its body, glass and roof rects (VehicleArt.farShapes) and the live extras. fillRect
+  // rather than paths: the GPU merges rects across transforms. No tail lights: under a px out here
+  private farCars(game: Game, cs: Car[], ps: { x: number; y: number; angle: number }[]): void {
+    const ctx = this.ctx, [K, tx, ty] = this.wt, flash = (game.time * 4 | 0) % 2, blink = (game.time * 3 | 0) % 2, dots = game.purposeDots || game.overlay === 'heat';
+    ctx.fillStyle = 'rgba(20,30,50,.3)';
+    for (let i = 0; i < cs.length; i++) {
+      const p = ps[i], car = cs[i], h = car.len / 2, w = VW[car.kind] / 2, c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
+      ctx.setTransform(c, sn, -sn, c, tx + K * (p.x + 1.2), ty + K * (p.y + 1.8));
+      ctx.fillRect(-h, -w, 2 * h, 2 * w);
     }
-    // trip purpose as a roof dot, only when asked (Purpose toggle or the traffic overlay): paint is just paint
-    if (game.purposeDots || game.overlay === 'heat') {
-      const bx = k === 'truck' ? -3.5 : k === 'moto' ? -1.2 : -1;
-      ctx.beginPath();
-      ctx.arc(bx, 0, 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(bx, 0, 1.4, 0, Math.PI * 2);
-      ctx.fillStyle = PURPOSES[car.trip.purpose].color;
-      ctx.fill();
+    for (let i = 0; i < cs.length; i++) {
+      const car = cs[i], p = ps[i], k = car.kind, w = VW[k] / 2, h = car.len / 2, col = k === 'ambulance' ? '#F7F7F5' : paintOf(k, car.paint);
+      const c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
+      ctx.setTransform(c, sn, -sn, c, tx + K * p.x, ty + K * p.y);
+      for (const [x0, y0, x1, y1, part] of farShapes(k)) {
+        ctx.fillStyle = part === 2 ? GLASS : part ? tint(col, part === 1 ? -0.32 : 0.2) : col;
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      }
+      if (car.blink && blink) { const sy = car.blink > 0 ? w - 1.5 : -w - 0.5; ctx.fillStyle = AMBER; ctx.fillRect(-h - 1, sy, 2, 2); ctx.fillRect(h - 1, sy, 2, 2); }
+      if (car.trip.vip) { ctx.fillStyle = YELLOW; ctx.fillRect(-2, -w + 1, 4, 2 * w - 2); }
+      if (k === 'ambulance') {
+        ctx.fillStyle = flash ? RED : ACCENT;
+        ctx.fillRect(h - 7.4, -w + 0.8, 1.5, w - 0.8);
+        ctx.fillStyle = flash ? ACCENT : RED;
+        ctx.fillRect(h - 7.4, 0, 1.5, w - 0.8);
+      }
+      if (dots) {
+        const bx = k === 'truck' ? -3.5 : k === 'moto' ? -1.2 : -1;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(bx - 1.6, -1.6, 3.2, 3.2);
+        ctx.fillStyle = PURPOSES[car.trip.purpose].color;
+        ctx.fillRect(bx - 1.1, -1.1, 2.2, 2.2);
+      }
     }
-    ctx.restore();
+    ctx.setTransform(K, 0, 0, K, tx, ty);
   }
 
   // Night, added over the tint: warm pools under the street lamps, lit windows, headlight beams and the red glow of brake lights
   private night(game: Game, d: Daylight, ground: Edge[]): void {
     if (d.night < 0.02) return;
-    const ctx = this.ctx, s = Math.min(2, this.artS), gl = glow(s), bm = beam(s), R = GLOW_R;
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = d.night * 0.85;
-    this.lamps(ground, (x, y) => ctx.drawImage(gl, x - R, y - R, 2 * R, 2 * R));
-    ctx.globalAlpha = d.night;
-    for (const b of game.buildings) {
-      if (b.kind === 'gate' || b.abandoned || (b.kind === 'home' && b.residents < 1)) continue;
-      const img = sprite(b.art, variant(b.x, b.y), this.artS, true, b.w, b.h);
-      ctx.save();
-      ctx.translate(b.x, b.y);
-      ctx.rotate(b.angle);
-      ctx.drawImage(img, -b.h / 2 - PAD, -b.w / 2 - PAD, img.width / this.artS, img.height / this.artS);
-      ctx.restore();
+    const ctx = this.ctx, s = Math.min(2, this.artS), bm = beam(s), lay = this.layer!;
+    // lamps and lit windows: cached with the scene they light (added up, so one blit at the night's strength matches drawing each)
+    if (lay.nver !== lay.ver) {
+      this.paintInto(lay.n, lay, () => {
+        const c = this.ctx, gl = glow(s), R = GLOW_R;
+        c.globalCompositeOperation = 'lighter';
+        c.globalAlpha = 0.85;
+        this.lamps(ground, (x, y) => c.drawImage(gl, x - R, y - R, 2 * R, 2 * R));
+        c.globalAlpha = 1;
+        for (const b of game.buildings) {
+          if (b.kind === 'gate' || b.abandoned || (b.kind === 'home' && b.residents < 1)) continue;
+          const img = sprite(b.art, variant(b.x, b.y), this.artS, true, b.w, b.h);
+          c.save();
+          c.translate(b.x, b.y);
+          c.rotate(b.angle);
+          c.drawImage(img, -b.h / 2 - PAD, -b.w / 2 - PAD, img.width / this.artS, img.height / this.artS);
+          c.restore();
+        }
+      });
+      lay.nver = lay.ver;
     }
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = d.night;
+    this.blit(lay.n, lay);
+    // ponytail: a beam sprite per car even far out (flat shapes measured no faster here)
+    const [K, tx, ty] = this.wt;
     for (let i = 0; i < this.seen.length; i++) {
       const car = this.seen[i], p = this.seenAt[i], h = car.len / 2, w = VW[car.kind] / 2, f = car.kind === 'moto' ? 0.6 : 1;
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.angle);
+      const c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
+      ctx.setTransform(c, sn, -sn, c, tx + K * p.x, ty + K * p.y);
       ctx.drawImage(bm, h - 1, -BEAM_W * f / 2, BEAM_L * f, BEAM_W * f);
       if (car.brake) { ctx.fillStyle = 'rgba(255,50,40,.6)'; ctx.fillRect(-h - 2.5, -w, 2.5, 2 * w); }
-      ctx.restore();
     }
+    ctx.setTransform(K, 0, 0, K, tx, ty);
     ctx.globalCompositeOperation = 'source-over';
     // signal heads stay readable: redrawn over the tint as the night deepens
     ctx.globalAlpha = d.night;
-    for (const n of game.graph.nodes) if (n.control === 'light') this.drawLights(n);
+    for (const n of game.graph.nodes) if (n.control === 'light' && this.inView(n.x, n.y, 80)) this.drawLights(n, 'all');
     ctx.globalAlpha = 1;
   }
 
@@ -1586,7 +1727,7 @@ export class CanvasRenderer {
     }
   }
 
-  // Painted lane arrows into each junction (the turns its roads and its lane arrows allow): live, junction plans change them
+  // Painted lane arrows into each junction (the turns its roads and its lane arrows allow): in the road layer, whose key has the plans
   private laneArrows(edges: Edge[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'butt';
@@ -1767,8 +1908,8 @@ export class CanvasRenderer {
   }
 
   // One traffic light per approach: green while any of its movements may go, amber in the last second before all turn red
-  // (cosmetic: the sim has no amber)
-  private drawLights(n: Node): void {
+  // (cosmetic: the sim has no amber). part: the pole (cached), the head (a cached sprite per lamp lit) or both
+  private drawLights(n: Node, part: 'pole' | 'head' | 'all'): void {
     const ctx = this.ctx, p = planOf(n), ph = p.phases[n.phase] ?? p.phases[0], next = p.phases[(n.phase + 1) % p.phases.length];
     for (const e of n.edges) {
       const a = approachOf(p, n, e), go = ph.sig[a].some(x => x > 0);
@@ -1777,28 +1918,18 @@ export class CanvasRenderer {
       // a pole on the kerb right of the lanes coming in, a mast arm over them, and a three-lamp head lit by the phase
       const [ux, uy] = this.dir(n, e), [px, py] = this.spot(n, e, NODE_R + 6);
       const reach = (e.type.oneWay ? e.width / 2 : e.width / 4) + 3, hx = px - uy * reach, hy = py + ux * reach;
-      this.seg({ x: px + 1.3, y: py + 1.9 }, { x: hx + 1.3, y: hy + 1.9 }, 'rgba(0,0,0,.16)', 1.4);
-      this.seg({ x: px, y: py }, { x: hx, y: hy }, '#5C6168', 1.1);
-      this.circle(px + 0.6, py + 0.9, 1.9, 'rgba(0,0,0,.2)');
-      this.circle(px, py, 1.7, '#4A4F56');
-      this.circle(px - 0.4, py - 0.4, 0.7, '#8E949B');
+      if (part !== 'head') {
+        this.seg({ x: px + 1.3, y: py + 1.9 }, { x: hx + 1.3, y: hy + 1.9 }, 'rgba(0,0,0,.16)', 1.4);
+        this.seg({ x: px, y: py }, { x: hx, y: hy }, '#5C6168', 1.1);
+        this.circle(px + 0.6, py + 0.9, 1.9, 'rgba(0,0,0,.2)');
+        this.circle(px, py, 1.7, '#4A4F56');
+        this.circle(px - 0.4, py - 0.4, 0.7, '#8E949B');
+      }
+      if (part === 'pole') continue;
       ctx.save();
       ctx.translate(hx, hy);
       ctx.rotate(Math.atan2(ux, -uy));
-      ctx.beginPath();
-      ctx.roundRect(-4.6, -1.9, 9.2, 3.8, 1.3);
-      ctx.fillStyle = '#2E3136';
-      ctx.fill();
-      const lit = amber ? 1 : go ? 2 : 0;
-      ['#FF4D4F', AMBER, '#3DDC6A'].forEach((c, i) => {
-        const x = (i - 1) * 2.9;
-        if (i === lit) {
-          ctx.globalAlpha *= 0.35;
-          this.circle(x, 0, 2.6, c);
-          ctx.globalAlpha /= 0.35;
-          this.circle(x, 0, 1.15, c);
-        } else this.circle(x, 0, 1, '#4A4D52');
-      });
+      ctx.drawImage(signalHead(amber ? 1 : go ? 2 : 0, this.artS), -6, -3, 12, 6);
       ctx.restore();
     }
   }
@@ -1908,6 +2039,60 @@ export class CanvasRenderer {
     // the priority signs on top, bigger: a click on one cycles it (Input)
     if (n.control === 'yield') this.drawSigns(n, 1.3, n.edges.find(e => linkUI.hover === `sign:${e.id}`) ?? null);
   }
+}
+
+type Rect = { s: number; x: number; y: number; w: number; h: number };
+interface Layer extends Rect {
+  t: Game['terrain']; rk: string; sk: number; ver: number; nver: number; r: HTMLCanvasElement; c: HTMLCanvasElement; n: HTMLCanvasElement;
+  decks: Map<number, Rect & { c: HTMLCanvasElement | null }>;
+}
+
+// Signal head, 12 x 6 px centred, per lamp lit (0 red, 1 amber, 2 green) and pixel scale: a dark box, three lamps, a glow round the lit one
+const heads = new Map<number, HTMLCanvasElement>();
+function signalHead(lit: number, s: number): HTMLCanvasElement {
+  let c = heads.get(lit * 16 + s);
+  if (c) return c;
+  heads.set(lit * 16 + s, c = document.createElement('canvas'));
+  c.width = 12 * s;
+  c.height = 6 * s;
+  const ctx = c.getContext('2d')!, dot = (x: number, r: number, col: string): void => { ctx.beginPath(); ctx.arc(x, 0, r, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); };
+  ctx.setTransform(s, 0, 0, s, 6 * s, 3 * s);
+  ctx.beginPath();
+  ctx.roundRect(-4.6, -1.9, 9.2, 3.8, 1.3);
+  ctx.fillStyle = '#2E3136';
+  ctx.fill();
+  ['#FF4D4F', AMBER, '#3DDC6A'].forEach((col, i) => {
+    const x = (i - 1) * 2.9;
+    if (i !== lit) { dot(x, 1, '#4A4D52'); return; }
+    ctx.globalAlpha = 0.35;
+    dot(x, 2.6, col);
+    ctx.globalAlpha = 1;
+    dot(x, 1.15, col);
+  });
+  return c;
+}
+
+// Trip dot sheet per pixel scale: per purpose a 4 px rounded dot with its outline, in 5 px cells (1 px gutters)
+const DOTS = Object.keys(PURPOSES) as (keyof typeof PURPOSES)[];
+const dotSheets = new Map<number, HTMLCanvasElement>();
+function dotSheet(s: number): HTMLCanvasElement {
+  let c = dotSheets.get(s);
+  if (c) return c;
+  dotSheets.set(s, c = document.createElement('canvas'));
+  const cp = Math.ceil(5 * s) + 2, ctx = c.getContext('2d')!;
+  c.width = DOTS.length * cp;
+  c.height = cp;
+  DOTS.forEach((p, i) => {
+    ctx.setTransform(s, 0, 0, s, i * cp + 1 + 0.5 * s, 1 + 0.5 * s);
+    ctx.beginPath();
+    ctx.roundRect(0, 0, 4, 4, 1);
+    ctx.fillStyle = PURPOSES[p].color;
+    ctx.fill();
+    ctx.strokeStyle = CAR_OUT;
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+  });
+  return c;
 }
 
 // Highlight radius round a junction, or round a roundabout (its hub)

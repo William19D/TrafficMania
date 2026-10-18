@@ -1,5 +1,6 @@
-// Main menu (Continue, Campaign, Endless, Creative, Profile, Load, Sound, Controls), the campaign's map select, the Endless / Creative
-// setup, the profile page, and the pause menu (Esc with nothing to cancel): Resume, Save, Load, Sound, Controls, Quit
+// Main menu (Continue, Campaign, Endless, Creative, Profile, Load, Settings, Controls), the campaign's map select, the Endless / Creative
+// setup, the profile page, and the pause menu (Esc with nothing to cancel): Resume, Save, Load, Settings, Controls, Quit. Settings: sound
+// and graphics quality
 import type { Game } from '../core/Game.ts';
 import { fmtMoney, levelUnlocks } from '../core/Game.ts';
 import { BIOMES, DEFAULT_CONFIG, DIFFICULTY, SIZES } from '../core/config.ts';
@@ -13,6 +14,8 @@ import { CONTROLS } from './HUD.ts';
 import { icon } from './icons.ts';
 import { sound } from './Sound.ts';
 import type { Mix } from './Sound.ts';
+import { QUALITIES } from '../rendering/Quality.ts';
+import type { Level, Quality } from '../rendering/Quality.ts';
 
 // new: the Endless or Creative setup (draft.mode)
 type View = 'main' | 'campaign' | 'new' | 'profile' | 'load' | 'save' | 'help' | 'pause' | 'sound';
@@ -27,6 +30,9 @@ export interface MenuHooks {
   quit(): void;
   // Esc opens the pause menu only when nothing else would take it (a road in progress, a selection, a panel, a modal)
   canPause(): boolean;
+  // the graphics setting and the level drawn now (Auto picks it)
+  quality(): { setting: Quality; level: Level };
+  setQuality(q: Quality): void;
 }
 
 const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
@@ -147,6 +153,7 @@ export class Menu {
       saveProfile();
       this.render();
     }
+    else if (m === 'gfx' && v) { this.h.setQuality(v as Quality); this.render(); }
     else if (m === 'snd' && v) { const [k, x] = v.split(':'); sound.set({ [k]: x === '1' }); this.render(); }
     else if (m === 'continue') { if (this.h.load(AUTO)) this.close(false); else this.render(); }
     else if (m === 'slot' && v) {
@@ -189,7 +196,7 @@ export class Menu {
           ${btn('campaign', `<span>Campaign</span><small>★ ${stars} of ${MAPS.length * 3}</small>`, a.ok ? '' : 'primary')}
           ${btn('endless', `<span>Endless</span><small>${endlessOpen() ? 'Free play on a seed or a starred map' : `Earn a star on ${MAPS[0].name} to unlock`}</small>`, '', endlessOpen() ? '' : ' disabled')}
           ${btn('creative', '<span>Creative</span><small>Every tool, unlimited money</small>')}
-          ${btn('profile', 'Profile')}${btn('load', 'Load game')}${btn('sound', 'Sound')}${btn('help', 'Controls')}
+          ${btn('profile', 'Profile')}${btn('load', 'Load game')}${btn('sound', 'Settings')}${btn('help', 'Controls')}
         </div>`;
     } else if (v === 'campaign') {
       const p = profile(), stars = totalStars(p);
@@ -242,7 +249,7 @@ export class Menu {
           <button class="iconbtn" data-m="copy" aria-label="Copy the seed" title="Copy the seed">${icon('copy')}</button></div>
         <div class="mlist">
           ${btn('resume', 'Resume <kbd>Esc</kbd>', 'primary')}${btn('save', `${icon('save')}Save game`)}${btn('load', 'Load game')}
-          ${btn('sound', 'Sound')}${btn('help', 'Controls')}${btn('quit', 'Quit to menu')}
+          ${btn('sound', 'Settings')}${btn('help', 'Controls')}${btn('quit', 'Quit to menu')}
         </div>
         <p class="note" role="status">${esc(this.note)}</p>`;
     } else if (v === 'load' || v === 'save') {
@@ -263,11 +270,15 @@ export class Menu {
       const slider = (k: 'master' | 'music' | 'sfx', label: string) => `
         <label class="field"><span class="flabel">${label}</span>
           <span class="vol"><input type="range" min="0" max="100" step="5" data-vol="${k}" value="${Math.round(x[k] * 100)}"><output>${Math.round(x[k] * 100)}%</output></span></label>`;
-      body = `<h2 id="mn-title">Sound</h2>
+      const gq = this.h.quality();
+      body = `<h2 id="mn-title">Settings</h2>
         <p class="sub"><kbd>Shift</kbd> + <kbd>M</kbd> mutes or unmutes at any time.</p>
         ${toggle('muted', 'Sound', false)}
         ${slider('master', 'Master volume')}${slider('sfx', 'Effects and city')}
         ${toggle('musicOn', 'Music', true)}${slider('music', 'Music volume')}
+        <div class="field" role="group" aria-label="Graphics"><span class="flabel">Graphics</span>
+          <div class="opts">${QUALITIES.map(q => `<button class="opt" data-m="gfx" data-v="${q}" aria-pressed="${gq.setting === q}">${cap(q)}</button>`).join('')}</div>
+          <small>${gq.setting === 'auto' ? `Now ${cap(gq.level)}: Auto lowers the quality to hold 60 fps and raises it when there is room. ` : ''}Low draws at 0.75 resolution with simpler cars and less ambient life. <kbd>F3</kbd> shows the frame rate.</small></div>
         <div class="actions">${back}</div>`;
     } else if (v === 'help') {
       body = `<h2 id="mn-title">Controls</h2>

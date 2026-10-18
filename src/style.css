@@ -1089,3 +1089,9 @@ kbd { background: #F3F1EB; box-shadow: 0 1px 0 rgba(60, 50, 30, .14); }
   :is(#hud, #menu) button:active:not(:disabled), #hud .tool:hover:not(:disabled) { transform: none !important; }
   #hud .pop, #hud .tutorial, #hud .modal, #hud .tip { animation: fade .15s linear !important; }
 }
+/* F3 frame-rate readout */
+.fps {
+  position: fixed; left: 8px; bottom: 8px; z-index: 20; pointer-events: none;
+  padding: 2px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: #fff;
+  font: 12px/1.4 ui-monospace, Consolas, monospace;
+}

@@ -16,6 +16,8 @@ import type { Vec } from './util/geom.ts';
 import { MAPS, cfgFor, mapById } from './core/Campaign.ts';
 import { profile, recordGrade, saveProfile, toolLevel } from './core/Profile.ts';
 import { checkAch } from './core/Achievements.ts';
+import { AutoQuality, loadQuality, saveQuality } from './rendering/Quality.ts';
+import type { Quality } from './rendering/Quality.ts';
 
 // URL params (?seed=&biome=&difficulty=&size=&mode=, or ?map=<id>&mode=) start that game at once, skipping the menu (dev and tests)
 const q = new URLSearchParams(location.search);
@@ -72,6 +74,14 @@ window.addEventListener('keydown', e => {
   else if (k === 'y' || k === 'z') { e.preventDefault(); step(redo, undo, 'Redo'); }
 });
 
+// Graphics quality (Auto measures and steps) and the F3 frame-rate readout
+const aq = new AutoQuality(), fpsEl = Object.assign(document.createElement('div'), { className: 'fps', hidden: true });
+let quality: Quality = loadQuality(), fpsShown = '';
+if (quality !== 'auto') aq.set(quality);
+document.body.append(fpsEl);
+window.addEventListener('keydown', e => { if (e.key === 'F3') { e.preventDefault(); fpsEl.hidden = !fpsEl.hidden; } });
+const setQuality = (q: Quality): void => { quality = q; saveQuality(q); if (q !== 'auto') aq.set(q); };
+
 const autosave = (): void => { tally(); if (!game.gameOver) store(AUTO, game); };
 
 const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
@@ -80,6 +90,8 @@ const menu = new Menu(document.getElementById('menu') as HTMLElement, hudRoot, {
   load: key => { const g = load(key); if (g) start(g); return !!g; },
   save: key => store(key, game),
   quit: autosave,
+  quality: () => ({ setting: quality, level: aq.level }),
+  setQuality,
   canPause: () => !game.modal && !hud.helpOpen && !hud.buildOpen && !input.busy && game.tool !== 'place' && game.tool !== 'zone'
     && !game.selected && !game.inspect && !game.follow && !game.picked && !game.ichg,
 });
@@ -151,6 +163,10 @@ new GameLoop(
     if (game.running && !menu.open) profile().stats.seconds += dt;
   },
   () => {
+    aq.frame(performance.now(), quality === 'auto');
+    renderer.quality = aq.level;
+    const f = `${Math.round(aq.fps)} fps · ${aq.level}${quality === 'auto' ? ' (auto)' : ''}`;
+    if (!fpsEl.hidden && f !== fpsShown) fpsEl.textContent = fpsShown = f;
     renderer.render(game, input.preview, input.anchor, input.handle, input.hover);
     hud.update();
     tutorial.update();

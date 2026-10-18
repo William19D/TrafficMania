@@ -27,7 +27,8 @@ import { mapOpen, parseProfile, profile0, recordGrade, toolLevel, totalStars } f
 import { VARIANTS, look, shade, variant } from '../src/rendering/BuildingArt.ts';
 import { CAR_PAINT, pick } from '../src/rendering/VehicleArt.ts';
 import { daylight } from '../src/rendering/Lighting.ts';
-import { netKey } from '../src/rendering/RoadArt.ts';
+import { netKey, sceneKey } from '../src/rendering/RoadArt.ts';
+import { AutoQuality, pxRatio } from '../src/rendering/Quality.ts';
 
 declare const process: { exit(code: number): never };
 
@@ -1391,6 +1392,29 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const street = new Set(Array.from({ length: 10 }, (_, i) => variant(300 + i * 50, 640)));
   if (street.size < 5 || variant(321.5, 77) !== variant(321.5, 77)) fail(`art: a street shows ${street.size} looks`);
 }
+// Auto quality: 30 fps steps down to Low (one level per measured window, the window after a step thrown away), 60 fps climbs back
+// one level only after a wait that each step down doubled; a stall is not counted; manual never moves; the backing store is capped
+{
+  const q = new AutoQuality();
+  let t = 0;
+  const run = (fps: number, secs: number, auto = true): void => { for (const end = t + secs * 1000; t < end; t += 1000 / fps) q.frame(t, auto); };
+  run(30, 3.9);
+  if (q.level !== 'high') fail(`quality: stepped down inside the first window (${q.level})`);
+  run(30, 4);
+  if (q.level !== 'medium') fail(`quality: 30 fps did not step to medium (${q.level})`);
+  run(30, 4.5);
+  if (q.level !== 'low') fail(`quality: 30 fps did not step to low (${q.level})`);
+  run(60, 15);
+  if (q.level !== 'low') fail('quality: climbed back before its wait');
+  run(60, 12);
+  if (q.level !== 'medium') fail(`quality: 60 fps never climbed back (${q.level})`);
+  for (let i = 0; i < 20; i++) { t += 600; q.frame(t, true); }
+  if (q.level !== 'medium') fail('quality: stalls read as a slow frame rate');
+  q.set('high');
+  run(20, 10, false);
+  if (q.level !== 'high' || q.fps > 21) fail('quality: a fixed level moved');
+  if (pxRatio(3, 'high') !== 2 || pxRatio(3, 'medium') !== 1.5 || pxRatio(1, 'low') !== 0.75 || pxRatio(1, 'medium') !== 1) fail('quality: backing store ratio');
+}
 // Day/night: no tint at noon, a full blue night at midnight, a warm dusk part way to night, and the tint never jumps between two
 // clock readings 3 in-game minutes apart; a shade of a shade still parses (vehicle tones are shaded again for roofs and outlines)
 {
@@ -1417,6 +1441,24 @@ for (const kind of ['diamond', 'clover', 'trumpet'] as const) {
   const k3 = key();
   g.edges[0]!.type = t0;
   if (new Set([k0, k1, k3]).size !== 3 || key() !== k0) fail('art: road key misses a change');
+  // ...and with a lane connection (the cached lane arrows); the scene key with a building's model, an emptied home or abandonment
+  const p0 = J2.plan, pl = planOf(J2);
+  J2.plan = { ...pl, lanes: pl.approaches.map(() => [7]) };
+  const k4 = key();
+  J2.plan = p0;
+  if (k4 === k0 || key() !== k0) fail('art: road key misses a lane connection');
+  const b0 = game.buildings.find(b => b.kind === 'home') ?? fail('art: no home'), sk = (): number => sceneKey(game.buildings, game.lots);
+  const s0 = sk(), tier = b0.tier, res = b0.residents;
+  b0.abandoned = true;
+  const s1 = sk();
+  b0.abandoned = false;
+  b0.tier = tier === 2 ? 3 : 2;
+  const s2 = sk();
+  b0.tier = tier;
+  b0.residents = res < 1 ? 5 : 0;
+  const s3 = sk();
+  b0.residents = res;
+  if (sk() !== s0 || [s1, s2, s3].includes(s0)) fail('art: scene key misses a change');
 }
 // Save: the main run (cars on the road, light plans, a roundabout) round-trips to the same JSON; its cars' trips wait at their doors
 // again, and the loaded game runs 60s within the car invariants and gets trips through

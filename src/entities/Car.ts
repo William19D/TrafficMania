@@ -108,7 +108,7 @@ export class Car {
 
     // Past the last lane change in a lane whose arrows don't allow the next move: a route its arrows do allow
     // ponytail: none (a dead end behind the arrows) keeps the route and takes the turn from the wrong lane
-    if (!isDest && this.path && remaining < LC_M && !graph.arrowLanes(lane.edge, lane.from, this.path[1])?.includes(lane) && graph.arrows(lane) !== ANY)
+    if (!isDest && this.path && remaining < LC_M && graph.arrows(lane) !== ANY && !graph.arrowLanes(lane.edge, lane.from, this.path[1])?.includes(lane))
       this.path = findPath(graph, node, this.dest.node, null, false, lane.edge, graph.arrows(lane)) ?? this.path;
 
     let nextLane: Lane | null = null;

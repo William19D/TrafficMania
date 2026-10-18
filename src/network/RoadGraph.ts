@@ -29,6 +29,7 @@ export const AMB_R = 60;
 export const LANE_W = 9;
 export interface RoadType { tier: Tier; lanes: 1 | 2 | 3; oneWay: boolean }
 export const DEFAULT_TYPE: RoadType = { tier: 'street', lanes: 1, oneWay: false };
+const NO_LANES: Lane[] = [], NO_CARS: Car[] = [], NO_LANE_SET: ReadonlySet<Lane> = new Set();
 // Half the median: how far a two-way road's lanes sit out from the centre line
 const halfMedian = (t: RoadType): number => t.oneWay ? 0 : TIERS[t.tier].median / 2;
 export const roadWidth = (t: RoadType): number => t.lanes * (t.oneWay ? 1 : 2) * LANE_W + 2 * TIERS[t.tier].shoulder + 2 * halfMedian(t);
@@ -89,6 +90,7 @@ export interface Edge {
   exit: boolean; // a piece of a highway exit's stub (a split keeps it): free, no upkeep, no refund, never demolished
   heat: number; // congestion EMA 0..1: the larger of density and slowness (1 - speed / top speed) of its cars
   ring: Ring | null; // a roundabout's ring road: free, part of the control
+  fwd: Lane[]; back: Lane[]; // lanes from a / from b (lanesFrom), rebuilt with the lanes
 }
 
 // A roundabout: one-way ring edges joining its nodes counter-clockwise on screen (nodes[i] -> nodes[i + 1]); the cars entering from an
@@ -123,7 +125,7 @@ export class RoadGraph {
   shut: Set<Edge> = new Set();
   slow: Map<Edge, number> = new Map();
   wet = 1;
-  speedX(e: Edge): number { return this.wet * (this.slow.get(e) ?? 1); }
+  speedX(e: Edge): number { return this.slow.size ? this.wet * (this.slow.get(e) ?? 1) : this.wet; }
   rings: Ring[] = [];
   private nextId = 1;
 
@@ -163,6 +165,8 @@ export class RoadGraph {
       if (t.oneWay) e.lanes.push(lane(e.a, e.b, (k - (t.lanes - 1) / (e.ring ? 1 : 2)) * LANE_W));
       else e.lanes.push(lane(e.a, e.b, (k + 0.5) * LANE_W + m), lane(e.b, e.a, (k + 0.5) * LANE_W + m));
     }
+    e.fwd = e.lanes.filter(l => l.from === e.a);
+    e.back = e.lanes.filter(l => l.from === e.b);
   }
 
   // Unlinks the edge without deleting nodes
@@ -273,12 +277,13 @@ export class RoadGraph {
   }
 
   edgeBetween(a: Node, b: Node): Edge | null {
-    return a.edges.find(e => !this.hidden.has(e) && ((e.a === a && e.b === b) || (e.a === b && e.b === a))) ?? null;
+    for (const e of a.edges) if (((e.a === a && e.b === b) || (e.a === b && e.b === a)) && !(this.hidden.size && this.hidden.has(e))) return e;
+    return null;
   }
 
-  // Lanes travelling away from 'from'; [] when the road is one-way against
+  // Lanes travelling away from 'from'; [] when the road is one-way against. Shared arrays: never mutate the result
   lanesFrom(e: Edge, from: Node): Lane[] {
-    return e.lanes.filter(l => l.from === from);
+    return from === e.a ? e.fwd : from === e.b ? e.back : NO_LANES;
   }
 
   // Turn at the first junction from path[j] on (inner nodes of a bent road don't count): 1 right, -1 left or U-turn, 0 straight / none
@@ -289,9 +294,9 @@ export class RoadGraph {
       const p = path[j - 1] ?? from!, q = path[j + 1]!;
       // a ring's nodes: the turn that counts is the one past the roundabout, but onto a ring of 2+ lanes the arm's right lane goes to the
       // first exit (the ring's outer lane), its left lane further round (ringGoal)
-      const e = onRing(n) && !this.edgeBetween(p, n)?.ring ? this.edgeBetween(n, q) : null;
+      const ring = onRing(n), e = ring && !this.edgeBetween(p, n)?.ring ? this.edgeBetween(n, q) : null;
       if (e?.ring && e.lanes.length > 1) { const g = this.ringGoal(path.slice(j), e); return g === e.lanes.length - 1 ? 1 : g ? 0 : -1; }
-      if ((!n.building && n.edges.length === 2 && n.control === 'none') || onRing(n)) continue;
+      if ((!n.building && n.edges.length === 2 && n.control === 'none') || ring) continue;
       if (this.drivewayJunction(n) && !this.edgeBetween(p, n)?.drive && !this.edgeBetween(n, q)?.drive) continue;
       return turnAt(p, n, q);
     }
@@ -305,8 +310,10 @@ export class RoadGraph {
   }
   // Lanes of e from 'from' whose arrows allow going on to q at its far end; null when that node has no arrows for e
   arrowLanes(e: Edge, from: Node, q: Node | undefined): Lane[] | null {
-    const n = e.a === from ? e.b : e.a, out = q && this.edgeBetween(n, q);
-    if (!out || !n.plan || !laneMasks(n.plan, n, e)) return null;
+    const n = e.a === from ? e.b : e.a;
+    if (!q || !n.plan) return null;
+    const out = this.edgeBetween(n, q);
+    if (!out || !laneMasks(n.plan, n, e)) return null;
     const mv = moveOf(n, e, out);
     return this.lanesFrom(e, from).filter(l => this.arrows(l) >> mv & 1);
   }
@@ -454,7 +461,10 @@ export class RoadGraph {
 
   // A plain node where driveways meet one road (two road arms): driveway cars merge (update), the road does not stop for it
   drivewayJunction(n: Node): boolean {
-    return n.control === 'none' && !n.building && n.edges.length >= 3 && n.edges.filter(e => !e.drive).length === 2;
+    if (n.control !== 'none' || n.building || n.edges.length < 3) return false;
+    let k = 0;
+    for (const e of n.edges) if (!e.drive) k++;
+    return k === 2;
   }
 
   // The merge of driveway car m at n meets road edge e's lanes into n (into) or out of it: a right turn only meets the traffic
@@ -706,12 +716,21 @@ export class RoadGraph {
       e.heat += (Math.min(1, x) - e.heat) * k;
     }
     for (const n of this.nodes) {
-      n.queue = n.queue.filter(c => c.lane.to === n);
-      n.delay += ((n.queue.length ? n.queue.reduce((s, c) => s + c.wait, 0) / n.queue.length : 0) - n.delay) * k;
+      // drop cars no longer heading here, in place, and sum the waits
+      const Q = n.queue;
+      let j = 0, w = 0, amb: Car[] = NO_CARS;
+      for (const c of Q) if (c.lane.to === n) {
+        Q[j++] = c;
+        w += c.wait;
+        if (c.kind === 'ambulance' && c.exit) (amb === NO_CARS ? amb = [] : amb).push(c);
+      }
+      Q.length = j;
+      n.delay += ((j ? w / j : 0) - n.delay) * k;
+      if (!j && n.control !== 'light') continue;
       const plan = n.control === 'light' || n.control === 'yield' || n.plan ? planOf(n) : null;
       // Ambulance (game-v3 3): its whole lane goes first (a stable sort keeps the cars ahead of it in order); a light turns green for it
       // when it is AMB_R out, a yield treats it as the main road, a stop lets it roll
-      const amb = n.queue.filter(c => c.kind === 'ambulance' && c.exit), ambL = new Set(amb.map(c => c.lane));
+      const ambL = amb.length ? new Set(amb.map(c => c.lane)) : NO_LANE_SET;
       if (ambL.size) n.queue.sort((p, q) => +ambL.has(q.lane) - +ambL.has(p.lane));
       if (n.control === 'light') {
         const ph = plan!.phases;
@@ -778,12 +797,13 @@ export class RoadGraph {
         if (plain) return ![...n.occupants, ...ready].some(o => this.crosses(n, c, o));
         return true;
       };
-      const held = new Set<Lane>(), ready: Car[] = [];
+      // may() reads n.queue: it stays the whole queue until every car is decided
+      const held: Lane[] = [], ready: Car[] = [];
       n.queue = n.queue.filter(c => {
-        const free = !held.has(c.lane) && this.fits(n, c);
+        const free = !held.includes(c.lane) && this.fits(n, c);
         if (!free || n.occupants.size >= cap || !may(c)) {
           if (free) ready.push(c);
-          held.add(c.lane);
+          held.push(c.lane);
           return true;
         }
         this.grant(n, c);

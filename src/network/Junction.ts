@@ -37,10 +37,17 @@ export function turnAt(p: { x: number; y: number }, n: { x: number; y: number },
 // Movement into n by edge 'in' and out by edge 'out'
 export const moveOf = (n: Node, inE: Edge, out: Edge): Move => (turnAt(other(n, inE), n, other(n, out)) + 1) as Move;
 
+// Memoised per plan object and edge: node positions never move and a plan's approaches are never edited in place (edits replace the plan)
+const approachMemo = new WeakMap<JunctionPlan, { n: Node; m: Map<Edge, number> }>();
 export function approachOf(p: JunctionPlan, n: Node, e: Edge): number {
+  let c = approachMemo.get(p);
+  if (!c) approachMemo.set(p, c = { n, m: new Map() });
+  const hit = c.n === n ? c.m.get(e) : undefined;
+  if (hit !== undefined) return hit;
   const a = edgeAngle(n, e);
   let best = 0;
   p.approaches.forEach((x, i) => { if (diff(x, a) < diff(p.approaches[best], a)) best = i; });
+  if (c.n === n) c.m.set(e, best);
   return best;
 }
 // The approach most opposite i (more than 150 degrees away), or -1
@@ -66,8 +73,16 @@ export function defaultPlan(n: Node): JunctionPlan {
   return { approaches, phases: presetPhases(approaches, 'two'), ban: grid(approaches.length, false) };
 }
 
-// ponytail: the default is rebuilt on every call (a few tiny arrays per light per tick); cache it on the node if lights ever show in a profile
-export const planOf = (n: Node): JunctionPlan => n.plan ?? defaultPlan(n);
+// The default plan is cached per node until its roads change (addEdge pushes onto n.edges, unlink replaces the array); callers never edit it
+const defaults = new WeakMap<Node, { edges: Edge[]; k: number; p: JunctionPlan }>();
+export const planOf = (n: Node): JunctionPlan => {
+  if (n.plan) return n.plan;
+  const c = defaults.get(n);
+  if (c && c.edges === n.edges && c.k === n.edges.length) return c.p;
+  const p = defaultPlan(n);
+  defaults.set(n, { edges: n.edges, k: n.edges.length, p });
+  return p;
+};
 export const clonePlan = (p: JunctionPlan): JunctionPlan => JSON.parse(JSON.stringify(p)) as JunctionPlan;
 
 // The node's roads still match its plan's approaches: one edge per approach, each within 15 degrees
