@@ -1,4 +1,4 @@
-// Browser performance benchmark: npm run bench [-- --secs 8]
+// Browser performance benchmark: npm run bench [-- --secs 8] [-- --quality high|medium|low|auto] (default high: Auto would move mid-run)
 // Starts Vite (or reuses this project's dev server on :5173), launches headless Chrome with the GPU, restores
 // scripts/fixtures/bench-city.json and times game.update / renderer.render / hud.update per scenario. Writes bench-results.json.
 import { spawn, execFileSync } from 'node:child_process';
@@ -10,6 +10,7 @@ import path from 'node:path';
 const ROOT = path.resolve(import.meta.dirname, '..');
 const CHROME = process.env.CHROME ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const SECS = Number(process.argv[process.argv.indexOf('--secs') + 1]) || 8;
+const QUALITY = process.argv.includes('--quality') ? process.argv[process.argv.indexOf('--quality') + 1] : 'high';
 const PREROLL = 60 * 45; // 45 game seconds at the game's 1/60 s step: ~300 cars on the fixture
 const SAVE = fs.readFileSync(path.join(ROOT, 'scripts/fixtures/bench-city.json'), 'utf8');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -63,11 +64,11 @@ try {
   await send('Page.enable'); await send('Runtime.enable'); await send('Profiler.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   // ?seed= starts a game at once, without the menu
-  await send('Page.navigate', { url: base + '/?seed=bench' });
+  await send('Page.navigate', { url: base + '/?seed=bench&quality=' + QUALITY });
   await until(() => evaluate('!!window.game && !!window.renderer && !!window.hud'), 30000, 'game boot');
   const gpu = await evaluate(`(() => { const gl = document.createElement('canvas').getContext('webgl'); const x = gl?.getExtension('WEBGL_debug_renderer_info');
     return x ? gl.getParameter(x.UNMASKED_RENDERER_WEBGL) : 'no webgl' })()`);
-  console.log('GPU', gpu);
+  console.log('GPU', gpu, '| quality', QUALITY);
   if (/swiftshader|llvmpipe|software/i.test(gpu)) console.warn('WARNING: software rendering, numbers are not the real GPU');
 
   await evaluate(`window.__save = ${JSON.stringify(SAVE)}; (async () => {
@@ -138,7 +139,7 @@ try {
   for (const s of scenarios) console.log(`${s.label.padEnd(18)}${cols.map(c => String(s[c]).padStart(9)).join('')}`);
   console.log('\npaused frame census', JSON.stringify(census));
   for (const s of scenarios) console.log(`\n-- ${s.label} top self time\n  ${s.top.join('\n  ')}`);
-  const out = { date: new Date().toISOString(), gpu, secs: SECS, city, scenarios, census };
+  const out = { date: new Date().toISOString(), gpu, quality: QUALITY, secs: SECS, city, scenarios, census };
   fs.writeFileSync(path.join(ROOT, 'bench-results.json'), JSON.stringify(out, null, 1));
   console.log('\nwrote bench-results.json');
   await send('Browser.close').catch(() => {});

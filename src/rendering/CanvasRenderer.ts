@@ -19,6 +19,8 @@ import { grain, netKey, sceneKey } from './RoadArt.ts';
 import { BEAM_L, BEAM_W, GLOW_R, beam, daylight, glow } from './Lighting.ts';
 import type { Daylight } from './Lighting.ts';
 import { GLASS, VH, VPAD, VW, farShapes, paintOf, vehicle, vshadow } from './VehicleArt.ts';
+import { pxRatio } from './Quality.ts';
+import type { Level } from './Quality.ts';
 
 const ROAD_OUT = '#9E9E9A';
 const ROAD_FILL = '#FFFFFF';
@@ -80,6 +82,9 @@ export class CanvasRenderer {
   // This frame's world transform (px per world px, offset) and the world rect in view
   private wt: [number, number, number] = [1, 0, 0];
   private view = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  // graphics level (Quality.ts), set by the game loop
+  quality: Level = 'high';
+  private get px(): number { return pxRatio(devicePixelRatio, this.quality); }
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -103,7 +108,7 @@ export class CanvasRenderer {
   }
 
   resize(): void {
-    const dpr = devicePixelRatio || 1;
+    const dpr = this.px;
     this.canvas.width = Math.round(innerWidth * dpr);
     this.canvas.height = Math.round(innerHeight * dpr);
     this.canvas.style.width = innerWidth + 'px';
@@ -167,7 +172,7 @@ export class CanvasRenderer {
 
   render(game: Game, preview: PathPlan | null, anchor: Vec | null, handle: Vec | null, hover: Vec | null = null): void {
     const ctx = this.ctx;
-    const dpr = devicePixelRatio || 1;
+    const dpr = this.px;
     // the viewport can change without a resize event (a page loaded hidden at 0x0, then shown)
     if (this.canvas.width !== Math.round(innerWidth * dpr) || this.canvas.height !== Math.round(innerHeight * dpr)) this.resize();
     // still 0x0: nothing to draw, and a 0 zoom would make a 0px ground canvas whose drawImage throws and stops the game loop
@@ -281,7 +286,7 @@ export class CanvasRenderer {
     this.pending(shown);
     for (const b of shown) this.smoke(b, game.time);
     this.exits(game, true);
-    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view);
+    if (z >= 0.8) pedestrians(ctx, ground.filter(walked), game.hour, now, view, this.quality === 'high' ? 140 : this.quality === 'medium' ? 60 : 30);
     carsAt(0);
 
     // Elevated layers, lowest first: each covers the roads and cars below it; the first one cached with every deck's ground shadow
@@ -298,8 +303,8 @@ export class CanvasRenderer {
     }
 
     // Ambience over every level: cloud shadows drifting over the ground, birds above them
-    if (game.overlay === 'none') cloudShadows(ctx, now, view);
-    if (k >= 0.5) birds(ctx, now, view);
+    if (game.overlay === 'none' && this.quality !== 'low') cloudShadows(ctx, now, view);
+    if (k >= 0.5 && this.quality === 'high') birds(ctx, now, view);
 
     // Day/night: the world under a multiply tint from the clock (not under an overlay, which must read true), then the night's
     // lamps, windows and headlights over it; labels and tool hints below stay untinted
@@ -544,7 +549,7 @@ export class CanvasRenderer {
     ctx.fillRect(0, 0, W, H);
     if (ev.base) {
       ctx.strokeStyle = 'rgba(210,225,245,0.45)';
-      ctx.lineWidth = 1.2 * (devicePixelRatio || 1);
+      ctx.lineWidth = 1.2 * this.px;
       ctx.beginPath();
       // ponytail: 160 streaks on a fixed lattice scrolled by time; no splashes
       for (let i = 0; i < 160; i++) {
@@ -1586,7 +1591,7 @@ export class CanvasRenderer {
   private cars(game: Game, cs: Car[]): void {
     const ctx = this.ctx, [K, tx, ty] = this.wt, s = this.artS, ps = cs.map(c => game.graph.carPos(c));
     for (let i = 0; i < cs.length; i++) { this.seen.push(cs[i]); this.seenAt.push(ps[i]); }
-    if (K < FAR) { this.farCars(game, cs, ps); return; }
+    if (K < FAR || this.quality === 'low') { this.farCars(game, cs, ps); return; }
     for (let i = 0; i < cs.length; i++) {
       const p = ps[i], k = cs[i].kind, sh = vshadow(k, s), c = K * Math.cos(p.angle), sn = K * Math.sin(p.angle);
       ctx.setTransform(c, sn, -sn, c, tx + K * (p.x + 1.2), ty + K * (p.y + 1.8));
